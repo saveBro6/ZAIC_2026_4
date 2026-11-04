@@ -11,6 +11,7 @@ dependencies = [
     "datasketch>=2.0.0",
     "fastexcel>=0.21.0",
     "polars>=2.1.0",
+    "unidecode>=1.4.0",
 ]
 
 [project.scripts]

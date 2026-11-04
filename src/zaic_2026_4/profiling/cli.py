@@ -7,6 +7,7 @@ import sys
 import time
 from typing import Any
 
+from zaic_2026_4.profiling.lsh_indexer import VietnameseLSHIndexer
 from zaic_2026_4.profiling.profile_summarizer import (
     DEFAULT_LOCAL_GPU_UTIL,
     DEFAULT_LOCAL_MODEL,
@@ -16,6 +17,12 @@ from zaic_2026_4.profiling.profile_summarizer import (
     create_engine,
 )
 from zaic_2026_4.profiling.raw_profiler import RawDatabaseProfiler
+from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
+    DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
+    MockEmbedder,
+    SemanticVectorIndexer,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -113,6 +120,78 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to business README.md or directory containing README.md.",
     )
+
+    # Module 3 Vietnamese LSH Indexer arguments
+    parser.add_argument(
+        "--build-lsh",
+        action="store_true",
+        help="Build Vietnamese LSH index over database column samples.",
+    )
+    parser.add_argument(
+        "--lsh-threshold",
+        type=float,
+        default=0.4,
+        help="LSH MinHash Jaccard threshold (default: 0.4).",
+    )
+    parser.add_argument(
+        "--lsh-path",
+        type=str,
+        default=None,
+        help="Path to save or load the LSH index pickle file.",
+    )
+    parser.add_argument(
+        "--query-lsh",
+        type=str,
+        default=None,
+        help="Literal query text to match against the LSH index (e.g. 'Sting dâu').",
+    )
+
+    # Module 4 Offline FAISS Semantic Vector Indexer arguments
+    parser.add_argument(
+        "--build-vector",
+        action="store_true",
+        help="Build offline FAISS semantic vector index over columns and rules.",
+    )
+    parser.add_argument(
+        "--vector-model",
+        type=str,
+        default=DEFAULT_VECTOR_MODEL_PATH,
+        help=(
+            f"Path or identifier for BGE-M3 model weights (default: {DEFAULT_VECTOR_MODEL_PATH})."
+        ),
+    )
+    parser.add_argument(
+        "--vector-max-len",
+        type=int,
+        default=DEFAULT_VECTOR_MAX_LENGTH,
+        help=(
+            f"Maximum token length for FlagEmbedding BGEM3FlagModel "
+            f"(default: {DEFAULT_VECTOR_MAX_LENGTH})."
+        ),
+    )
+    parser.add_argument(
+        "--vector-path",
+        type=str,
+        default=None,
+        help="Directory path to save or load the FAISS vector index.",
+    )
+    parser.add_argument(
+        "--query-vector",
+        type=str,
+        default=None,
+        help="Natural language query for semantic vector search against columns and rules.",
+    )
+    parser.add_argument(
+        "--mock-embedder",
+        action="store_true",
+        help="Use deterministic offline MockEmbedder without loading GPU/CPU model weights.",
+    )
+    parser.add_argument(
+        "--rulebook",
+        type=str,
+        default=None,
+        help="Path to rulebook.md for vector indexing.",
+    )
     return parser
 
 
@@ -133,6 +212,30 @@ def _find_readme_text(db_path: Path, explicit_readme: str | None) -> str:
     # Check standard dataset layout dataset/train/data/<biz_stem>/README.md
     for root in (Path("dataset/train/data"), Path("dataset/public_test/data")):
         candidate = root / db_path.stem / "README.md"
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+
+    return ""
+
+
+def _find_rulebook_text(db_path: Path, explicit_rulebook: str | None) -> str:
+    """Find and read rulebook.md if available."""
+    if explicit_rulebook:
+        p = Path(explicit_rulebook)
+        if p.is_dir():
+            p = p / "rulebook.md"
+        if p.is_file():
+            return p.read_text(encoding="utf-8")
+
+    # Check database parent folder and ancestors
+    for parent in (db_path.parent, db_path.parent.parent, db_path.parent.parent.parent):
+        candidate = parent / "rulebook.md"
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+
+    # Check standard dataset layout
+    for root in (Path("dataset/train"), Path("dataset/public_test"), Path("dataset")):
+        candidate = root / "rulebook.md"
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8")
 
@@ -181,6 +284,75 @@ def profile_single_db(
         result["metadata_profile"] = summarized
         sum_elapsed = time.perf_counter() - t_sum_start
         print(f"Generated LLM summaries for {len(summarized)} columns in {sum_elapsed:.3f}s.")
+
+    # Module 3 Vietnamese LSH Indexing
+    lsh_indexer: VietnameseLSHIndexer | None = None
+    if args.build_lsh or args.query_lsh:
+        t_lsh_start = time.perf_counter()
+        lsh_indexer = VietnameseLSHIndexer(
+            threshold=args.lsh_threshold,
+            num_perm=args.num_perm,
+        )
+        meta_source = result.get("metadata_profile") or raw_profile
+        indexed_items = lsh_indexer.build_index(meta_source)
+        lsh_elapsed = time.perf_counter() - t_lsh_start
+        print(f"Built Vietnamese LSH index with {indexed_items} literal items in {lsh_elapsed:.3f}s.")
+
+        lsh_out = None
+        if args.lsh_path:
+            lsh_out = Path(args.lsh_path)
+        elif output_path:
+            lsh_out = output_path.with_name(f"{output_path.stem}_lsh.pkl")
+
+        if lsh_out:
+            lsh_indexer.save(lsh_out)
+            print(f"LSH index saved to: {lsh_out}")
+
+    if args.query_lsh and lsh_indexer is not None:
+        matches = lsh_indexer.query_literal_with_scores(args.query_lsh, top_k=5)
+        print(f"Query '{args.query_lsh}' matches:")
+        for col, val, score in matches:
+            print(f"  - [{score:.3f}] {col} -> '{val}'")
+
+    # Module 4 Offline FAISS Semantic Vector Indexing
+    vector_indexer: SemanticVectorIndexer | None = None
+    if args.build_vector or args.query_vector:
+        t_vec_start = time.perf_counter()
+        embedder = MockEmbedder() if args.mock_embedder else None
+        vector_indexer = SemanticVectorIndexer(
+            model_path=args.vector_model,
+            embedder=embedder,
+            max_length=args.vector_max_len,
+        )
+        meta_source = result.get("metadata_profile") or raw_profile
+        rulebook_text = _find_rulebook_text(db_path, args.rulebook)
+        readme_text = _find_readme_text(db_path, args.readme)
+
+        indexed_docs = vector_indexer.build_index(
+            processed_metadata=meta_source,
+            rulebook_text=rulebook_text,
+            readme_text=readme_text,
+        )
+        vec_elapsed = time.perf_counter() - t_vec_start
+        print(
+            f"Built FAISS vector index with {indexed_docs} docs in {vec_elapsed:.3f}s."
+        )
+
+        vec_out = None
+        if args.vector_path:
+            vec_out = Path(args.vector_path)
+        elif output_path:
+            vec_out = output_path.parent / f"{output_path.stem}_faiss"
+
+        if vec_out:
+            vector_indexer.save(vec_out)
+            print(f"FAISS vector index saved to: {vec_out}")
+
+    if args.query_vector and vector_indexer is not None:
+        hits = vector_indexer.search_similar_schema(args.query_vector, top_k=5)
+        print(f"Query '{args.query_vector}' top semantic matches:")
+        for hit in hits:
+            print(f"  - [{hit['score']:.3f}] ({hit['type']}) {hit['key']}")
 
     # Save to JSON
     if output_path is not None:
