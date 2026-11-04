@@ -1,4 +1,4 @@
-"""Unit tests for Module 4: SemanticVectorIndexer and MockEmbedder."""
+"""Unit tests for Module 4: SemanticVectorIndexer, MockEmbedder, and Hierarchical Chunking."""
 
 from pathlib import Path
 import json
@@ -8,11 +8,16 @@ import pytest
 from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_EMBEDDING_DIM,
+    DEFAULT_MAX_CHUNK_CHARS,
     DEFAULT_MAX_LENGTH,
+    DEFAULT_MIN_CHUNK_CHARS,
     DEFAULT_MODEL_PATH,
     DEFAULT_TOP_K,
+    MIN_TABLE_ROWS_FOR_SPLIT,
     MockEmbedder,
     SemanticVectorIndexer,
+    parse_markdown_hierarchical,
+    recursive_split_paragraph,
 )
 
 
@@ -65,6 +70,115 @@ def test_indexer_initialization_with_mock() -> None:
     assert indexer.max_length == DEFAULT_MAX_LENGTH
 
 
+def test_recursive_split_paragraph_under_threshold() -> None:
+    """Verify text <= max_chars is preserved as a single chunk without splitting."""
+    text = "Đơn tính vào doanh thu là đơn không huỷ và không trả hàng."
+    chunks = recursive_split_paragraph(text, max_chars=1000)
+    assert len(chunks) == 1
+    assert chunks[0] == text
+
+
+def test_recursive_split_paragraph_delimiters_priority() -> None:
+    """Verify recursive splitting respects priority delimiters and never cuts words in half."""
+    # Create long text exceeding 1000 chars composed of distinct sentences
+    sentence = "Đây là một câu hoàn chỉnh về nghiệp vụ bán lẻ của cửa hàng tạp hóa. "
+    long_text = sentence * 25  # ~1725 chars
+    chunks = recursive_split_paragraph(long_text, max_chars=1000)
+
+    assert len(chunks) >= 2
+    for chunk in chunks:
+        assert len(chunk) <= 1000
+        # Ensure sentence boundary was used and no word was truncated mid-letter
+        assert chunk.endswith(".")
+
+
+def test_parse_markdown_hierarchical_table_threshold_small() -> None:
+    """Verify tables with <= 3 rows are NOT split row-by-row and kept as 1 block."""
+    table_text = """## Thông tin chi nhánh
+| Mã CN | Tên chi nhánh |
+|---|---|
+| CN01 | Quận 1 |
+| CN02 | Quận 3 |
+"""
+    # Total rows = 1 header + 2 data rows = 3 rows (<= 3)
+    chunks = parse_markdown_hierarchical(
+        table_text, min_chunk_chars=50, min_table_rows_for_split=3
+    )
+    assert len(chunks) == 1
+    assert "| Mã CN | Tên chi nhánh |" in chunks[0]
+    assert "| CN01 | Quận 1 |" in chunks[0]
+    assert "| CN02 | Quận 3 |" in chunks[0]
+
+
+def test_parse_markdown_hierarchical_table_threshold_large() -> None:
+    """Verify tables with > 3 rows ARE decomposed into individual row chunks."""
+    table_text = """## 1. Đơn hàng và doanh thu
+| Luật | Mặc định |
+|---|---|
+| Đơn tính vào doanh thu | đơn không huỷ và không trả hàng |
+| Bán được bao nhiêu tiền | là doanh thu theo mục này |
+| Đơn bị huỷ | đơn có trạng thái huỷ |
+"""
+    # Total rows = 1 header + 3 data rows = 4 rows (> 3)
+    chunks = parse_markdown_hierarchical(table_text, min_table_rows_for_split=3)
+    assert len(chunks) == 3
+    assert chunks[0].startswith("[Mục: 1. Đơn hàng và doanh thu]")
+    assert "Luật: Đơn tính vào doanh thu -> Mặc định: đơn không huỷ và không trả hàng" in chunks[0]
+    assert "Luật: Bán được bao nhiêu tiền -> Mặc định: là doanh thu theo mục này" in chunks[1]
+    assert "Luật: Đơn bị huỷ -> Mặc định: đơn có trạng thái huỷ" in chunks[2]
+
+
+def test_h1_excluded_from_heading_context() -> None:
+    """Verify H1 document title is omitted from heading_ctx to prevent semantic dilution."""
+    text = """# DataMate — Rulebook (bộ train)
+
+## 1. Đơn hàng và doanh thu
+| Luật | Mặc định |
+|---|---|
+| Đơn huỷ | không tính doanh thu |
+| Trả hàng | trừ tiền hàng |
+| Đơn nợ | ghi sổ công nợ |
+| Giảm giá | trừ từng dòng |
+"""
+    chunks = parse_markdown_hierarchical(text, min_table_rows_for_split=3)
+    assert len(chunks) == 4
+    for c in chunks:
+        # Must start with H2, not H1
+        assert c.startswith("[Mục: 1. Đơn hàng và doanh thu]")
+        assert "DataMate — Rulebook" not in c
+
+
+def test_coalescing_buffer_short_paragraphs() -> None:
+    """Verify short paragraphs are accumulated and emitted once min_chunk_chars (150) is reached."""
+    markdown_sample = """# Dữ liệu biz_126
+
+Sổ bán hàng chủ tiệm tự ghi trên Excel, một sheet: mỗi dòng một mặt hàng khách mua, không ghi mã đơn, không ghi tên khách.
+
+## File
+- `SoBanHang.xlsx` (xlsx)
+"""
+    chunks = parse_markdown_hierarchical(markdown_sample, min_chunk_chars=150)
+    # The snippet has ~150 chars total across all lines; should be coalesced without losing SoBanHang.xlsx
+    assert any("SoBanHang.xlsx" in c for c in chunks)
+    for c in chunks:
+        assert len(c) >= 30  # No empty or single-token micro-chunks emitted
+
+
+def test_coalescing_buffer_flush_on_major_heading() -> None:
+    """Verify pending buffer is flushed when an H1 or H2 heading arrives."""
+    text = """## Mục A
+Đoạn ngắn A.
+
+## Mục B
+Đoạn ngắn B.
+"""
+    chunks = parse_markdown_hierarchical(text, min_chunk_chars=150)
+    # Both short paragraphs must be emitted rather than lost due to H2 flush guard
+    assert len(chunks) == 2
+    assert "Đoạn ngắn A." in chunks[0]
+    assert "Đoạn ngắn B." in chunks[1]
+
+
 def test_build_index_column_profiles() -> None:
     """Verify indexing database columns from processed_metadata."""
     embedder = MockEmbedder(dimension=128)
@@ -102,28 +216,28 @@ def test_build_index_column_profiles() -> None:
     assert "Mã định danh khách hàng" in indexer.doc_map[2]["content"]
 
 
-def test_build_index_rulebook_parsing() -> None:
-    """Verify rulebook markdown is parsed into rule clauses."""
+def test_build_index_rulebook_table_parsing() -> None:
+    """Verify rulebook markdown table with > 3 rows is parsed into atomic rule chunks."""
     embedder = MockEmbedder(dimension=128)
     indexer = SemanticVectorIndexer(embedder=embedder)
 
-    rulebook_text = """# DataMate Rulebook
-
-Đơn tính vào doanh thu là đơn không huỷ và không trả hàng. Đơn có trả hàng bỏ cả đơn.
-
-Thời gian: Tuần này bắt đầu từ thứ Hai đến hết ngày as_of_date.
-
-Bán chạy nhất: Tính theo tổng số lượng quy về đơn vị cơ bản.
+    rulebook_text = """## 1. Đơn hàng và doanh thu
+| Luật | Mặc định |
+|---|---|
+| Đơn tính vào doanh thu | đơn không huỷ và không trả hàng. Đơn có trả hàng bỏ cả đơn |
+| Bán được bao nhiêu tiền | là doanh thu theo mục này, không phải tiền khách đã trả |
+| Đơn bị huỷ | đơn có trạng thái huỷ. Đơn trả hàng không phải đơn huỷ |
+| Số đơn | chỉ tính đơn không huỷ, không trả |
 """
 
     doc_count = indexer.build_index(processed_metadata={}, rulebook_text=rulebook_text)
-    assert doc_count == 4  # Header + 3 rule sections
+    assert doc_count == 4
     assert indexer.index.ntotal == 4
 
     rules = [d for d in indexer.doc_map if d["type"] == "rulebook"]
     assert len(rules) == 4
     assert any("không huỷ và không trả hàng" in r["content"] for r in rules)
-    assert any("thứ Hai" in r["content"] for r in rules)
+    assert any("Đơn bị huỷ" in r["content"] for r in rules)
 
 
 def test_build_index_readme_parsing() -> None:
@@ -133,9 +247,9 @@ def test_build_index_readme_parsing() -> None:
 
     readme_text = """# Cửa hàng tạp hóa Cô Ba
 
-Cửa hàng chuyên kinh doanh các mặt hàng tiêu dùng nhanh, bánh kẹo, đồ uống và gia vị.
+Cửa hàng chuyên kinh doanh các mặt hàng tiêu dùng nhanh, bánh kẹo, đồ uống và gia vị cho cư dân khu vực lân cận.
 
-Bảng DonHang lưu trữ toàn bộ các giao dịch phát sinh từ máy tính tiền POS.
+Bảng DonHang lưu trữ toàn bộ các giao dịch phát sinh từ máy tính tiền POS hàng ngày của cửa hàng.
 
 ```markdown
 ignored code block
@@ -145,9 +259,10 @@ ignored code block
     doc_count = indexer.build_index(
         processed_metadata={}, rulebook_text="", readme_text=readme_text
     )
-    assert doc_count >= 2
+    assert doc_count >= 1
     readmes = [d for d in indexer.doc_map if d["type"] == "readme"]
-    assert len(readmes) >= 2
+    assert len(readmes) >= 1
+    assert any("tiêu dùng nhanh" in r["content"] for r in readmes)
 
 
 def test_search_similar_schema_2d_fix() -> None:
@@ -166,7 +281,7 @@ def test_search_similar_schema_2d_fix() -> None:
             "maximal_profile": "Tên sản phẩm hàng hóa hoặc dịch vụ.",
         },
     }
-    rulebook = "Doanh thu là tổng thành tiền các dòng hàng không bị huỷ trả."
+    rulebook = "Doanh thu là tổng thành tiền các dòng hàng không bị huỷ trả phát sinh trong kỳ của cửa hàng."
 
     indexer.build_index(processed_metadata=metadata, rulebook_text=rulebook)
 
@@ -175,7 +290,6 @@ def test_search_similar_schema_2d_fix() -> None:
     for res in results:
         assert "score" in res
         assert isinstance(res["score"], float)
-        # Cosine similarity for unit vectors is in [-1.0, 1.0]
         assert -1.05 <= res["score"] <= 1.05
 
 
@@ -191,7 +305,6 @@ def test_search_padding_index_neg1() -> None:
     )
     assert indexer.index.ntotal == 1
 
-    # Request top_k = 10 when only 1 item exists
     results = indexer.search_similar_schema("query", top_k=10)
     assert len(results) == 1
     assert results[0]["key"] == "Table.Col1"
@@ -206,7 +319,14 @@ def test_search_doc_type_filtering() -> None:
         "DonHang.tien": {"maximal_profile": "Tiền bán hàng hóa."},
         "DonHang.sl": {"maximal_profile": "Số lượng hàng hóa bán ra."},
     }
-    rules = "Quy tắc 1: Đơn huỷ không tính vào doanh thu."
+    rules = """## 1. Doanh thu
+| Luật | Mặc định |
+|---|---|
+| Đơn huỷ | không tính vào doanh thu |
+| Trả hàng | bỏ toàn bộ đơn |
+| Đơn nợ | ghi nhận công nợ |
+| Giảm giá | trừ trên từng dòng |
+"""
     indexer.build_index(processed_metadata=metadata, rulebook_text=rules)
 
     col_results = indexer.search_columns("tiền bán", top_k=5)
@@ -234,7 +354,6 @@ def test_score_no_in_place_mutation() -> None:
     assert "score" not in indexer.doc_map[0]
     res1 = indexer.search_similar_schema("query 1", top_k=1)
     assert "score" in res1[0]
-    # Internal doc_map must remain clean of query-specific score
     assert "score" not in indexer.doc_map[0]
 
 
@@ -248,22 +367,19 @@ def test_persistence_save_load(tmp_path: Path) -> None:
         "Hoadon.id": {"maximal_profile": "Mã định danh hóa đơn."},
         "Hoadon.ngay": {"maximal_profile": "Ngày lập hóa đơn."},
     }
-    rules = "Quy tắc tính doanh thu theo ngày lập hóa đơn."
+    rules = "Quy tắc tính doanh thu theo ngày lập hóa đơn của cửa hàng bán lẻ phát sinh trong kỳ kế toán."
     indexer.build_index(metadata, rulebook_text=rules)
 
-    # Save to directory
     indexer.save(save_dir)
     assert (save_dir / "index.faiss").is_file()
     assert (save_dir / "doc_map.json").is_file()
     assert (save_dir / "vector_meta.json").is_file()
 
-    # Load back with same embedder
     loaded = SemanticVectorIndexer.load(save_dir, embedder=embedder)
     assert loaded.index.ntotal == indexer.index.ntotal
     assert len(loaded.doc_map) == len(indexer.doc_map)
     assert loaded.dimension == 64
 
-    # Queries on original and loaded index must match exactly
     orig_res = indexer.search_similar_schema("hóa đơn", top_k=2)
     load_res = loaded.search_similar_schema("hóa đơn", top_k=2)
     assert len(orig_res) == len(load_res)

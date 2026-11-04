@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Protocol, runtime_checkable
 
 import faiss
@@ -21,6 +22,231 @@ DEFAULT_MAX_LENGTH = 4096
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_TOP_K = 10
 DEFAULT_EMBEDDING_DIM = 1024
+DEFAULT_MAX_CHUNK_CHARS = 1000
+DEFAULT_MIN_CHUNK_CHARS = 150
+MIN_TABLE_ROWS_FOR_SPLIT = 3
+
+
+def recursive_split_paragraph(
+    text: str,
+    max_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    delimiters: list[str] | None = None,
+) -> list[str]:
+    """Recursively split text without cutting words in half using priority delimiters.
+
+    Delimiters are attempted in decreasing priority: ["\n", ".", ",", " "].
+    Guarantees no word is split across chunks and trailing sentence punctuation is preserved.
+    """
+    if delimiters is None:
+        delimiters = ["\n", ".", ",", " "]
+
+    clean_text = text.strip()
+    if len(clean_text) <= max_chars:
+        return [clean_text] if clean_text else []
+
+    # Find highest priority delimiter present in clean_text
+    current_delim = None
+    remaining_delims: list[str] = []
+    for idx, d in enumerate(delimiters):
+        if d in clean_text:
+            current_delim = d
+            remaining_delims = delimiters[idx + 1 :]
+            break
+
+    if current_delim is None:
+        # Fallback if no delimiter can split text
+        return [clean_text[i : i + max_chars] for i in range(0, len(clean_text), max_chars)]
+
+    raw_parts = clean_text.split(current_delim)
+    merged_chunks: list[str] = []
+    current_chunk = ""
+
+    for part in raw_parts:
+        part_clean = part.strip()
+        if not part_clean:
+            continue
+
+        item_to_add = part_clean + (current_delim if current_delim in (".", ",") else "")
+        if len(item_to_add) > max_chars:
+            # Recursively split oversized fragment with lower priority delimiters
+            sub_parts = recursive_split_paragraph(item_to_add, max_chars, remaining_delims)
+            if current_chunk:
+                merged_chunks.append(current_chunk.strip())
+                current_chunk = ""
+            merged_chunks.extend(sub_parts)
+            continue
+
+        joiner = " " if current_delim in (".", ",", " ") else "\n"
+        candidate = f"{current_chunk}{joiner}{item_to_add}" if current_chunk else item_to_add
+        if len(candidate) <= max_chars:
+            current_chunk = candidate
+        else:
+            if current_chunk:
+                merged_chunks.append(current_chunk.strip())
+            current_chunk = item_to_add
+
+    if current_chunk.strip():
+        merged_chunks.append(current_chunk.strip())
+
+    return merged_chunks
+
+
+def parse_markdown_hierarchical(
+    markdown_text: str,
+    max_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    min_chunk_chars: int = DEFAULT_MIN_CHUNK_CHARS,
+    min_table_rows_for_split: int = MIN_TABLE_ROWS_FOR_SPLIT,
+) -> list[str]:
+    """Parse Markdown document into contextualized chunks using hierarchical heading tracking,
+    table row-level decomposition, and buffer coalescing.
+
+    Args:
+        markdown_text: Raw Markdown content (e.g. from rulebook.md or README.md).
+        max_chars: Maximum character length per paragraph chunk before recursive splitting (1000).
+        min_chunk_chars: Minimum character length for coalescing short paragraphs (150).
+        min_table_rows_for_split: Threshold of total table rows (header + data) to trigger row-level splitting (3).
+
+    Returns:
+        List of contextualized chunk strings.
+    """
+    if not markdown_text or not markdown_text.strip():
+        return []
+
+    lines = markdown_text.splitlines()
+    n = len(lines)
+    i = 0
+    current_headings: list[tuple[int, str]] = []
+    chunks: list[str] = []
+    current_buffer = ""
+
+    def _flush_buffer() -> None:
+        nonlocal current_buffer
+        if current_buffer.strip():
+            chunks.append(current_buffer.strip())
+            current_buffer = ""
+
+    while i < n:
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+
+        # 1. Heading detection
+        h_match = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if h_match:
+            level = len(h_match.group(1))
+            title = h_match.group(2).strip()
+
+            # Major section boundary (H1 or H2): flush any pending buffer
+            if level <= 2:
+                _flush_buffer()
+
+            while current_headings and current_headings[-1][0] >= level:
+                current_headings.pop()
+            current_headings.append((level, title))
+            i += 1
+            continue
+
+        # Exclude H1 (level == 1) document titles to prevent semantic dilution across all chunks
+        relevant_headings = [t for lvl, t in current_headings if lvl > 1]
+        heading_ctx = " > ".join(relevant_headings)
+
+        # 2. Markdown Table Detection
+        if (
+            line.startswith("|")
+            and line.endswith("|")
+            and i + 1 < n
+            and "---" in lines[i + 1]
+        ):
+            header_line = line
+            headers = [c.strip() for c in header_line.strip("|").split("|")]
+            sep_line = lines[i + 1]
+            i += 2  # skip header and separator row
+
+            data_lines: list[str] = []
+            while i < n and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                data_lines.append(lines[i].strip())
+                i += 1
+
+            total_rows = 1 + len(data_lines)
+            if total_rows > min_table_rows_for_split:
+                # Flush pending buffer before processing large table
+                _flush_buffer()
+                for row_line in data_lines:
+                    cells = [c.strip() for c in row_line.strip("|").split("|")]
+                    if any(cells):
+                        if len(cells) >= 2 and len(headers) >= 2:
+                            body = f"{headers[0]}: {cells[0]} -> {headers[1]}: {cells[1]}"
+                            if len(cells) > 2 and len(headers) > 2:
+                                extra = "; ".join(
+                                    f"{headers[j]}: {cells[j]}"
+                                    for j in range(2, min(len(headers), len(cells)))
+                                    if cells[j]
+                                )
+                                if extra:
+                                    body += f"; {extra}"
+                        else:
+                            body = "; ".join(
+                                f"{headers[j] if j < len(headers) else 'Cột'}: {cells[j]}"
+                                for j in range(len(cells))
+                                if cells[j]
+                            )
+
+                        chunk = f"[Mục: {heading_ctx}] {body}" if heading_ctx else body
+                        chunks.append(chunk)
+                continue
+            else:
+                # Small table (<= 3 rows): treat as single block
+                table_block = header_line + "\n" + sep_line + "\n" + "\n".join(data_lines)
+                para_to_process = table_block
+        else:
+            # 3. Regular paragraph / list block
+            para_lines = [line]
+            i += 1
+            while (
+                i < n
+                and lines[i].strip()
+                and not re.match(r"^(#{1,6})\s+(.+)$", lines[i].strip())
+                and not (
+                    lines[i].strip().startswith("|")
+                    and "---" in (lines[i + 1 : i + 2] or [""])[0]
+                )
+            ):
+                para_lines.append(lines[i].strip())
+                i += 1
+
+            para_to_process = "\n".join(para_lines).strip()
+
+        # Filter out standalone code block markers
+        if para_to_process.startswith("```") and para_to_process.endswith("```"):
+            continue
+
+        # Process paragraph with buffer coalescing and recursive splitting
+        if len(para_to_process) > max_chars:
+            _flush_buffer()
+            sub_chunks = recursive_split_paragraph(para_to_process, max_chars=max_chars)
+            for sc in sub_chunks:
+                if len(sc) > 10:
+                    chunk = f"[Mục: {heading_ctx}] {sc}" if heading_ctx else sc
+                    chunks.append(chunk)
+        else:
+            item_with_ctx = (
+                f"[Mục: {heading_ctx}] {para_to_process}"
+                if heading_ctx
+                else para_to_process
+            )
+            if current_buffer:
+                current_buffer = f"{current_buffer}\n\n{item_with_ctx}"
+            else:
+                current_buffer = item_with_ctx
+
+            if len(current_buffer) >= min_chunk_chars:
+                chunks.append(current_buffer)
+                current_buffer = ""
+
+    # Flush any remaining buffer at end of document
+    _flush_buffer()
+    return chunks
 
 
 @runtime_checkable
@@ -295,9 +521,14 @@ class SemanticVectorIndexer:
                 "data_format": meta.get("data_format", "STRING"),
             })
 
-        # 2. Embed business rules from rulebook.md
+        # 2. Embed business rules from rulebook.md using hierarchical table-row & buffer chunking
         if rulebook_text and rulebook_text.strip():
-            rules = [r.strip() for r in rulebook_text.split("\n\n") if len(r.strip()) > 10]
+            rules = parse_markdown_hierarchical(
+                rulebook_text,
+                max_chars=DEFAULT_MAX_CHUNK_CHARS,
+                min_chunk_chars=DEFAULT_MIN_CHUNK_CHARS,
+                min_table_rows_for_split=MIN_TABLE_ROWS_FOR_SPLIT,
+            )
             for idx, rule in enumerate(rules):
                 texts.append(rule)
                 self.doc_map.append({
@@ -309,11 +540,12 @@ class SemanticVectorIndexer:
 
         # 3. Embed business context from README.md if provided
         if readme_text and readme_text.strip():
-            sections = [
-                s.strip()
-                for s in readme_text.split("\n\n")
-                if len(s.strip()) > 20 and not s.strip().startswith("```")
-            ]
+            sections = parse_markdown_hierarchical(
+                readme_text,
+                max_chars=DEFAULT_MAX_CHUNK_CHARS,
+                min_chunk_chars=DEFAULT_MIN_CHUNK_CHARS,
+                min_table_rows_for_split=MIN_TABLE_ROWS_FOR_SPLIT,
+            )
             for idx, sec in enumerate(sections):
                 texts.append(sec)
                 self.doc_map.append({

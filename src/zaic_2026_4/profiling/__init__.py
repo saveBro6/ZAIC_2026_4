@@ -31,12 +31,17 @@ from zaic_2026_4.profiling.raw_profiler import (
 from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_BATCH_SIZE as DEFAULT_VECTOR_BATCH_SIZE,
     DEFAULT_EMBEDDING_DIM,
+    DEFAULT_MAX_CHUNK_CHARS,
     DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
+    DEFAULT_MIN_CHUNK_CHARS,
     DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
     DEFAULT_TOP_K as DEFAULT_VECTOR_TOP_K,
+    MIN_TABLE_ROWS_FOR_SPLIT,
     EmbedderProtocol,
     MockEmbedder,
     SemanticVectorIndexer,
+    parse_markdown_hierarchical,
+    recursive_split_paragraph,
 )
 
 __all__ = [
@@ -44,7 +49,9 @@ __all__ = [
     "DatabaseProfile",
     "DEFAULT_LOCAL_GPU_UTIL",
     "DEFAULT_LOCAL_MODEL",
+    "DEFAULT_MAX_CHUNK_CHARS",
     "DEFAULT_MAX_SAMPLE_VALUES",
+    "DEFAULT_MIN_CHUNK_CHARS",
     "DEFAULT_NUM_PERM",
     "DEFAULT_PROD_GPU_UTIL",
     "DEFAULT_PROD_MODEL",
@@ -55,6 +62,7 @@ __all__ = [
     "DEFAULT_VECTOR_MAX_LENGTH",
     "DEFAULT_VECTOR_MODEL_PATH",
     "DEFAULT_VECTOR_TOP_K",
+    "MIN_TABLE_ROWS_FOR_SPLIT",
     "EmbedderProtocol",
     "LLMEngineProtocol",
     "MAXIMAL_PROFILE_PROMPT",
@@ -70,4 +78,6 @@ __all__ = [
     "VietnameseLSHIndexer",
     "compute_minhash",
     "create_engine",
+    "parse_markdown_hierarchical",
+    "recursive_split_paragraph",
 ]
