@@ -1,19 +1,12 @@
 """Unit tests for Module 4: SemanticVectorIndexer, MockEmbedder, and Hierarchical Chunking."""
 
 from pathlib import Path
-import json
+
 import numpy as np
 import pytest
 
 from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_BATCH_SIZE,
-    DEFAULT_EMBEDDING_DIM,
-    DEFAULT_MAX_CHUNK_CHARS,
     DEFAULT_MAX_LENGTH,
-    DEFAULT_MIN_CHUNK_CHARS,
-    DEFAULT_MODEL_PATH,
-    DEFAULT_TOP_K,
-    MIN_TABLE_ROWS_FOR_SPLIT,
     MockEmbedder,
     SemanticVectorIndexer,
     parse_markdown_hierarchical,
@@ -386,3 +379,42 @@ def test_persistence_save_load(tmp_path: Path) -> None:
     for r1, r2 in zip(orig_res, load_res):
         assert r1["key"] == r2["key"]
         assert pytest.approx(r1["score"], 1e-4) == r2["score"]
+
+
+def test_indexer_with_vllm_embed_interface() -> None:
+    """Verify SemanticVectorIndexer works with vLLM-style embedder producing outputs.embedding."""
+    class MockVllmOutput:
+        def __init__(self, vec: list[float]) -> None:
+            class Inner:
+                pass
+            self.outputs = Inner()
+            self.outputs.embedding = vec
+
+    class MockVllmEmbedder:
+        def __init__(self, dim: int = 32) -> None:
+            self.dim = dim
+
+        def embed(self, texts: list[str]) -> list[MockVllmOutput]:
+            results = []
+            for t in texts:
+                # Deterministic pseudo vector
+                val = float(len(t))
+                vec = [val] * self.dim
+                results.append(MockVllmOutput(vec))
+            return results
+
+    embedder = MockVllmEmbedder(dim=32)
+    indexer = SemanticVectorIndexer(embedder=embedder)
+    assert indexer.dimension == 32
+
+    metadata = {
+        "orders.amount": {"maximal_profile": "Order total amount in VND"},
+    }
+    doc_count = indexer.build_index(metadata)
+    assert doc_count >= 1
+    assert indexer.index.ntotal == doc_count
+
+    hits = indexer.search_columns("amount", top_k=1)
+    assert len(hits) == 1
+    assert hits[0]["key"] == "orders.amount"
+    assert "score" in hits[0]

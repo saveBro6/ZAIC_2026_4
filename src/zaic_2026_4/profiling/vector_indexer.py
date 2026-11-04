@@ -1,7 +1,7 @@
 """Module 4: Offline FAISS semantic vector indexer for schema and rule matching.
 
 Embeds Maximal Profiles, dynamic rulebook.md rules, and README business context
-using BAAI/bge-m3 via FlagEmbedding (BGEM3FlagModel) with FP16 acceleration and
+using BAAI/bge-m3 via vLLM (runner="pooling") with FP16 acceleration and
 stores unit-normalized dense vectors in faiss.IndexFlatIP for fast Cosine Similarity.
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import faiss
@@ -24,6 +24,7 @@ DEFAULT_TOP_K = 10
 DEFAULT_EMBEDDING_DIM = 1024
 DEFAULT_MAX_CHUNK_CHARS = 1000
 DEFAULT_MIN_CHUNK_CHARS = 150
+DEFAULT_VLLM_GPU_MEMORY_UTILIZATION = 0.20
 MIN_TABLE_ROWS_FOR_SPLIT = 3
 
 
@@ -320,7 +321,7 @@ class SemanticVectorIndexer:
     """Offline FAISS semantic vector indexer for Vietnamese SMB databases and rulebooks.
 
     Indexes column descriptions (Maximal Profiles), split-wide rulebook clauses,
-    and business README context using FlagEmbedding (BGEM3FlagModel) and FAISS IndexFlatIP.
+    and business README context using BAAI/bge-m3 via vLLM (runner="pooling") and FAISS IndexFlatIP.
     """
 
     def __init__(
@@ -331,21 +332,36 @@ class SemanticVectorIndexer:
         batch_size: int = DEFAULT_BATCH_SIZE,
         max_length: int = DEFAULT_MAX_LENGTH,
         normalize_embeddings: bool = True,
+        gpu_memory_utilization: float | None = None,
+        enforce_eager: bool = True,
     ) -> None:
         """Initialize SemanticVectorIndexer with embedder and FAISS IndexFlatIP.
 
         Args:
             model_path: Path to BGE-M3 model weights or HuggingFace model repo.
             embedder: Optional custom or pre-initialized embedder instance.
-            use_fp16: Whether to enable FP16 inference for FlagEmbedding (default: True if CUDA).
+            use_fp16: Whether to enable FP16 inference (default: True if CUDA).
             batch_size: Batch size for encoding texts.
-            max_length: Maximum token length for BGEM3FlagModel (configured to 4096).
+            max_length: Maximum token length for BGE-M3 (configured to 4096).
             normalize_embeddings: Whether to ensure L2 normalization for Cosine Similarity.
+            gpu_memory_utilization: GPU memory fraction for vLLM pooling runner (default: 0.20).
+            enforce_eager: Whether to enforce eager mode for vLLM to skip compilation warmup.
         """
         self.model_path = model_path
         self.batch_size = batch_size
         self.max_length = max_length
         self.normalize_embeddings = normalize_embeddings
+        self.gpu_memory_utilization = (
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
+            else float(
+                os.environ.get(
+                    "VLLM_EMBEDDING_GPU_MEMORY_UTILIZATION",
+                    DEFAULT_VLLM_GPU_MEMORY_UTILIZATION,
+                )
+            )
+        )
+        self.enforce_eager = enforce_eager
 
         # 1. Initialize or assign embedder
         if embedder is not None:
@@ -365,17 +381,14 @@ class SemanticVectorIndexer:
     def _load_bgem3_model(
         self, model_path: str, use_fp16: bool | None
     ) -> Any:
-        """Safely import and initialize FlagEmbedding BGEM3FlagModel with GPU/CPU fallback."""
+        """Safely import and initialize vLLM pooling runner for BGE-M3."""
         try:
-            import torch
-            from FlagEmbedding import BGEM3FlagModel
+            from vllm import LLM
         except ImportError as err:
             raise ImportError(
-                "FlagEmbedding is required for SemanticVectorIndexer. "
-                "Ensure flagembedding and torch are installed."
+                "vLLM is required for SemanticVectorIndexer. "
+                "Ensure vllm is installed."
             ) from err
-
-        fp16_enabled = use_fp16 if use_fp16 is not None else torch.cuda.is_available()
 
         # Check local folder existence or environment variable override
         effective_path = os.environ.get("EMBEDDING_MODEL_PATH", model_path)
@@ -383,10 +396,12 @@ class SemanticVectorIndexer:
             # If path doesn't exist locally, try standard repo ID fallback
             effective_path = model_path if "/" in model_path and not model_path.startswith("/") else "BAAI/bge-m3"
 
-        return BGEM3FlagModel(
-            effective_path,
-            use_fp16=fp16_enabled,
-            normalize_embeddings=self.normalize_embeddings,
+        return LLM(
+            model=effective_path,
+            runner="pooling",
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            enforce_eager=self.enforce_eager,
+            trust_remote_code=True,
         )
 
     def _detect_dimension(self) -> int:
@@ -400,7 +415,7 @@ class SemanticVectorIndexer:
         try:
             probe = self._encode_texts(["probe"])
             return int(probe.shape[1])
-        except Exception:
+        except (AttributeError, ValueError, TypeError, RuntimeError):
             return DEFAULT_EMBEDDING_DIM
 
     def _encode_texts(self, texts: list[str]) -> np.ndarray:
@@ -408,19 +423,38 @@ class SemanticVectorIndexer:
         if not texts:
             return np.zeros((0, self.dimension), dtype=np.float32)
 
-        out = self.embedder.encode(
-            texts,
-            batch_size=self.batch_size,
-            max_length=self.max_length,
-            return_dense=True,
-        )
+        if hasattr(self.embedder, "embed"):
+            # vLLM native pooling API: returns list[PoolingRequestOutput] or list[EmbeddingRequestOutput]
+            outputs = self.embedder.embed(texts)
+            vectors: list[list[float] | np.ndarray] = []
+            for item in outputs:
+                if hasattr(item, "outputs") and hasattr(item.outputs, "embedding"):
+                    vectors.append(item.outputs.embedding)
+                elif hasattr(item, "outputs") and hasattr(item.outputs, "data"):
+                    vectors.append(item.outputs.data)
+                elif hasattr(item, "embedding"):
+                    vectors.append(item.embedding)
+                else:
+                    raise ValueError(f"Unrecognized vLLM embedder output format: {type(item)}")
+            vecs = np.asarray(vectors, dtype=np.float32)
+        elif hasattr(self.embedder, "encode"):
+            out = self.embedder.encode(
+                texts,
+                batch_size=self.batch_size,
+                max_length=self.max_length,
+                return_dense=True,
+            )
 
-        if isinstance(out, dict) and "dense_vecs" in out:
-            vecs = out["dense_vecs"]
-        elif isinstance(out, np.ndarray):
-            vecs = out
+            if isinstance(out, dict) and "dense_vecs" in out:
+                vecs = out["dense_vecs"]
+            elif isinstance(out, np.ndarray):
+                vecs = out
+            else:
+                vecs = np.asarray(out, dtype=np.float32)
         else:
-            vecs = np.asarray(out, dtype=np.float32)
+            raise TypeError(
+                f"Embedder of type {type(self.embedder)} does not support 'embed' or 'encode'."
+            )
 
         vecs = np.asarray(vecs, dtype=np.float32)
 
@@ -651,7 +685,7 @@ class SemanticVectorIndexer:
         with open(meta_file, "w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
 
-    def merge(self, other: "SemanticVectorIndexer") -> int:
+    def merge(self, other: SemanticVectorIndexer) -> int:
         """Merge another SemanticVectorIndexer's indexed documents and vectors into this index.
 
         Args:

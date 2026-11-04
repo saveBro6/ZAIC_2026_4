@@ -2,7 +2,7 @@
 
 Loads real business profile for biz_101, rulebook.md, and README.md.
 Extracts 3 actual test questions from questions.jsonl for business_id == 'biz_101'
-and performs semantic vector retrieval using FlagEmbedding (BAAI/bge-m3).
+and performs semantic vector retrieval using vLLM (BAAI/bge-m3).
 """
 
 import json

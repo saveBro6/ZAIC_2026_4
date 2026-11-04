@@ -2,9 +2,9 @@
 
 import argparse
 import json
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from zaic_2026_4.profiling.lsh_indexer import VietnameseLSHIndexer
@@ -19,7 +19,11 @@ from zaic_2026_4.profiling.profile_summarizer import (
 from zaic_2026_4.profiling.raw_profiler import RawDatabaseProfiler
 from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
+)
+from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
+)
+from zaic_2026_4.profiling.vector_indexer import (
     MockEmbedder,
     SemanticVectorIndexer,
 )
@@ -170,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_VECTOR_MAX_LENGTH,
         help=(
-            f"Maximum token length for FlagEmbedding BGEM3FlagModel "
+            f"Maximum token length for vLLM BGE-M3 pooling runner "
             f"(default: {DEFAULT_VECTOR_MAX_LENGTH})."
         ),
     )
