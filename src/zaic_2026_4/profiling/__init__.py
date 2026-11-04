@@ -1,5 +1,13 @@
 """Profiling package for quantitative database statistics and semantic schema indexing."""
 
+from zaic_2026_4.profiling.lsh_indexer import (
+    DEFAULT_MAX_SAMPLE_VALUES,
+    DEFAULT_NUM_PERM,
+    DEFAULT_SHINGLE_K,
+    DEFAULT_THRESHOLD,
+    VietnameseLSHIndexer,
+    compute_minhash,
+)
 from zaic_2026_4.profiling.profile_summarizer import (
     DEFAULT_LOCAL_GPU_UTIL,
     DEFAULT_LOCAL_MODEL,
@@ -20,22 +28,46 @@ from zaic_2026_4.profiling.raw_profiler import (
     TableProfile,
     UndocumentedJoin,
 )
+from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_BATCH_SIZE as DEFAULT_VECTOR_BATCH_SIZE,
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
+    DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
+    DEFAULT_TOP_K as DEFAULT_VECTOR_TOP_K,
+    EmbedderProtocol,
+    MockEmbedder,
+    SemanticVectorIndexer,
+)
 
 __all__ = [
     "ColumnProfile",
     "DatabaseProfile",
     "DEFAULT_LOCAL_GPU_UTIL",
     "DEFAULT_LOCAL_MODEL",
+    "DEFAULT_MAX_SAMPLE_VALUES",
+    "DEFAULT_NUM_PERM",
     "DEFAULT_PROD_GPU_UTIL",
     "DEFAULT_PROD_MODEL",
+    "DEFAULT_SHINGLE_K",
+    "DEFAULT_THRESHOLD",
+    "DEFAULT_VECTOR_BATCH_SIZE",
+    "DEFAULT_EMBEDDING_DIM",
+    "DEFAULT_VECTOR_MAX_LENGTH",
+    "DEFAULT_VECTOR_MODEL_PATH",
+    "DEFAULT_VECTOR_TOP_K",
+    "EmbedderProtocol",
     "LLMEngineProtocol",
     "MAXIMAL_PROFILE_PROMPT",
     "MINIMAL_PROFILE_PROMPT",
+    "MockEmbedder",
     "MockLLMEngine",
     "ProfileLLMSummarizer",
     "RawDatabaseProfiler",
+    "SemanticVectorIndexer",
     "TableProfile",
     "UndocumentedJoin",
     "VLLMEngine",
+    "VietnameseLSHIndexer",
+    "compute_minhash",
     "create_engine",
 ]
