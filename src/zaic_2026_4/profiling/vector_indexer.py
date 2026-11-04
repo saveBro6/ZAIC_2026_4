@@ -582,11 +582,8 @@ class SemanticVectorIndexer:
         if self.index.ntotal == 0 or not clean_query:
             return []
 
-        # Retrieve a wider candidate pool if filtering by doc_type
-        search_k = min(
-            top_k * 4 if doc_type else top_k,
-            int(self.index.ntotal),
-        )
+        # If filtering by doc_type, search all candidate documents to ensure candidate pool contains target type
+        search_k = int(self.index.ntotal) if doc_type else min(top_k, int(self.index.ntotal))
 
         query_vec = self._encode_texts([clean_query])
         distances, indices = self.index.search(query_vec, search_k)

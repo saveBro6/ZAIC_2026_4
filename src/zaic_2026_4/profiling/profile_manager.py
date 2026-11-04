@@ -1,0 +1,348 @@
+"""Module 3: Orchestration and caching pipeline for database profiling and dual indexing.
+
+Executes RawDatabaseProfiler, ProfileLLMSummarizer, VietnameseLSHIndexer, and
+SemanticVectorIndexer once per business and caches computed metadata and indexes
+in /tmp to ensure rapid downstream query processing within competition time budgets.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import time
+from typing import Any
+
+from zaic_2026_4.ingestion.service import ingest_business
+from zaic_2026_4.profiling.lsh_indexer import VietnameseLSHIndexer
+from zaic_2026_4.profiling.profile_summarizer import (
+    DEFAULT_LOCAL_MODEL,
+    LLMEngineProtocol,
+    ProfileLLMSummarizer,
+    create_engine,
+)
+from zaic_2026_4.profiling.raw_profiler import RawDatabaseProfiler
+from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
+    MockEmbedder,
+    SemanticVectorIndexer,
+)
+
+
+class ProfilingOrchestrator:
+    """Central orchestrator coordinating database ingestion, raw profiling,
+    LLM summarization, dual-indexing (LSH & FAISS), and caching in /tmp.
+    """
+
+    def __init__(
+        self,
+        business_dir: str | Path,
+        rulebook_path: str | Path,
+        llm_engine: LLMEngineProtocol | Any,
+        embedder: Any | None = None,
+        vector_model_path: str = DEFAULT_VECTOR_MODEL_PATH,
+        cache_dir: str | Path | None = None,
+    ) -> None:
+        """Initialize ProfilingOrchestrator.
+
+        Args:
+            business_dir: Directory containing business tabular files and README.md.
+            rulebook_path: Path to dataset split rulebook.md.
+            llm_engine: LLM engine conforming to LLMEngineProtocol (vLLM or MockLLMEngine).
+            embedder: Optional sentence embedder instance for FAISS indexing.
+            vector_model_path: Path to embedding model (defaults to /app/models/bge-m3).
+            cache_dir: Cache directory for metadata and indexes (defaults to /tmp/cache_<biz_id>).
+        """
+        self.business_dir = Path(business_dir).resolve()
+        self.rulebook_path = Path(rulebook_path).resolve()
+        self.llm_engine = llm_engine
+        self.embedder = embedder
+        self.vector_model_path = vector_model_path
+
+        if cache_dir is not None:
+            self.cache_dir = Path(cache_dir).resolve()
+        else:
+            biz_name = self.business_dir.name or "default"
+            self.cache_dir = Path(f"/tmp/cache_{biz_name}").resolve()
+
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.db_path: Path | None = None
+        self._pipeline_result: dict[str, Any] | None = None
+
+    def _read_file(self, path: str | Path) -> str:
+        """Safely read a text file with UTF-8 encoding and fallback handling.
+
+        Args:
+            path: File path to read.
+
+        Returns:
+            File contents string or empty string if file does not exist.
+        """
+        p = Path(path)
+        if not p.is_file():
+            return ""
+        try:
+            return p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                return p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                return ""
+        except Exception:
+            return ""
+
+    def _get_db_path(self) -> str:
+        """Locate existing SQLite database or automatically ingest CSV/XLSX into /tmp SQLite.
+
+        Returns:
+            Absolute path string to SQLite database file.
+        """
+        if self.db_path is not None and self.db_path.exists():
+            return str(self.db_path)
+
+        biz_name = self.business_dir.name
+        cached_db_path = self.cache_dir / f"{biz_name}.db"
+
+        # 1. Reuse existing converted DB in cache if present
+        if cached_db_path.is_file():
+            self.db_path = cached_db_path
+            return str(cached_db_path)
+
+        cached_split_dbs = list(self.cache_dir.rglob(f"{biz_name}.db"))
+        if cached_split_dbs and cached_split_dbs[0].is_file():
+            self.db_path = cached_split_dbs[0]
+            return str(self.db_path)
+
+        # 2. Check if business_dir contains pre-existing .sqlite or .db file
+        # and has no raw tabular CSV/XLSX files that need ingestion
+        if self.business_dir.is_dir():
+            sqlite_files = sorted(
+                list(self.business_dir.glob("*.sqlite")) + list(self.business_dir.glob("*.db"))
+            )
+            tabular_files = sorted(
+                list(self.business_dir.glob("*.csv"))
+                + list(self.business_dir.glob("*.xlsx"))
+                + list(self.business_dir.glob("*.xls"))
+            )
+            if sqlite_files and not tabular_files:
+                # Standalone SQLite database (e.g. biz_123/pos.sqlite)
+                self.db_path = sqlite_files[0]
+                return str(self.db_path)
+
+        # 3. Convert CSV/XLSX (or mixed data) into temporary SQLite database in cache_dir
+        created_db_path = ingest_business(
+            business_dir=self.business_dir,
+            output_dir=self.cache_dir,
+            create_views=True,
+        )
+        self.db_path = Path(created_db_path)
+        return str(self.db_path)
+
+    def run_pipeline(self, force_rebuild: bool = False) -> dict[str, Any]:
+        """Execute the profiling and indexing pipeline with multi-tier caching.
+
+        Args:
+            force_rebuild: If True, ignore existing cached artifacts and re-run all steps.
+
+        Returns:
+            Dictionary with keys 'metadata', 'lsh_indexer', 'vector_indexer'.
+        """
+        if not force_rebuild and self._pipeline_result is not None:
+            return self._pipeline_result
+
+        profile_json_path = self.cache_dir / "metadata_profile.json"
+        lsh_cache_path = self.cache_dir / "lsh_index.pkl"
+        faiss_cache_dir = self.cache_dir / "faiss_index"
+
+        # Step 1 & 2: Metadata Profiling (Cache check or execute Raw Profiler + LLM Summarizer)
+        if not force_rebuild and profile_json_path.is_file():
+            with open(profile_json_path, "r", encoding="utf-8") as f:
+                processed_metadata = json.load(f)
+        else:
+            db_path = self._get_db_path()
+
+            # Step 1: Raw Profiling
+            raw_profiler = RawDatabaseProfiler(db_path)
+            raw_profile = raw_profiler.profile_database()
+
+            # Save raw profile to cache for diagnostics
+            raw_profile_path = self.cache_dir / "raw_profile.json"
+            with open(raw_profile_path, "w", encoding="utf-8") as f:
+                json.dump(raw_profile, f, ensure_ascii=False, indent=2)
+
+            # Step 2: LLM Summarization
+            readme_text = self._read_file(self.business_dir / "README.md")
+            summarizer = ProfileLLMSummarizer(self.llm_engine)
+            processed_metadata = summarizer.generate_profiles(raw_profile, readme_text)
+
+            # Save Cache JSON
+            with open(profile_json_path, "w", encoding="utf-8") as f:
+                json.dump(processed_metadata, f, ensure_ascii=False, indent=2)
+
+        # Step 3: Vietnamese LSH Indexing
+        if not force_rebuild and lsh_cache_path.is_file():
+            lsh_indexer = VietnameseLSHIndexer.load(lsh_cache_path)
+        else:
+            lsh_indexer = VietnameseLSHIndexer()
+            lsh_indexer.build_index(processed_metadata)
+            lsh_indexer.save(lsh_cache_path)
+
+        # Step 4: FAISS Semantic Vector Indexing
+        faiss_index_file = faiss_cache_dir / "index.faiss"
+        faiss_doc_map = faiss_cache_dir / "doc_map.json"
+        if not force_rebuild and faiss_index_file.is_file() and faiss_doc_map.is_file():
+            vector_indexer = SemanticVectorIndexer.load(
+                faiss_cache_dir,
+                model_path=self.vector_model_path,
+                embedder=self.embedder,
+            )
+        else:
+            rulebook_text = self._read_file(self.rulebook_path)
+            readme_text = self._read_file(self.business_dir / "README.md")
+            vector_indexer = SemanticVectorIndexer(
+                model_path=self.vector_model_path,
+                embedder=self.embedder,
+            )
+            vector_indexer.build_index(
+                processed_metadata=processed_metadata,
+                rulebook_text=rulebook_text,
+                readme_text=readme_text,
+            )
+            vector_indexer.save(faiss_cache_dir)
+
+        result = {
+            "metadata": processed_metadata,
+            "lsh_indexer": lsh_indexer,
+            "vector_indexer": vector_indexer,
+        }
+        self._pipeline_result = result
+        return result
+
+    def query_literals(self, entity_text: str, top_k: int = 5) -> list[tuple[str, str]]:
+        """Query literal mention against indexed column values using LSH.
+
+        Args:
+            entity_text: Entity string from query.
+            top_k: Maximum number of matches to return.
+
+        Returns:
+            List of (col_key, real_val) tuples sorted by similarity descending.
+        """
+        pipeline = self.run_pipeline()
+        return pipeline["lsh_indexer"].query_literal(entity_text, top_k=top_k)
+
+    def search_columns(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
+        """Search top semantically matching database columns using FAISS.
+
+        Args:
+            query: Natural language query text.
+            top_k: Maximum number of columns to return.
+
+        Returns:
+            List of matching document dicts with score.
+        """
+        pipeline = self.run_pipeline()
+        return pipeline["vector_indexer"].search_columns(query, top_k=top_k)
+
+    def search_rules(self, query: str, top_k: int = 3) -> list[dict[str, Any]]:
+        """Search top semantically matching rulebook clauses using FAISS.
+
+        Args:
+            query: Natural language query text.
+            top_k: Maximum number of rulebook clauses to return.
+
+        Returns:
+            List of matching rulebook dicts with score.
+        """
+        pipeline = self.run_pipeline()
+        return pipeline["vector_indexer"].search_rules(query, top_k=top_k)
+
+
+def main() -> None:
+    """CLI execution entry point for ProfilingOrchestrator."""
+    parser = argparse.ArgumentParser(
+        description="Profile a business directory, generate LLM metadata, and construct LSH/FAISS indexes."
+    )
+    parser.add_argument(
+        "--business-dir",
+        type=str,
+        required=True,
+        help="Path to business directory containing data files and README.md.",
+    )
+    parser.add_argument(
+        "--rulebook",
+        type=str,
+        required=True,
+        help="Path to rulebook.md for the dataset split.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=None,
+        help="Target cache directory (defaults to /tmp/cache_<biz_id>).",
+    )
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Use MockLLMEngine and MockEmbedder for fast offline execution without GPU.",
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help=f"Use local LLM model {DEFAULT_LOCAL_MODEL}.",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Custom LLM model path or repo ID.",
+    )
+    parser.add_argument(
+        "--vector-model-path",
+        type=str,
+        default=DEFAULT_VECTOR_MODEL_PATH,
+        help="Embedding model path for FAISS indexer.",
+    )
+    parser.add_argument(
+        "--force-rebuild",
+        action="store_true",
+        help="Ignore cached files and regenerate all profiles and indexes.",
+    )
+
+    args = parser.parse_args()
+
+    start_time = time.time()
+    print(f"Initializing ProfilingOrchestrator for {args.business_dir}...")
+
+    if args.mock:
+        engine = create_engine(mock=True)
+        embedder = MockEmbedder()
+    else:
+        engine = create_engine(local=args.local, model=args.model)
+        embedder = None
+
+    orchestrator = ProfilingOrchestrator(
+        business_dir=args.business_dir,
+        rulebook_path=args.rulebook,
+        llm_engine=engine,
+        embedder=embedder,
+        vector_model_path=args.vector_model_path,
+        cache_dir=args.cache_dir,
+    )
+
+    pipeline = orchestrator.run_pipeline(force_rebuild=args.force_rebuild)
+    elapsed = time.time() - start_time
+
+    meta_count = len(pipeline["metadata"])
+    lsh_items = len(pipeline["lsh_indexer"].value_to_col_map)
+    vector_docs = len(pipeline["vector_indexer"].doc_map)
+
+    print(f"Pipeline completed successfully in {elapsed:.2f}s:")
+    print(f"  - Cached metadata columns: {meta_count}")
+    print(f"  - LSH indexed literals:    {lsh_items}")
+    print(f"  - FAISS indexed documents: {vector_docs}")
+    print(f"  - Cache directory:         {orchestrator.cache_dir}")
+
+
+if __name__ == "__main__":
+    main()

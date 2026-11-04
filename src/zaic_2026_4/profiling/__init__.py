@@ -8,6 +8,9 @@ from zaic_2026_4.profiling.lsh_indexer import (
     VietnameseLSHIndexer,
     compute_minhash,
 )
+from zaic_2026_4.profiling.profile_manager import (
+    ProfilingOrchestrator,
+)
 from zaic_2026_4.profiling.profile_summarizer import (
     DEFAULT_LOCAL_GPU_UTIL,
     DEFAULT_LOCAL_MODEL,
@@ -70,6 +73,7 @@ __all__ = [
     "MockEmbedder",
     "MockLLMEngine",
     "ProfileLLMSummarizer",
+    "ProfilingOrchestrator",
     "RawDatabaseProfiler",
     "SemanticVectorIndexer",
     "TableProfile",
