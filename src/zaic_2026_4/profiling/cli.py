@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         help="Directory containing SQLite database files (*.db).",
     )
+    group.add_argument(
+        "--calendar",
+        type=str,
+        help="Path to split-level calendar.csv for profiling.",
+    )
 
     parser.add_argument(
         "--output",
@@ -447,6 +452,37 @@ def main() -> None:
             f"Discovered {total_joins} total candidate joins."
         )
         print(f"Profiles written to: {out_dir}")
+
+    elif args.calendar:
+        cal_file = Path(args.calendar)
+        if not cal_file.is_file():
+            print(f"Error: Calendar file does not exist: {cal_file}", file=sys.stderr)
+            sys.exit(1)
+
+        t0 = time.perf_counter()
+        raw_profile = RawDatabaseProfiler.profile_calendar(cal_file, num_perm=args.num_perm)
+        result: dict[str, Any] = {"raw_profile": raw_profile}
+
+        if args.summarize:
+            engine = create_engine(
+                local=args.local,
+                model=args.model,
+                gpu_memory_utilization=args.gpu_memory_utilization,
+                mock=args.mock_llm,
+            )
+            summarizer = ProfileLLMSummarizer(engine)
+            metadata = summarizer.summarize_calendar(raw_profile)
+            result["metadata_profile"] = metadata
+
+        out_file = Path(args.output) if args.output else None
+        if out_file is not None:
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            content_to_save = result if args.summarize else raw_profile
+            with open(out_file, "w", encoding="utf-8") as f:
+                json.dump(content_to_save, f, ensure_ascii=False, indent=2)
+            print(f"Calendar profile saved to: {out_file}")
+
+        print(f"Successfully processed calendar in {time.perf_counter() - t0:.3f}s.")
 
 
 if __name__ == "__main__":

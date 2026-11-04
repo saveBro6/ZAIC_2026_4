@@ -537,3 +537,22 @@ class ProfileLLMSummarizer:
             }
 
         return processed_metadata
+
+    def summarize_calendar(
+        self,
+        calendar_raw_profile: DatabaseProfile | dict[str, Any],
+        business_readme: str = "",
+    ) -> dict[str, Any]:
+        """Generate Minimal and Maximal profiles for split-level calendar.csv.
+
+        Args:
+            calendar_raw_profile: Raw DatabaseProfile of calendar.csv.
+            business_readme: Optional domain description or rulebook text for calendar.
+
+        Returns:
+            Dictionary of processed column metadata.
+        """
+        return self.generate_profiles(
+            calendar_raw_profile,
+            business_readme=business_readme,
+        )

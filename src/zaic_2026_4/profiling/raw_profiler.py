@@ -157,6 +157,7 @@ class RawDatabaseProfiler:
         jaccard_threshold: float = 0.7,
         max_sample_values: int = 10000,
         exclude_continuous_numerics: bool = True,
+        skip_calendar_table: bool = True,
     ) -> None:
         """Initialize the profiler with configuration options.
 
@@ -171,8 +172,10 @@ class RawDatabaseProfiler:
             max_sample_values: Maximum number of unique values to sample for MinHash and LSH.
             exclude_continuous_numerics: Whether to exclude continuous floating-point amounts
                 from MinHash Jaccard similarity to prevent false-positive joins.
+            skip_calendar_table: Whether to skip table 'calendar' if present in the database,
+                allowing it to be loaded from the split-level shared cache.
         """
-        self.db_path = Path(db_path)
+        self.db_path = Path(db_path) if db_path else Path("")
         self.num_perm = num_perm
         self.include_views = include_views
         self.skip_partition_tables_if_view_exists = skip_partition_tables_if_view_exists
@@ -180,6 +183,7 @@ class RawDatabaseProfiler:
         self.jaccard_threshold = jaccard_threshold
         self.max_sample_values = max_sample_values
         self.exclude_continuous_numerics = exclude_continuous_numerics
+        self.skip_calendar_table = skip_calendar_table
 
     def profile_database(self) -> DatabaseProfile:
         """Profile all tables and candidate joins in the database.
@@ -237,6 +241,8 @@ class RawDatabaseProfiler:
                 is_unified = len(view_info.get(name, [])) >= 2
                 targets_to_profile.append((name, typ, is_unified, view_info.get(name, [])))
             elif typ == "table":
+                if self.skip_calendar_table and name.lower() == "calendar":
+                    continue
                 if name in partition_tables_to_skip:
                     continue
                 targets_to_profile.append((name, typ, False, []))
@@ -739,3 +745,68 @@ class RawDatabaseProfiler:
         # Sort candidate joins by resemblance descending
         undocumented_joins.sort(key=lambda x: x["resemblance"], reverse=True)
         return undocumented_joins
+
+    @classmethod
+    def profile_calendar(
+        cls,
+        calendar_path: str | Path,
+        num_perm: int = 128,
+        max_sample_values: int = 10000,
+    ) -> DatabaseProfile:
+        """Profile split-level calendar.csv directly using Polars lazy evaluation."""
+        return profile_calendar_csv(
+            calendar_path=calendar_path,
+            num_perm=num_perm,
+            max_sample_values=max_sample_values,
+        )
+
+
+def profile_calendar_csv(
+    calendar_path: str | Path,
+    num_perm: int = 128,
+    max_sample_values: int = 10000,
+) -> DatabaseProfile:
+    """Profile split-level calendar.csv directly using Polars lazy evaluation.
+
+    Args:
+        calendar_path: Path to calendar.csv file.
+        num_perm: Number of permutations for MinHash sketches.
+        max_sample_values: Maximum unique sample values to retain for LSH indexing.
+
+    Returns:
+        DatabaseProfile containing the 'calendar' table profile.
+    """
+    path = Path(calendar_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Calendar file not found: {path}")
+
+    # Use Polars lazy evaluation with scan_csv per agent skill
+    q = pl.scan_csv(str(path))
+    df = q.collect()
+    row_count = df.height
+
+    profiler = RawDatabaseProfiler(
+        db_path="",
+        num_perm=num_perm,
+        max_sample_values=max_sample_values,
+    )
+
+    table_profile: TableProfile = {
+        "row_count": row_count,
+        "is_view": False,
+        "is_unified_view": False,
+        "source_tables": [],
+        "columns": {},
+        "note": "Split-level shared Solar-Lunar calendar lookup table.",
+    }
+
+    for col in df.columns:
+        col_prof, _ = profiler._profile_single_column(
+            df[col], col, row_count, "calendar"
+        )
+        table_profile["columns"][col] = col_prof
+
+    return {
+        "tables": {"calendar": table_profile},
+        "undocumented_joins": [],
+    }

@@ -651,6 +651,29 @@ class SemanticVectorIndexer:
         with open(meta_file, "w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
 
+    def merge(self, other: "SemanticVectorIndexer") -> int:
+        """Merge another SemanticVectorIndexer's indexed documents and vectors into this index.
+
+        Args:
+            other: Another SemanticVectorIndexer instance to merge.
+
+        Returns:
+            Number of new items added.
+        """
+        if other.index.ntotal == 0 or not other.doc_map:
+            return 0
+
+        existing_keys = {d.get("key") for d in self.doc_map if d.get("key")}
+        docs_to_add = [d for d in other.doc_map if d.get("key") not in existing_keys]
+        if not docs_to_add:
+            return 0
+
+        texts = [d["content"] for d in docs_to_add]
+        embeddings = self._encode_texts(texts)
+        self.index.add(embeddings)
+        self.doc_map.extend(docs_to_add)
+        return len(docs_to_add)
+
     @classmethod
     def load(
         cls,

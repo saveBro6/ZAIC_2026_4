@@ -221,6 +221,38 @@ class VietnameseLSHIndexer:
         scored = self.query_literal_with_scores(literal_text, top_k=top_k)
         return [(col_key, real_val) for col_key, real_val, _ in scored]
 
+    def merge(self, other: "VietnameseLSHIndexer") -> int:
+        """Merge another VietnameseLSHIndexer into this index.
+
+        Args:
+            other: Another VietnameseLSHIndexer instance to merge.
+
+        Returns:
+            Number of new items added.
+        """
+        added_count = 0
+        idx = len(self.value_to_col_map)
+        existing_pairs = set(self.value_to_col_map.values())
+
+        for other_key, (col_key, val_str) in other.value_to_col_map.items():
+            pair = (col_key, val_str)
+            if pair in existing_pairs:
+                continue
+
+            existing_pairs.add(pair)
+            new_key = f"item_{idx}"
+            m = other.minhashes.get(other_key)
+            if m is None:
+                m = self._create_minhash(val_str)
+
+            self.lsh.insert(new_key, m)
+            self.value_to_col_map[new_key] = pair
+            self.minhashes[new_key] = m
+            idx += 1
+            added_count += 1
+
+        return added_count
+
     def save(self, path: str | Path) -> None:
         """Persist indexer state to disk via pickle for caching."""
         save_path = Path(path)
