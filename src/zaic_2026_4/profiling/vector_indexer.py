@@ -399,6 +399,7 @@ class SemanticVectorIndexer:
         return LLM(
             model=effective_path,
             runner="pooling",
+            max_model_len=self.max_length,
             gpu_memory_utilization=self.gpu_memory_utilization,
             enforce_eager=self.enforce_eager,
             trust_remote_code=True,
