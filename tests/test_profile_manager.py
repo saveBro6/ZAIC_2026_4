@@ -342,3 +342,49 @@ def test_real_business_train_biz_101(tmp_path: Path) -> None:
     assert (cache_dir / "metadata_profile.json").is_file()
     assert (cache_dir / "lsh_index.pkl").is_file()
     assert (cache_dir / "faiss_index" / "index.faiss").is_file()
+
+
+def test_cli_split_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify CLI --split-dir correctly profiles multiple businesses in split."""
+    from zaic_2026_4.profiling.profile_manager import main
+
+    split_dir = tmp_path / "test_split"
+    data_dir = split_dir / "data"
+    data_dir.mkdir(parents=True)
+
+    # Business 1
+    b1 = data_dir / "biz_a"
+    b1.mkdir()
+    (b1 / "sales.csv").write_text("id,val\n1,10\n", encoding="utf-8")
+    (b1 / "README.md").write_text("# Biz A\n", encoding="utf-8")
+
+    # Business 2
+    b2 = data_dir / "biz_b"
+    b2.mkdir()
+    (b2 / "items.csv").write_text("sku,qty\nSKU1,5\n", encoding="utf-8")
+    (b2 / "README.md").write_text("# Biz B\n", encoding="utf-8")
+
+    # Split files
+    (split_dir / "rulebook.md").write_text("# Rulebook\n", encoding="utf-8")
+    (split_dir / "calendar.csv").write_text("date,weekday\n2024-01-01,1\n", encoding="utf-8")
+
+    cal_cache = tmp_path / "cal_cache.json"
+    cache_base = tmp_path / "caches"
+
+    test_args = [
+        "profile_manager.py",
+        "--split-dir",
+        str(split_dir),
+        "--calendar-cache",
+        str(cal_cache),
+        "--cache-dir",
+        str(cache_base),
+        "--mock",
+    ]
+    monkeypatch.setattr("sys.argv", test_args)
+
+    main()
+
+    assert cal_cache.is_file()
+    assert (cache_base / "cache_biz_a" / "metadata_profile.json").is_file()
+    assert (cache_base / "cache_biz_b" / "metadata_profile.json").is_file()

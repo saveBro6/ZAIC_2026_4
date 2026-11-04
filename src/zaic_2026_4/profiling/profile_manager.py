@@ -405,6 +405,12 @@ def main() -> None:
         help="Path to business directory containing data files and README.md.",
     )
     parser.add_argument(
+        "--split-dir",
+        type=str,
+        default=None,
+        help="Path to full split directory (e.g. dataset/public_test). Profiles calendar and all businesses in split.",
+    )
+    parser.add_argument(
         "--rulebook",
         type=str,
         default=None,
@@ -488,8 +494,82 @@ def main() -> None:
         print(f"  - Cache path:              {cal_res['cache_path']}")
         return
 
+    # Handle full split profiling mode
+    if args.split_dir:
+        split_p = Path(args.split_dir).resolve()
+        if not split_p.is_dir():
+            parser.error(f"Provided --split-dir is not a valid directory: {split_p}")
+
+        cal_path = Path(args.calendar).resolve() if args.calendar else (split_p / "calendar.csv")
+        rb_path = Path(args.rulebook).resolve() if args.rulebook else (split_p / "rulebook.md")
+
+        if not rb_path.is_file():
+            parser.error(f"Rulebook not found in split: {rb_path}")
+
+        # Locate businesses
+        data_p = split_p / "data" if (split_p / "data").is_dir() else split_p
+        biz_dirs = sorted([d for d in data_p.iterdir() if d.is_dir()])
+        if not biz_dirs:
+            parser.error(f"No business directories found in {data_p}")
+
+        print(f"Initializing split profiling for {split_p.name} ({len(biz_dirs)} businesses)...")
+
+        # Step 1: Profile calendar.csv once for split if present
+        if cal_path.is_file():
+            print(f"Profiling split calendar: {cal_path}...")
+            profile_split_calendar(
+                calendar_path=cal_path,
+                llm_engine=engine,
+                embedder=embedder,
+                vector_model_path=args.vector_model_path,
+                cache_path=args.calendar_cache,
+                force_rebuild=args.force_rebuild,
+            )
+
+        # Step 2: Iterate and profile all businesses
+        total_meta = 0
+        total_lsh = 0
+        total_vector = 0
+
+        for idx, b_dir in enumerate(biz_dirs, 1):
+            t_b0 = time.time()
+            b_cache = (
+                Path(args.cache_dir) / f"cache_{b_dir.name}"
+                if args.cache_dir
+                else Path(f"/tmp/cache_{b_dir.name}")
+            )
+            print(f"[{idx}/{len(biz_dirs)}] Processing {b_dir.name}...")
+
+            orchestrator = ProfilingOrchestrator(
+                business_dir=b_dir,
+                rulebook_path=rb_path,
+                llm_engine=engine,
+                embedder=embedder,
+                vector_model_path=args.vector_model_path,
+                cache_dir=b_cache,
+                calendar_path=cal_path if cal_path.is_file() else None,
+                calendar_cache_path=args.calendar_cache,
+            )
+            pipe = orchestrator.run_pipeline(force_rebuild=args.force_rebuild)
+            m_cnt = len(pipe["metadata"])
+            l_cnt = len(pipe["lsh_indexer"].value_to_col_map)
+            v_cnt = len(pipe["vector_indexer"].doc_map)
+
+            total_meta += m_cnt
+            total_lsh += l_cnt
+            total_vector += v_cnt
+            print(f"     Done in {time.time() - t_b0:.2f}s ({m_cnt} columns, {l_cnt} LSH items, {v_cnt} docs).")
+
+        elapsed_total = time.time() - start_time
+        print(f"Split profiling completed successfully for {len(biz_dirs)} businesses in {elapsed_total:.2f}s:")
+        print(f"  - Total metadata columns: {total_meta}")
+        print(f"  - Total LSH items:        {total_lsh}")
+        print(f"  - Total FAISS documents:  {total_vector}")
+        print(f"  - Average per business:   {elapsed_total / len(biz_dirs):.2f}s")
+        return
+
     if not args.business_dir or not args.rulebook:
-        parser.error("--business-dir and --rulebook are required unless using --profile-calendar-only.")
+        parser.error("Either --split-dir, --profile-calendar-only, or both --business-dir and --rulebook must be provided.")
 
     print(f"Initializing ProfilingOrchestrator for {args.business_dir}...")
 
