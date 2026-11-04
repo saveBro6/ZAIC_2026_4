@@ -1,11 +1,12 @@
 """Unit and integration tests for Module 3: ProfilingOrchestrator (profile_manager.py)."""
 
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 from typing import Any
+
 import pytest
 
-from zaic_2026_4.profiling.profile_manager import ProfilingOrchestrator
+from zaic_2026_4.profiling.profile_manager import ProfilingOrchestrator, main
 from zaic_2026_4.profiling.profile_summarizer import MockLLMEngine
 from zaic_2026_4.profiling.vector_indexer import MockEmbedder
 
@@ -346,8 +347,6 @@ def test_real_business_train_biz_101(tmp_path: Path) -> None:
 
 def test_cli_split_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify CLI --split-dir correctly profiles multiple businesses in split."""
-    from zaic_2026_4.profiling.profile_manager import main
-
     split_dir = tmp_path / "test_split"
     data_dir = split_dir / "data"
     data_dir.mkdir(parents=True)
@@ -388,3 +387,39 @@ def test_cli_split_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert cal_cache.is_file()
     assert (cache_base / "cache_biz_a" / "metadata_profile.json").is_file()
     assert (cache_base / "cache_biz_b" / "metadata_profile.json").is_file()
+
+
+def test_cli_output_dir_redirection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify --output-dir cleanly redirects all outputs from /tmp to the specified directory."""
+    split_dir = tmp_path / "custom_split"
+    data_dir = split_dir / "data"
+    data_dir.mkdir(parents=True)
+
+    b1 = data_dir / "biz_x"
+    b1.mkdir()
+    (b1 / "data.csv").write_text("id,val\n1,100\n", encoding="utf-8")
+    (b1 / "README.md").write_text("# Biz X\n", encoding="utf-8")
+
+    (split_dir / "rulebook.md").write_text("# Rulebook\n", encoding="utf-8")
+    (split_dir / "calendar.csv").write_text("date,weekday\n2024-01-01,1\n", encoding="utf-8")
+
+    custom_out = tmp_path / "custom_output_base"
+
+    test_args = [
+        "profile_manager.py",
+        "--split-dir",
+        str(split_dir),
+        "--output-dir",
+        str(custom_out),
+        "--mock",
+    ]
+    monkeypatch.setattr("sys.argv", test_args)
+
+    main()
+
+    # calendar_profile.json redirected to custom_out
+    assert (custom_out / "calendar_profile.json").is_file()
+    # business cache redirected to custom_out / cache_biz_x
+    assert (custom_out / "cache_biz_x" / "metadata_profile.json").is_file()
+    assert (custom_out / "cache_biz_x" / "lsh_index.pkl").is_file()
+    assert (custom_out / "cache_biz_x" / "faiss_index" / "index.faiss").is_file()

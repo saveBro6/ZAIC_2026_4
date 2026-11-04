@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 from typing import Any
 
 from zaic_2026_4.ingestion.service import ingest_business
@@ -24,6 +24,8 @@ from zaic_2026_4.profiling.profile_summarizer import (
 from zaic_2026_4.profiling.raw_profiler import RawDatabaseProfiler
 from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
+)
+from zaic_2026_4.profiling.vector_indexer import (
     MockEmbedder,
     SemanticVectorIndexer,
 )
@@ -434,10 +436,12 @@ def main() -> None:
         help="Profile only calendar.csv and exit.",
     )
     parser.add_argument(
+        "--output-dir",
         "--cache-dir",
+        dest="output_dir",
         type=str,
         default=None,
-        help="Target cache directory (defaults to /tmp/cache_<biz_id>).",
+        help="Target base output directory for profiling artifacts (redirects /tmp to this directory).",
     )
     parser.add_argument(
         "--mock",
@@ -478,6 +482,13 @@ def main() -> None:
         engine = create_engine(local=args.local, model=args.model)
         embedder = None
 
+    # Redirect calendar cache if output_dir is specified and calendar_cache was left at default
+    resolved_calendar_cache = (
+        Path(args.output_dir).resolve() / "calendar_profile.json"
+        if args.output_dir and args.calendar_cache == "/tmp/calendar_profile.json"
+        else Path(args.calendar_cache).resolve()
+    )
+
     if args.profile_calendar_only:
         if not args.calendar:
             parser.error("--profile-calendar-only requires --calendar path.")
@@ -486,7 +497,7 @@ def main() -> None:
             llm_engine=engine,
             embedder=embedder,
             vector_model_path=args.vector_model_path,
-            cache_path=args.calendar_cache,
+            cache_path=resolved_calendar_cache,
             force_rebuild=args.force_rebuild,
         )
         print(f"Calendar split profiling completed in {time.time() - start_time:.2f}s:")
@@ -522,7 +533,7 @@ def main() -> None:
                 llm_engine=engine,
                 embedder=embedder,
                 vector_model_path=args.vector_model_path,
-                cache_path=args.calendar_cache,
+                cache_path=resolved_calendar_cache,
                 force_rebuild=args.force_rebuild,
             )
 
@@ -534,8 +545,8 @@ def main() -> None:
         for idx, b_dir in enumerate(biz_dirs, 1):
             t_b0 = time.time()
             b_cache = (
-                Path(args.cache_dir) / f"cache_{b_dir.name}"
-                if args.cache_dir
+                Path(args.output_dir).resolve() / f"cache_{b_dir.name}"
+                if args.output_dir
                 else Path(f"/tmp/cache_{b_dir.name}")
             )
             print(f"[{idx}/{len(biz_dirs)}] Processing {b_dir.name}...")
@@ -548,7 +559,7 @@ def main() -> None:
                 vector_model_path=args.vector_model_path,
                 cache_dir=b_cache,
                 calendar_path=cal_path if cal_path.is_file() else None,
-                calendar_cache_path=args.calendar_cache,
+                calendar_cache_path=resolved_calendar_cache,
             )
             pipe = orchestrator.run_pipeline(force_rebuild=args.force_rebuild)
             m_cnt = len(pipe["metadata"])
@@ -573,15 +584,25 @@ def main() -> None:
 
     print(f"Initializing ProfilingOrchestrator for {args.business_dir}...")
 
+    if args.output_dir:
+        out_p = Path(args.output_dir).resolve()
+        biz_name = Path(args.business_dir).name
+        if out_p.name == f"cache_{biz_name}" or out_p.name == biz_name:
+            single_cache_dir = out_p
+        else:
+            single_cache_dir = out_p / f"cache_{biz_name}"
+    else:
+        single_cache_dir = None
+
     orchestrator = ProfilingOrchestrator(
         business_dir=args.business_dir,
         rulebook_path=args.rulebook,
         llm_engine=engine,
         embedder=embedder,
         vector_model_path=args.vector_model_path,
-        cache_dir=args.cache_dir,
+        cache_dir=single_cache_dir,
         calendar_path=args.calendar,
-        calendar_cache_path=args.calendar_cache,
+        calendar_cache_path=resolved_calendar_cache,
     )
 
     pipeline = orchestrator.run_pipeline(force_rebuild=args.force_rebuild)
