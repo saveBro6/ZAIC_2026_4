@@ -46,6 +46,13 @@ def test_raw_profiler_calendar_generic() -> None:
     assert date_col["null_count"] == 0
     assert date_col["data_format"] == "ISO_DATE"
 
+    # Check weekday column
+    assert "weekday" in cols
+    weekday_col = cols["weekday"]
+    assert not weekday_col["is_json"]
+    assert weekday_col["data_format"] != "JSON_STRING"
+    assert weekday_col["data_format"] in ("NUMERIC", "INTEGER")
+
     # Check holiday column
     assert "holiday" in cols
     holiday_col = cols["holiday"]

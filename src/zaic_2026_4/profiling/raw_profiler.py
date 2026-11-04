@@ -471,17 +471,26 @@ class RawDatabaseProfiler:
             result["llm_hint"] = "Native SQLite Date/Datetime. Query directly using standard comparison operators."
             return result
 
-        # 2. JSON Structure Detection & Validation
-        is_json_candidate = all(
-            (v.startswith(("{", "[")) and v.endswith(("}", "]")))
-            for v in samples
-            if len(v) > 1
+        # 2. JSON Structure Detection & Validation (must be JSON object {...} or array [...])
+        is_json_candidate = (
+            any(v.startswith(("{", "[")) for v in samples)
+            and all(
+                (
+                    (v.startswith("{") and v.endswith("}"))
+                    or (v.startswith("[") and v.endswith("]"))
+                )
+                and len(v) >= 2
+                for v in samples
+            )
         )
         if is_json_candidate:
             is_valid_json = True
             for candidate in samples[:5]:
                 try:
-                    json.loads(candidate)
+                    parsed = json.loads(candidate)
+                    if not isinstance(parsed, (dict, list)):
+                        is_valid_json = False
+                        break
                 except Exception:
                     is_valid_json = False
                     break
