@@ -267,6 +267,9 @@ class ProfilingOrchestrator:
             )
             vector_indexer.save(faiss_cache_dir)
 
+        if self.embedder is None and vector_indexer is not None:
+            self.embedder = vector_indexer.embedder
+
         result = {
             "metadata": processed_metadata,
             "lsh_indexer": lsh_indexer,
@@ -528,7 +531,7 @@ def main() -> None:
         # Step 1: Profile calendar.csv once for split if present
         if cal_path.is_file():
             print(f"Profiling split calendar: {cal_path}...")
-            profile_split_calendar(
+            cal_res = profile_split_calendar(
                 calendar_path=cal_path,
                 llm_engine=engine,
                 embedder=embedder,
@@ -536,6 +539,8 @@ def main() -> None:
                 cache_path=resolved_calendar_cache,
                 force_rebuild=args.force_rebuild,
             )
+            if embedder is None and "vector_indexer" in cal_res and cal_res["vector_indexer"] is not None:
+                embedder = cal_res["vector_indexer"].embedder
 
         # Step 2: Iterate and profile all businesses
         total_meta = 0
@@ -562,6 +567,9 @@ def main() -> None:
                 calendar_cache_path=resolved_calendar_cache,
             )
             pipe = orchestrator.run_pipeline(force_rebuild=args.force_rebuild)
+            if embedder is None and "vector_indexer" in pipe and pipe["vector_indexer"] is not None:
+                embedder = pipe["vector_indexer"].embedder
+
             m_cnt = len(pipe["metadata"])
             l_cnt = len(pipe["lsh_indexer"].value_to_col_map)
             v_cnt = len(pipe["vector_indexer"].doc_map)

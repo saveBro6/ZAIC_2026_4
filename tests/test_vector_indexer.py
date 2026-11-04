@@ -1,6 +1,7 @@
 """Unit tests for Module 4: SemanticVectorIndexer, MockEmbedder, and Hierarchical Chunking."""
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -9,6 +10,8 @@ from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_MAX_LENGTH,
     MockEmbedder,
     SemanticVectorIndexer,
+    clear_embedder_cache,
+    get_embedder_cache_size,
     parse_markdown_hierarchical,
     recursive_split_paragraph,
 )
@@ -418,3 +421,78 @@ def test_indexer_with_vllm_embed_interface() -> None:
     assert len(hits) == 1
     assert hits[0]["key"] == "orders.amount"
     assert "score" in hits[0]
+
+
+def test_embedder_cache_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify SemanticVectorIndexer reuses the same cached embedder instance across instantiations."""
+    clear_embedder_cache()
+    assert get_embedder_cache_size() == 0
+
+    llm_init_count = 0
+
+    class FakeLLM:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            nonlocal llm_init_count
+            llm_init_count += 1
+
+        def get_sentence_embedding_dimension(self) -> int:
+            return 128
+
+        def embed(self, texts: list[str]) -> list[Any]:
+            return []
+
+    import vllm
+    monkeypatch.setattr(vllm, "LLM", FakeLLM)
+
+    # First instantiation: should call FakeLLM and populate cache
+    indexer1 = SemanticVectorIndexer(model_path="custom/test-model")
+    assert llm_init_count == 1
+    assert get_embedder_cache_size() == 1
+
+    # Second instantiation with identical parameters: should reuse cached embedder without calling FakeLLM
+    indexer2 = SemanticVectorIndexer(model_path="custom/test-model")
+    assert llm_init_count == 1  # Remained 1, verified single load
+    assert indexer2.embedder is indexer1.embedder
+    assert get_embedder_cache_size() == 1
+
+    # Clear cache and verify
+    clear_embedder_cache()
+    assert get_embedder_cache_size() == 0
+
+
+def test_embedder_cache_internal_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that _load_bgem3_model checks _EMBEDDER_CACHE before instantiating LLM."""
+    clear_embedder_cache()
+    from zaic_2026_4.profiling.vector_indexer import _EMBEDDER_CACHE
+
+    sentinel_embedder = MockEmbedder(dimension=64)
+    model_name = "test/cached-model"
+    indexer = SemanticVectorIndexer(embedder=MockEmbedder(dimension=64))
+
+    cache_key = (
+        model_name,
+        float(indexer.gpu_memory_utilization),
+        int(indexer.max_length),
+        bool(indexer.enforce_eager),
+    )
+    _EMBEDDER_CACHE[cache_key] = sentinel_embedder
+    assert get_embedder_cache_size() == 1
+
+    # Call _load_bgem3_model on indexer with model_name: should return sentinel without importing vllm
+    loaded = indexer._load_bgem3_model(model_name, use_fp16=None)
+    assert loaded is sentinel_embedder
+
+    # Test clear_embedder_cache
+    clear_embedder_cache()
+    assert get_embedder_cache_size() == 0
+
+
+def test_explicit_embedder_bypasses_cache() -> None:
+    """Verify that providing an explicit embedder bypasses and does not mutate _EMBEDDER_CACHE."""
+    clear_embedder_cache()
+    custom_embedder = MockEmbedder(dimension=48)
+    indexer = SemanticVectorIndexer(embedder=custom_embedder)
+
+    assert indexer.embedder is custom_embedder
+    assert indexer.dimension == 48
+    assert get_embedder_cache_size() == 0

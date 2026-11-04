@@ -27,6 +27,19 @@ DEFAULT_MIN_CHUNK_CHARS = 150
 DEFAULT_VLLM_GPU_MEMORY_UTILIZATION = 0.20
 MIN_TABLE_ROWS_FOR_SPLIT = 3
 
+# Module-level in-memory cache to ensure BGE-M3 is loaded only once per process lifecycle
+_EMBEDDER_CACHE: dict[tuple[str, float, int, bool], Any] = {}
+
+
+def clear_embedder_cache() -> None:
+    """Clear all cached embedder instances (useful for test isolation)."""
+    _EMBEDDER_CACHE.clear()
+
+
+def get_embedder_cache_size() -> int:
+    """Return the number of cached embedder instances."""
+    return len(_EMBEDDER_CACHE)
+
 
 def recursive_split_paragraph(
     text: str,
@@ -382,6 +395,21 @@ class SemanticVectorIndexer:
         self, model_path: str, use_fp16: bool | None
     ) -> Any:
         """Safely import and initialize vLLM pooling runner for BGE-M3."""
+        # Check local folder existence or environment variable override
+        effective_path = os.environ.get("EMBEDDING_MODEL_PATH", model_path)
+        if not Path(effective_path).exists() and not Path(model_path).exists():
+            # If path doesn't exist locally, try standard repo ID fallback
+            effective_path = model_path if "/" in model_path and not model_path.startswith("/") else "BAAI/bge-m3"
+
+        cache_key = (
+            effective_path,
+            float(self.gpu_memory_utilization),
+            int(self.max_length),
+            bool(self.enforce_eager),
+        )
+        if cache_key in _EMBEDDER_CACHE:
+            return _EMBEDDER_CACHE[cache_key]
+
         try:
             from vllm import LLM
         except ImportError as err:
@@ -390,13 +418,7 @@ class SemanticVectorIndexer:
                 "Ensure vllm is installed."
             ) from err
 
-        # Check local folder existence or environment variable override
-        effective_path = os.environ.get("EMBEDDING_MODEL_PATH", model_path)
-        if not Path(effective_path).exists() and not Path(model_path).exists():
-            # If path doesn't exist locally, try standard repo ID fallback
-            effective_path = model_path if "/" in model_path and not model_path.startswith("/") else "BAAI/bge-m3"
-
-        return LLM(
+        instance = LLM(
             model=effective_path,
             runner="pooling",
             max_model_len=self.max_length,
@@ -404,6 +426,8 @@ class SemanticVectorIndexer:
             enforce_eager=self.enforce_eager,
             trust_remote_code=True,
         )
+        _EMBEDDER_CACHE[cache_key] = instance
+        return instance
 
     def _detect_dimension(self) -> int:
         """Detect sentence embedding dimension from embedder."""

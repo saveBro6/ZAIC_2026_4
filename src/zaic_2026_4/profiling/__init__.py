@@ -33,23 +33,32 @@ from zaic_2026_4.profiling.raw_profiler import (
 )
 from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_BATCH_SIZE as DEFAULT_VECTOR_BATCH_SIZE,
+)
+from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_MAX_CHUNK_CHARS,
-    DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
     DEFAULT_MIN_CHUNK_CHARS,
-    DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
-    DEFAULT_TOP_K as DEFAULT_VECTOR_TOP_K,
     MIN_TABLE_ROWS_FOR_SPLIT,
     EmbedderProtocol,
     MockEmbedder,
     SemanticVectorIndexer,
+    clear_embedder_cache,
+    get_embedder_cache_size,
     parse_markdown_hierarchical,
     recursive_split_paragraph,
 )
+from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
+)
+from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
+)
+from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_TOP_K as DEFAULT_VECTOR_TOP_K,
+)
 
 __all__ = [
-    "ColumnProfile",
-    "DatabaseProfile",
+    "DEFAULT_EMBEDDING_DIM",
     "DEFAULT_LOCAL_GPU_UTIL",
     "DEFAULT_LOCAL_MODEL",
     "DEFAULT_MAX_CHUNK_CHARS",
@@ -61,15 +70,16 @@ __all__ = [
     "DEFAULT_SHINGLE_K",
     "DEFAULT_THRESHOLD",
     "DEFAULT_VECTOR_BATCH_SIZE",
-    "DEFAULT_EMBEDDING_DIM",
     "DEFAULT_VECTOR_MAX_LENGTH",
     "DEFAULT_VECTOR_MODEL_PATH",
     "DEFAULT_VECTOR_TOP_K",
-    "MIN_TABLE_ROWS_FOR_SPLIT",
-    "EmbedderProtocol",
-    "LLMEngineProtocol",
     "MAXIMAL_PROFILE_PROMPT",
     "MINIMAL_PROFILE_PROMPT",
+    "MIN_TABLE_ROWS_FOR_SPLIT",
+    "ColumnProfile",
+    "DatabaseProfile",
+    "EmbedderProtocol",
+    "LLMEngineProtocol",
     "MockEmbedder",
     "MockLLMEngine",
     "ProfileLLMSummarizer",
@@ -80,8 +90,10 @@ __all__ = [
     "UndocumentedJoin",
     "VLLMEngine",
     "VietnameseLSHIndexer",
+    "clear_embedder_cache",
     "compute_minhash",
     "create_engine",
+    "get_embedder_cache_size",
     "parse_markdown_hierarchical",
     "recursive_split_paragraph",
 ]

@@ -423,3 +423,54 @@ def test_cli_output_dir_redirection(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert (custom_out / "cache_biz_x" / "metadata_profile.json").is_file()
     assert (custom_out / "cache_biz_x" / "lsh_index.pkl").is_file()
     assert (custom_out / "cache_biz_x" / "faiss_index" / "index.faiss").is_file()
+
+
+def test_split_profiling_shares_single_embedder_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that split profiling propagates the exact same embedder instance across all businesses."""
+    split_dir = tmp_path / "shared_embedder_split"
+    data_dir = split_dir / "data"
+    data_dir.mkdir(parents=True)
+
+    b1 = data_dir / "biz_1"
+    b1.mkdir()
+    (b1 / "data.csv").write_text("id,val\n1,10\n", encoding="utf-8")
+    (b1 / "README.md").write_text("# Biz 1\n", encoding="utf-8")
+
+    b2 = data_dir / "biz_2"
+    b2.mkdir()
+    (b2 / "data.csv").write_text("id,val\n2,20\n", encoding="utf-8")
+    (b2 / "README.md").write_text("# Biz 2\n", encoding="utf-8")
+
+    (split_dir / "rulebook.md").write_text("# Rulebook\n", encoding="utf-8")
+    (split_dir / "calendar.csv").write_text("date,weekday\n2024-01-01,1\n", encoding="utf-8")
+
+    custom_out = tmp_path / "shared_out"
+
+    recorded_embedders: list[Any] = []
+    orig_init = ProfilingOrchestrator.__init__
+
+    def spy_init(self: ProfilingOrchestrator, *args: Any, **kwargs: Any) -> None:
+        orig_init(self, *args, **kwargs)
+        recorded_embedders.append(self.embedder)
+
+    monkeypatch.setattr(ProfilingOrchestrator, "__init__", spy_init)
+
+    test_args = [
+        "profile_manager.py",
+        "--split-dir",
+        str(split_dir),
+        "--output-dir",
+        str(custom_out),
+        "--mock",
+    ]
+    monkeypatch.setattr("sys.argv", test_args)
+
+    main()
+
+    # Orchestrator was initialized for biz_1 and biz_2
+    assert len(recorded_embedders) >= 2
+    # Verify both businesses received the exact same embedder instance
+    first_embedder = recorded_embedders[0]
+    assert first_embedder is not None
+    for other in recorded_embedders[1:]:
+        assert other is first_embedder
