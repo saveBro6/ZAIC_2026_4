@@ -1,0 +1,20 @@
+[project]
+name = "zaic-2026-4"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "saveBro6", email = "hungmtp1309@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastexcel>=0.21.0",
+    "polars>=2.1.0",
+]
+
+[project.scripts]
+zaic-2026-4 = "zaic_2026_4:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
