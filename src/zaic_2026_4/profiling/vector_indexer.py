@@ -376,20 +376,37 @@ class SemanticVectorIndexer:
         )
         self.enforce_eager = enforce_eager
 
-        # 1. Initialize or assign embedder
+        # 1. Initialize or assign embedder with lazy-loading support
+        self.use_fp16 = use_fp16
+        self._embedder = embedder
         if embedder is not None:
-            self.embedder = embedder
+            self.dimension = self._detect_dimension()
         elif model_path in ("mock", "mock-embedder"):
-            self.embedder = MockEmbedder(dimension=DEFAULT_EMBEDDING_DIM)
+            self._embedder = MockEmbedder(dimension=DEFAULT_EMBEDDING_DIM)
+            self.dimension = DEFAULT_EMBEDDING_DIM
         else:
-            self.embedder = self._load_bgem3_model(model_path, use_fp16)
+            self.dimension = DEFAULT_EMBEDDING_DIM
 
-        # 2. Determine vector dimension
-        self.dimension = self._detect_dimension()
-
-        # 3. Initialize FAISS Inner Product index (equivalent to Cosine Similarity when normalized)
+        # 2. Initialize FAISS Inner Product index (equivalent to Cosine Similarity when normalized)
         self.index = faiss.IndexFlatIP(self.dimension)
         self.doc_map: list[dict[str, Any]] = []
+
+    @property
+    def embedder(self) -> Any:
+        """Lazily load the underlying embedding engine on first access."""
+        if self._embedder is None:
+            if self.model_path in ("mock", "mock-embedder"):
+                self._embedder = MockEmbedder(dimension=self.dimension or DEFAULT_EMBEDDING_DIM)
+            else:
+                self._embedder = self._load_bgem3_model(self.model_path, self.use_fp16)
+        return self._embedder
+
+    @embedder.setter
+    def embedder(self, val: Any) -> None:
+        """Explicitly set or replace the embedder instance."""
+        self._embedder = val
+        if val is not None:
+            self.dimension = self._detect_dimension()
 
     def _load_bgem3_model(
         self, model_path: str, use_fp16: bool | None
@@ -431,10 +448,11 @@ class SemanticVectorIndexer:
 
     def _detect_dimension(self) -> int:
         """Detect sentence embedding dimension from embedder."""
-        if hasattr(self.embedder, "get_sentence_embedding_dimension"):
-            return int(self.embedder.get_sentence_embedding_dimension())
-        if hasattr(self.embedder, "dimension"):
-            return int(self.embedder.dimension)
+        target = self._embedder if self._embedder is not None else self.embedder
+        if hasattr(target, "get_sentence_embedding_dimension"):
+            return int(target.get_sentence_embedding_dimension())
+        if hasattr(target, "dimension"):
+            return int(target.dimension)
 
         # Probe dimension with dummy test encoding
         try:

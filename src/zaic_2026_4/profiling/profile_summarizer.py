@@ -253,6 +253,39 @@ class MockLLMEngine:
                 results.append("")
                 continue
 
+            # Support SQL generation prompts for Mock testing
+            if "SQL engineer" in prompt or "<database_schema>" in prompt:
+                import re
+
+                if "Fresno" in prompt:
+                    if "reprompt_correction_guidance" in prompt:
+                        results.append(
+                            "SELECT T2.Zip FROM frpm AS T1 "
+                            "INNER JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode "
+                            "WHERE T1.`Charter School (Y/N)` = 1 AND T2.District = 'Fresno County Office of Education'"
+                        )
+                    else:
+                        results.append(
+                            "SELECT T2.Zip FROM frpm AS T1 "
+                            "INNER JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode "
+                            "WHERE T1.`Charter School (Y/N)` = 1 AND T1.`County Name` = 'Fresno County Office of Education'"
+                        )
+                    continue
+
+                # General mock SQL from schema
+                tables = re.findall(r'<table name="([^"]+)">', prompt)
+                cols = re.findall(r'<column name="([^"]+)"', prompt)
+                if tables and cols:
+                    main_tbl = tables[0]
+                    col_refs = [f'T1."{c}"' for c in cols[:3]]
+                    sql = f'SELECT {", ".join(col_refs)} FROM "{main_tbl}" AS T1'
+                    if len(cols) > 3:
+                        sql += f' WHERE T1."{cols[3]}" IS NOT NULL'
+                    results.append(sql)
+                else:
+                    results.append("SELECT 1")
+                continue
+
             # Check whether it is a minimal or maximal prompt
             is_minimal = "SHORT SUMMARY" in prompt
 

@@ -221,6 +221,24 @@ class VietnameseLSHIndexer:
         scored = self.query_literal_with_scores(literal_text, top_k=top_k)
         return [(col_key, real_val) for col_key, real_val, _ in scored]
 
+    def lookup_value(
+        self, literal_text: str, threshold: float = 0.4, top_k: int = 10
+    ) -> set[str]:
+        """Look up set of column keys (table.column) containing values matching the literal.
+
+        Matches the paper's lookup_value interface for task-aligned schema linking.
+
+        Args:
+            literal_text: Entity or literal string to search.
+            threshold: Minimum Jaccard similarity score (default: 0.4).
+            top_k: Maximum candidate pool size.
+
+        Returns:
+            Set of column keys ('table.column') matching the literal value.
+        """
+        scored = self.query_literal_with_scores(literal_text, top_k=top_k)
+        return {col_key for col_key, _, score in scored if score >= threshold}
+
     def merge(self, other: "VietnameseLSHIndexer") -> int:
         """Merge another VietnameseLSHIndexer into this index.
 
