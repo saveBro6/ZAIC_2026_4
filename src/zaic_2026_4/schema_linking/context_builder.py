@@ -16,18 +16,12 @@ from typing import Any
 
 FEW_SHOT_SQL_EXAMPLES: str = (
     "<few_shot_examples>\n"
-    "Example 1:\n"
-    "User Question: Thống kê tổng tiền bán của mặt hàng Sữa tươi trong tháng 01/2026 là bao nhiêu?\n"
-    "SQL Output:\n"
     'SELECT SUM(T1."Thành tiền") AS "Tổng doanh thu"\n'
     'FROM "ban_hang" AS T1\n'
     "WHERE T1.\"Tên hàng\" LIKE '%Sữa tươi%'\n"
     "  AND T1.\"Ngày tháng\" >= '2026-01-01'\n"
     "  AND T1.\"Ngày tháng\" <= '2026-01-31';\n"
     "\n"
-    "Example 2:\n"
-    "User Question: Top 5 khách hàng mua nhiều nhất theo số lượng trong hóa đơn chi tiết?\n"
-    "SQL Output:\n"
     'SELECT T2."Tên khách", SUM(T1."Số lượng") AS "Tổng số lượng"\n'
     'FROM "hoa_don_chi_tiet" AS T1\n'
     'JOIN "khach_hang" AS T2 ON T1."Mã khách" = T2."Mã khách"\n'

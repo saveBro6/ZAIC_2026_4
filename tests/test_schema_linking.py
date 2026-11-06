@@ -194,10 +194,17 @@ def test_ast_parser_unqualified_column_resolution(ast_extractor: SQLASTExtractor
 
 
 def test_ast_parser_clean_sql(ast_extractor: SQLASTExtractor) -> None:
-    """Verify stripping markdown code fences, comments, and semicolons."""
+    """Verify stripping markdown code fences, comments, echoed questions, and semicolons."""
     raw = "```sql\n-- Calculate total\nSELECT col1 FROM table1;\n```"
     cleaned = ast_extractor.clean_sql(raw)
     assert cleaned == "SELECT col1 FROM table1"
+
+    # Echoed user question before SELECT query
+    echoed_question = (
+        "Thống kê tổng tiền bán của mặt hàng Thuốc trong tháng 02/2026 là bao nhiêu?\n"
+        'SELECT SUM(T1."Thanh tien") FROM "ban_hang" AS T1;'
+    )
+    assert ast_extractor.clean_sql(echoed_question) == 'SELECT SUM(T1."Thanh tien") FROM "ban_hang" AS T1'
 
 
 def test_ast_parser_fallback_on_malformed_sql(ast_extractor: SQLASTExtractor) -> None:

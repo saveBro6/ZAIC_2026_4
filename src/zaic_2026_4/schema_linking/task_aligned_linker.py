@@ -203,9 +203,8 @@ class TaskAlignedSchemaLinker:
 
         # Step 3: Process each variant with AST extraction & LSH re-prompting loop
         for idx, variant in enumerate(variants):
-            test_sql = initial_sqls[idx] if idx < len(initial_sqls) else ""
-            if not isinstance(test_sql, str):
-                test_sql = str(test_sql)
+            raw_sql = initial_sqls[idx] if idx < len(initial_sqls) else ""
+            test_sql = self.ast_parser.clean_sql(str(raw_sql))
 
             initial_sql_saved = test_sql
             retry_count = 0
@@ -258,13 +257,15 @@ class TaskAlignedSchemaLinker:
                         reprompt_warning=reprompt_guidance,
                     )
 
-                    test_sql = self.llm_engine.generate(
+                    revised_res = self.llm_engine.generate(
                         revised_prompt,
                         max_tokens=256,
                         stop=["</output>", "\n\n\n", "<|im_end|>", "<|endoftext|>"],
                     )
-                    if isinstance(test_sql, list):
-                        test_sql = test_sql[0]
+                    if isinstance(revised_res, list):
+                        revised_res = revised_res[0]
+
+                    test_sql = self.ast_parser.clean_sql(str(revised_res))
 
                     retry_count += 1
                     total_retries += 1
