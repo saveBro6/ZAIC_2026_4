@@ -444,15 +444,16 @@ def test_embedder_cache_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None
     import vllm
     monkeypatch.setattr(vllm, "LLM", FakeLLM)
 
-    # First instantiation: should call FakeLLM and populate cache
+    # First instantiation: accessing embedder should call FakeLLM and populate cache
     indexer1 = SemanticVectorIndexer(model_path="custom/test-model")
+    assert indexer1.embedder is not None
     assert llm_init_count == 1
     assert get_embedder_cache_size() == 1
 
     # Second instantiation with identical parameters: should reuse cached embedder without calling FakeLLM
     indexer2 = SemanticVectorIndexer(model_path="custom/test-model")
-    assert llm_init_count == 1  # Remained 1, verified single load
     assert indexer2.embedder is indexer1.embedder
+    assert llm_init_count == 1  # Remained 1, verified single load
     assert get_embedder_cache_size() == 1
 
     # Clear cache and verify

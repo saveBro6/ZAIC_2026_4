@@ -252,6 +252,9 @@ def test_context_builder_5_variants(
     assert len(variants) == 5
     case_names = [v.case_name for v in variants]
     assert case_names == ["case_a", "case_b", "case_c", "case_d", "case_e"]
+    for v in variants:
+        assert "<few_shot_examples>" in v.formatted_prompt
+        assert 'SELECT SUM(T1."Thành tiền")' in v.formatted_prompt
 
     # Case a: Focused + Minimal
     assert variants[0].profile_type == "minimal_profile"
