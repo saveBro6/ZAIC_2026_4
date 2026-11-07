@@ -18,13 +18,19 @@ logger = logging.getLogger(__name__)
 def normalize_identifier(name: str) -> str:
     """Normalize string by removing accents, non-alphanumeric chars, and converting to lowercase.
 
+    Handles Vietnamese 'Đ'/'đ' which are not decomposed by Unicode NFD.
+
     Examples:
-        'Ngày tháng' -> 'ngaythang'
-        'Ngay_thang'  -> 'ngaythang'
-        'Thanh tien'  -> 'thanhtien'
-        'so_luong'    -> 'soluong'
+        'Ngày tháng'    -> 'ngaythang'
+        'Ngay_thang'     -> 'ngaythang'
+        'Thanh tien'     -> 'thanhtien'
+        'Quy ra ĐV lẻ'   -> 'quyradvle'
+        'Quy_ra_DV_le'   -> 'quyradvle'
+        'Đối tác'        -> 'doitac'
+        'Doi_tac'        -> 'doitac'
     """
-    s = unicodedata.normalize("NFD", name)
+    s = name.replace("đ", "d").replace("Đ", "D")
+    s = unicodedata.normalize("NFD", s)
     s = "".join(c for c in s if unicodedata.category(c) != "Mn")
     return re.sub(r"[^a-zA-Z0-9]", "", s).lower()
 

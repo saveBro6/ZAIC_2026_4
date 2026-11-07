@@ -93,7 +93,7 @@ class SQLASTExtractor:
             # Match original, unaccented, or slugified variants
             variants_to_quote = {col_name}
             # Add variant without accents
-            norm_name = unicodedata.normalize("NFD", col_name)
+            norm_name = unicodedata.normalize("NFD", col_name.replace("đ", "d").replace("Đ", "D"))
             unaccented = "".join(c for c in norm_name if unicodedata.category(c) != "Mn")
             variants_to_quote.add(unaccented)
             variants_to_quote.add(unaccented.replace(" ", "_"))

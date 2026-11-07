@@ -407,10 +407,12 @@ def test_schema_post_processor_hallucination_and_syntax_cleaning() -> None:
         "T1.Noi dung LIKE",
         "T1.Ten hang LIKE",
         "T1.Thanh tien) AS",
+        "T1.Quy_ra_DV_le",
         "ban_hang.Ngay_thang",
         "ban_hang.Noi_dung",
         "ban_hang.Ten_hang",
         "ban_hang.Thanh_tien",
+        "ban_hang.Doi_tac",
     }
 
     aliases = {"T1": "ban_hang"}
@@ -429,17 +431,21 @@ def test_schema_post_processor_hallucination_and_syntax_cleaning() -> None:
     assert "ban_hang.Ten_hang" not in canonical
     assert "ban_hang.Ten hang" not in canonical
 
-    # Valid columns must be canonicalized and quoted
+    # Valid columns must be canonicalized and quoted (including Vietnamese Đ/đ normalization)
     assert 'ban_hang."Ngày tháng"' in quoted
     assert "ban_hang.Ngày tháng" in canonical
     assert 'ban_hang."Nội dung"' in quoted
     assert "ban_hang.Nội dung" in canonical
     assert 'ban_hang."Thanh tien"' in quoted
     assert "ban_hang.Thanh tien" in canonical
+    assert 'ban_hang."Quy ra ĐV lẻ"' in quoted
+    assert "ban_hang.Quy ra ĐV lẻ" in canonical
+    assert 'ban_hang."Đối tác"' in quoted
+    assert "ban_hang.Đối tác" in canonical
 
-    # Exactly 3 unique ground-truth columns should remain
-    assert len(quoted) == 3
-    assert len(canonical) == 3
+    # Exactly 5 unique ground-truth columns should remain
+    assert len(quoted) == 5
+    assert len(canonical) == 5
 
 
 def test_schema_post_processor_multi_table_resolution() -> None:
