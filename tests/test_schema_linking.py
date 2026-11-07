@@ -319,10 +319,14 @@ def test_task_aligned_schema_linking_fresno_benchmark(
 
     # Verify re-prompting triggered and resolved
     assert result.total_retries >= 1
-    assert "schools.District" in result.final_linked_schema
-    assert "schools.Zip" in result.final_linked_schema
-    assert "frpm.CDSCode" in result.final_linked_schema
-    assert "schools.CDSCode" in result.final_linked_schema
+    assert 'schools."District"' in result.final_linked_schema
+    assert "schools.District" in result.canonical_schema
+    assert 'schools."Zip"' in result.final_linked_schema
+    assert "schools.Zip" in result.canonical_schema
+    assert 'frpm."CDSCode"' in result.final_linked_schema
+    assert "frpm.CDSCode" in result.canonical_schema
+    assert 'schools."CDSCode"' in result.final_linked_schema
+    assert "schools.CDSCode" in result.canonical_schema
 
 
 # ---------------------------------------------------------------------------
@@ -372,5 +376,112 @@ def test_functional_task_aligned_schema_linking(
     )
 
     assert isinstance(final_schema, set)
-    assert "schools.District" in final_schema
-    assert "schools.Zip" in final_schema
+    assert 'schools."District"' in final_schema
+    assert 'schools."Zip"' in final_schema
+
+
+# ---------------------------------------------------------------------------
+# Test Checklist 6: Schema Post-Processor & Ground-Truth Quoting
+# ---------------------------------------------------------------------------
+
+
+def test_schema_post_processor_hallucination_and_syntax_cleaning() -> None:
+    """Verify post-processor eliminates hallucinations, cleans aliases, and quotes verified columns."""
+    from zaic_2026_4.schema_linking.post_processor import SchemaPostProcessor
+
+    metadata = {
+        "ban_hang.Giá bán": {"data_format": "REAL"},
+        "ban_hang.Kết quả": {"data_format": "STRING"},
+        "ban_hang.Nội dung": {"data_format": "STRING"},
+        "ban_hang.Ngày tháng": {"data_format": "STRING"},
+        "ban_hang.Đơn vị (tính)": {"data_format": "STRING"},
+        "ban_hang.so_luong": {"data_format": "INTEGER"},
+        "ban_hang.Thanh tien": {"data_format": "REAL"},
+        "ban_hang.Quy ra ĐV lẻ": {"data_format": "INTEGER"},
+        "ban_hang.Mã hóa đơn": {"data_format": "STRING"},
+        "ban_hang.Đối tác": {"data_format": "STRING"},
+    }
+
+    raw_candidates = {
+        "T1.Ngay thang",
+        "T1.Noi dung LIKE",
+        "T1.Ten hang LIKE",
+        "T1.Thanh tien) AS",
+        "ban_hang.Ngay_thang",
+        "ban_hang.Noi_dung",
+        "ban_hang.Ten_hang",
+        "ban_hang.Thanh_tien",
+    }
+
+    aliases = {"T1": "ban_hang"}
+
+    quoted, canonical = SchemaPostProcessor.post_process_linked_schema(
+        raw_fields=raw_candidates,
+        processed_metadata=metadata,
+        table_aliases=aliases,
+        always_quote=True,
+    )
+
+    # Hallucinated columns Ten_hang and Ten hang must be discarded
+    assert not any("ten" in c.split(".", 1)[-1].lower() for c in canonical)
+    assert 'ban_hang."Ten_hang"' not in quoted
+    assert 'ban_hang."Ten hang"' not in quoted
+    assert "ban_hang.Ten_hang" not in canonical
+    assert "ban_hang.Ten hang" not in canonical
+
+    # Valid columns must be canonicalized and quoted
+    assert 'ban_hang."Ngày tháng"' in quoted
+    assert "ban_hang.Ngày tháng" in canonical
+    assert 'ban_hang."Nội dung"' in quoted
+    assert "ban_hang.Nội dung" in canonical
+    assert 'ban_hang."Thanh tien"' in quoted
+    assert "ban_hang.Thanh tien" in canonical
+
+    # Exactly 3 unique ground-truth columns should remain
+    assert len(quoted) == 3
+    assert len(canonical) == 3
+
+
+def test_schema_post_processor_multi_table_resolution() -> None:
+    """Verify post-processor resolves aliases and columns across multiple tables."""
+    from zaic_2026_4.schema_linking.post_processor import SchemaPostProcessor
+
+    metadata = {
+        "ban_hang.Mã khách": {"data_format": "STRING"},
+        "ban_hang.Thanh tien": {"data_format": "REAL"},
+        "khach_hang.Mã khách": {"data_format": "STRING"},
+        "khach_hang.Tên khách": {"data_format": "STRING"},
+    }
+
+    raw_candidates = {
+        "T1.Thanh tien",
+        "T1.Ma_khach",
+        "T2.Ma_khach",
+        "T2.Ten khach LIKE",
+        "T2.Email_fake",  # Hallucination on table 2
+    }
+
+    aliases = {"T1": "ban_hang", "T2": "khach_hang"}
+
+    quoted, canonical = SchemaPostProcessor.post_process_linked_schema(
+        raw_fields=raw_candidates,
+        processed_metadata=metadata,
+        table_aliases=aliases,
+        always_quote=True,
+    )
+
+    # Hallucinated column Email_fake rejected
+    assert not any("Email" in c for c in canonical)
+
+    # Verified multi-table columns
+    assert 'ban_hang."Thanh tien"' in quoted
+    assert 'ban_hang."Mã khách"' in quoted
+    assert 'khach_hang."Mã khách"' in quoted
+    assert 'khach_hang."Tên khách"' in quoted
+    assert len(quoted) == 4
+
+    # Format for SQL Generation XML
+    xml_output = SchemaPostProcessor.format_for_sql_generation(quoted, metadata)
+    assert '<table name="ban_hang">' in xml_output
+    assert '<table name="khach_hang">' in xml_output
+    assert '<column name="Tên khách"' in xml_output

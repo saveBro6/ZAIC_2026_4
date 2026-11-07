@@ -100,12 +100,13 @@ def verify_schema_linking(
 
     assert len(result.final_linked_schema) > 0, "Final linked schema must not be empty"
 
-    return {
+    output_data = {
         "biz_id": biz_id,
         "question": question,
         "elapsed_seconds": elapsed,
         "total_retries": result.total_retries,
         "final_linked_schema": sorted(result.final_linked_schema),
+        "canonical_schema": sorted(result.canonical_schema),
         "variant_traces": [
             {
                 "case_name": t.case_name,
@@ -118,6 +119,13 @@ def verify_schema_linking(
             for t in result.variant_traces
         ],
     }
+
+    result_file = cache_dir / "schema_linking_result.json"
+    with open(result_file, "w", encoding="utf-8") as f:
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+    print(f"\nSaved schema linking result to: {result_file}")
+    return output_data
 
 
 def main() -> None:

@@ -16,6 +16,7 @@ from zaic_2026_4.schema_linking.ast_parser import SQLASTExtractor
 from zaic_2026_4.schema_linking.context_builder import (
     SchemaContextBuilder,
 )
+from zaic_2026_4.schema_linking.post_processor import SchemaPostProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,15 @@ class SchemaLinkingResult:
     """Consolidated result of Task-Aligned Schema Linking."""
 
     final_linked_schema: set[str]
+    canonical_schema: set[str] = field(default_factory=set)
     variant_traces: list[VariantExecutionTrace] = field(default_factory=list)
     total_retries: int = 0
     all_harvested_fields: set[str] = field(default_factory=set)
     preserved_keys: set[str] = field(default_factory=set)
+
+    def format_for_sql_generation(self, processed_metadata: dict[str, Any]) -> str:
+        """Format quoted schema into clean XML context for downstream Phase 04 SQL Generation."""
+        return SchemaPostProcessor.format_for_sql_generation(self.final_linked_schema, processed_metadata)
 
 
 class TaskAlignedSchemaLinker:
@@ -290,16 +296,27 @@ class TaskAlignedSchemaLinker:
             )
 
         # Step 4: Key preservation (Primary Keys, Foreign Keys, Undocumented Joins)
-        final_linked_schema = self.preserve_linking_keys(
+        raw_final_schema = self.preserve_linking_keys(
             linked_fields=linked_fields,
             raw_profile=raw_profile,
             processed_metadata=processed_metadata,
         )
 
-        preserved = final_linked_schema - linked_fields
+        # Step 5: Post-processing (ground-truth validation, alias resolution, double-quoting for SQL generation)
+        all_sqls = [t.final_sql for t in traces] + [t.initial_sql for t in traces]
+        discovered_aliases = SchemaPostProcessor.extract_table_aliases(all_sqls)
+        quoted_schema, canonical_schema = SchemaPostProcessor.post_process_linked_schema(
+            raw_fields=raw_final_schema,
+            processed_metadata=processed_metadata,
+            table_aliases=discovered_aliases,
+            always_quote=True,
+        )
+
+        preserved = canonical_schema - linked_fields
 
         return SchemaLinkingResult(
-            final_linked_schema=final_linked_schema,
+            final_linked_schema=quoted_schema,
+            canonical_schema=canonical_schema,
             variant_traces=traces,
             total_retries=total_retries,
             all_harvested_fields=linked_fields,

@@ -7,6 +7,7 @@ to ensure fault tolerance against malformed trial SQL completions.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import sqlglot
 from sqlglot import exp
@@ -89,9 +90,18 @@ class SQLASTExtractor:
         quoted_sql = cleaned
         for col_key in known_cols_set:
             col_name = col_key.split(".", 1)[-1]
-            if " " in col_name and col_name in quoted_sql:
-                pattern = re.compile(rf'(?<!["`\[]){re.escape(col_name)}(?!["`\]])')
-                quoted_sql = pattern.sub(f'"{col_name}"', quoted_sql)
+            # Match original, unaccented, or slugified variants
+            variants_to_quote = {col_name}
+            # Add variant without accents
+            norm_name = unicodedata.normalize("NFD", col_name)
+            unaccented = "".join(c for c in norm_name if unicodedata.category(c) != "Mn")
+            variants_to_quote.add(unaccented)
+            variants_to_quote.add(unaccented.replace(" ", "_"))
+
+            for v in variants_to_quote:
+                if len(v) >= 2 and v in quoted_sql:
+                    pattern = re.compile(rf'(?<!["`\[]){re.escape(v)}(?!["`\]])')
+                    quoted_sql = pattern.sub(f'"{col_name}"', quoted_sql)
 
         try:
             return self._parse_with_sqlglot(quoted_sql, table_to_cols, known_cols_set)
@@ -192,23 +202,38 @@ class SQLASTExtractor:
         # Extract table aliases: FROM <table> AS <alias> or JOIN <table> <alias>
         aliases: dict[str, str] = {}
         alias_pattern = re.compile(
-            r"\b(?:FROM|JOIN)\s+([\"\`\[]?[\w\s\.\-]+[\"\`\]]?)(?:\s+(?:AS\s+)?([\"\`\[]?[\w\-]+[\"\`\]]?))?",
+            r"\b(?:FROM|JOIN)\s+([\"\`\[]?[\w\-]+[\"\`\]]?)(?:\s+(?:AS\s+)?([\"\`\[]?[\w\-]+[\"\`\]]?))?",
             re.IGNORECASE,
         )
+        reserved_sql_keywords = {
+            "ON", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "GROUP", "ORDER",
+            "SELECT", "FROM", "HAVING", "LIMIT", "SET", "VALUES", "INSERT", "UPDATE", "DELETE",
+        }
         for match in alias_pattern.finditer(sql_text):
             tbl = match.group(1).strip("\"`[] ")
             alias = match.group(2).strip("\"`[] ") if match.group(2) else None
-            aliases[tbl] = tbl
-            if alias and alias.upper() not in ("ON", "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER"):
-                aliases[alias] = tbl
+            if tbl and tbl.upper() not in reserved_sql_keywords:
+                aliases[tbl] = tbl
+                if alias and alias.upper() not in reserved_sql_keywords:
+                    aliases[alias] = tbl
 
         # Extract column references: <tbl_or_alias>.<col>
+        # Handles both quoted and unquoted multi-word column names
         col_dot_pattern = re.compile(
-            r"([\"\`\[]?[\w\-]+[\"\`\]]?)\.([\"\`\[]?[\w\s\(\)\/\#\-\:\,]+[\"\`\]]?)"
+            r"([\"\`\[]?[\w\-]+[\"\`\]]?)\.(?:\"([^\"]+)\"|`([^`]+)`|\[([^\]]+)\]|([a-zA-Z0-9_\u0080-\uffff]+(?:\s+[a-zA-Z0-9_\u0080-\uffff]+)*))",
+            re.IGNORECASE,
         )
         for match in col_dot_pattern.finditer(sql_text):
             t_ref = match.group(1).strip("\"`[] ")
-            c_name = match.group(2).strip("\"`[] ")
+            raw_c = match.group(2) or match.group(3) or match.group(4) or match.group(5) or ""
+            # Strip trailing SQL clauses
+            c_name = re.split(
+                r"\s+(?:LIKE|AS|AND|OR|WHERE|IN|BETWEEN|ORDER|GROUP|HAVING|LIMIT|\=|\>|\<|\!|\))",
+                raw_c,
+                flags=re.IGNORECASE,
+            )[0].strip("\"`[](),;")
+            if not c_name:
+                continue
             real_tbl = aliases.get(t_ref, t_ref)
             fields_q.add(f"{real_tbl}.{c_name}")
 

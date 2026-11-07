@@ -132,6 +132,7 @@ def main() -> None:
         "elapsed_seconds": round(elapsed, 3),
         "total_retries": result.total_retries,
         "final_linked_schema": sorted(result.final_linked_schema),
+        "canonical_schema": sorted(result.canonical_schema),
         "preserved_keys": sorted(result.preserved_keys),
         "variant_traces": [
             {
