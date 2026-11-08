@@ -1,13 +1,11 @@
 """Orchestration service for business-level and split-level ingestion pipelines."""
 
-import os
-from pathlib import Path
 import time
+from pathlib import Path
 
+from zaic_2026_4.constants import DEFAULT_BASE_OUTPUT_DIR
 from zaic_2026_4.ingestion.extractors import discover_and_extract_business
 from zaic_2026_4.ingestion.sqlite_sink import write_tables_to_sqlite
-
-DEFAULT_BASE_OUTPUT_DIR = Path(os.environ.get("ZAIC_OUTPUT_DIR", "/tmp/zaic_db"))
 
 
 def infer_split_name(path: Path) -> str | None:

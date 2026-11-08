@@ -17,15 +17,17 @@ from typing import Any, Protocol, runtime_checkable
 import faiss
 import numpy as np
 
-DEFAULT_MODEL_PATH = "/app/models/bge-m3"
-DEFAULT_MAX_LENGTH = 4096
-DEFAULT_BATCH_SIZE = 32
-DEFAULT_TOP_K = 10
-DEFAULT_EMBEDDING_DIM = 1024
-DEFAULT_MAX_CHUNK_CHARS = 1000
-DEFAULT_MIN_CHUNK_CHARS = 150
-DEFAULT_VLLM_GPU_MEMORY_UTILIZATION = 0.20
-MIN_TABLE_ROWS_FOR_SPLIT = 3
+from zaic_2026_4.constants import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_EMBED_GPU_UTIL,
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_MAX_CHUNK_CHARS,
+    DEFAULT_MAX_LENGTH,
+    DEFAULT_MIN_CHUNK_CHARS,
+    DEFAULT_MODEL_PATH,
+    DEFAULT_TOP_K,
+    MIN_TABLE_ROWS_FOR_SPLIT,
+)
 
 # Module-level in-memory cache to ensure BGE-M3 is loaded only once per process lifecycle
 _EMBEDDER_CACHE: dict[tuple[str, float, int, bool], Any] = {}
@@ -370,7 +372,7 @@ class SemanticVectorIndexer:
             else float(
                 os.environ.get(
                     "VLLM_EMBEDDING_GPU_MEMORY_UTILIZATION",
-                    DEFAULT_VLLM_GPU_MEMORY_UTILIZATION,
+                    DEFAULT_EMBED_GPU_UTIL,
                 )
             )
         )

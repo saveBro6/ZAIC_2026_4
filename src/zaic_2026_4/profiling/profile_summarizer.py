@@ -10,139 +10,15 @@ from typing import Any, Protocol, runtime_checkable
 # Disable FlashInfer top-p/top-k sampler by default to prevent JIT compilation failures on NVCC < 12.2
 os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
+from zaic_2026_4.constants import (
+    DEFAULT_LOCAL_GPU_UTIL,
+    DEFAULT_LOCAL_MODEL,
+    DEFAULT_PROD_GPU_UTIL,
+    DEFAULT_PROD_MODEL,
+    MAXIMAL_PROFILE_PROMPT,
+    MINIMAL_PROFILE_PROMPT,
+)
 from zaic_2026_4.profiling.raw_profiler import ColumnProfile, DatabaseProfile
-
-DEFAULT_PROD_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-DEFAULT_LOCAL_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
-DEFAULT_PROD_GPU_UTIL = 0.95
-DEFAULT_LOCAL_GPU_UTIL = 0.60
-
-
-MINIMAL_PROFILE_PROMPT = """<system>
-You are an expert data analyst for Vietnamese SMB (Small and Medium Business) databases.
-Your objective is to generate a concise, 1-sentence SHORT SUMMARY in Vietnamese describing the exact business meaning and basic data format of the target column.
-</system>
-
-<instructions>
-1. Business Meaning: Describe what business entity, attribute, or transaction property this column represents. Decode Vietnamese SMB abbreviations if present (e.g., SP -> Sản phẩm, KH -> Khách hàng, ĐVT -> Đơn vị tính, HĐ -> Hóa đơn).
-2. Data Format: Specify the underlying physical and logical format (e.g., Alphanumeric code, ISO date, VND currency with thousand separators, categorical status flag, integer count).
-3. Brevity Constraint: Output EXACTLY ONE concise Vietnamese sentence. Do not add boilerplate, preambles, or conversational prefixes.
-</instructions>
-
-<business_readme>
-{business_readme}
-</business_readme>
-
-<few_shot_examples>
-  <example id="1">
-    <target_column>
-      Table: "DonHang"
-      Column: "ma_kh"
-      Sibling Columns: ["id", "ngay_tao", "tong_tien", "trang_thai"]
-      Nulls: 0/15000 (0.00%)
-      Distinct Count: 3200
-      Format & Hints: STRING | Code identifier
-      Sample Values: ["KH0001", "KH0002", "KH0158", "VANG_LAI"]
-    </target_column>
-    <output>
-      Mã định danh khách hàng (KH: Khách Hàng, VANG_LAI: khách mua vãng lai không lưu hồ sơ); định dạng chuỗi mã ký tự chữ và số.
-    </output>
-  </example>
-
-  <example id="2">
-    <target_column>
-      Table: "ChiTietDonHang"
-      Column: "thanh_tien"
-      Sibling Columns: ["ma_sp", "so_luong", "don_gia", "chiet_khau"]
-      Nulls: 0/45000 (0.00%)
-      Distinct Count: 1250
-      Format & Hints: CURRENCY | Formatted VND currency. Clean thousand separators before aggregations.
-      Sample Values: ["12,000", "45,000", "150,000", "0"]
-    </target_column>
-    <output>
-      Tổng số tiền thực thu của dòng sản phẩm sau khi trừ chiết khấu dòng; định dạng số tiền VNĐ có dấu phân cách hàng nghìn cần làm sạch trước khi tính toán.
-    </output>
-  </example>
-</few_shot_examples>
-
-<target_column>
-  Table: "{table_name}"
-  Column: "{col_name}"
-  Sibling Columns: {sibling_cols}
-  Nulls: {null_count}/{total_rows} ({null_ratio:.2%})
-  Distinct Count: {distinct_count}
-  Format & Hints: {data_format} | {llm_hint}
-  Sample Values: {samples}
-</target_column>
-
-<output>
-"""
-
-
-MAXIMAL_PROFILE_PROMPT = """<system>
-You are an expert data architect and SQL engineer for Vietnamese SMB databases.
-Your objective is to generate an in-depth, structured LONG SUMMARY in Vietnamese for the target column to guide downstream Text-to-SQL generation and semantic vector retrieval.
-</system>
-
-<instructions>
-Include the following 4 structural aspects in Vietnamese:
-1. Business Meaning: Operational role in the business workflow, entity relationship, and relation to sibling columns.
-2. Data Cleanliness & Distribution: Completeness (null count and ratio), cardinality (distinct count), value boundaries ([min_val to max_val]).
-3. Dominant Patterns: Frequent categories from Top-10 samples and percentage dominance.
-4. Technical SQL / Query Guidance: Specific data cleaning, casting instructions (e.g. handling formatted VND strings, parsing DD/MM/YYYY dates to ISO YYYY-MM-DD), and business status filtering.
-</instructions>
-
-<business_readme>
-{business_readme}
-</business_readme>
-
-<few_shot_examples>
-  <example id="1">
-    <target_column>
-      Table: "SoBanHang"
-      Column: "Trạng thái xử lý"
-      Nulls: 526/43605 (1.21%)
-      Distinct Count: 4
-      Value Range: ["Không giao được" to "đang gửi"]
-      Format & Pattern: STRING (Categorical status)
-      Top 10 Samples: {{"Đã hoàn thành": 41248, "Không giao được": 1163, "trả hàng": 660, "đang gửi": 8}}
-      Code / SQL Hint: Categorical status string. Exclude cancelled/returned orders for revenue calculation per business rules.
-    </target_column>
-    <output>
-      Cột lưu trữ trạng thái xử lý đơn hàng trong sổ bán hàng, đóng vai trò cờ phân loại giao dịch (status flag). Dữ liệu có 4 giá trị phân loại với 1.21% giá trị NULL; giá trị chiếm đa số tuyệt đối là 'Đã hoàn thành' (94.6%), tiếp theo là 'Không giao được' và 'trả hàng'. Khi truy vấn tính toán doanh thu hoặc sản phẩm bán chạy theo quy ước nghiệp vụ, BẮT BUỘC phải lọc loại bỏ các trạng thái huỷ/hoàn ('trả hàng', 'Không giao được') bằng điều kiện: WHERE "Trạng thái xử lý" = 'Đã hoàn thành'.
-    </output>
-  </example>
-
-  <example id="2">
-    <target_column>
-      Table: "HoaDon"
-      Column: "ngay_lap"
-      Nulls: 0/50000 (0.00%)
-      Distinct Count: 730
-      Value Range: ["01/01/2024" to "31/12/2025"]
-      Format & Pattern: DATE (SLASH_DATE_DD_MM_YYYY)
-      Top 10 Samples: {{"15/01/2025": 140, "20/01/2025": 135, "05/02/2025": 128}}
-      Code / SQL Hint: Date in DD/MM/YYYY format. Convert to ISO YYYY-MM-DD for SQL temporal filtering.
-    </target_column>
-    <output>
-      Cột ghi nhận mốc thời gian lập hóa đơn bán lẻ của doanh nghiệp. Cột không có giá trị NULL (100% đầy đủ) với 730 ngày giao dịch liên tục từ 01/01/2024 đến 31/12/2025. Định dạng ngày tháng lưu trữ là chuỗi DD/MM/YYYY (Việt Nam), do đó khi thực hiện truy vấn so sánh thời gian, lọc theo mốc as_of_date hoặc liên kết với calendar.csv, cần chuẩn hóa sang chuẩn ISO YYYY-MM-DD hoặc sử dụng hàm phân tích ngày: SUBSTR(ngay_lap, 7, 4) || '-' || SUBSTR(ngay_lap, 4, 2) || '-' || SUBSTR(ngay_lap, 1, 2).
-    </output>
-  </example>
-</few_shot_examples>
-
-<target_column>
-  Table: "{table_name}"
-  Column: "{col_name}"
-  Nulls: {null_count}/{total_rows} ({null_ratio:.2%})
-  Distinct Count: {distinct_count}
-  Value Range: [{min_val} to {max_val}]
-  Format & Pattern: {data_format} ({subtype_info})
-  Top 10 Samples: {top_10}
-  Code / SQL Hint: {llm_hint}
-</target_column>
-
-<output>
-"""
 
 
 @runtime_checkable

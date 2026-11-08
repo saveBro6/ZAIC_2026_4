@@ -14,22 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-FEW_SHOT_SQL_EXAMPLES: str = (
-    "<few_shot_examples>\n"
-    'SELECT SUM(T1."Thành tiền") AS "Tổng doanh thu"\n'
-    'FROM "ban_hang" AS T1\n'
-    "WHERE T1.\"Tên hàng\" LIKE '%Sữa tươi%'\n"
-    "  AND T1.\"Ngày tháng\" >= '2026-01-01'\n"
-    "  AND T1.\"Ngày tháng\" <= '2026-01-31';\n"
-    "\n"
-    'SELECT T2."Tên khách", SUM(T1."Số lượng") AS "Tổng số lượng"\n'
-    'FROM "hoa_don_chi_tiet" AS T1\n'
-    'JOIN "khach_hang" AS T2 ON T1."Mã khách" = T2."Mã khách"\n'
-    'GROUP BY T2."Mã khách", T2."Tên khách"\n'
-    'ORDER BY "Tổng số lượng" DESC\n'
-    "LIMIT 5;\n"
-    "</few_shot_examples>"
-)
+from zaic_2026_4.constants import FEW_SHOT_SQL_EXAMPLES
 
 
 @dataclass

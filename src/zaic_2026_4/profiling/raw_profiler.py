@@ -1,13 +1,38 @@
 """Raw database profiling, Shape & Pattern recognition, and MinHash undocumented join discovery."""
 
 import json
-from pathlib import Path
-import re
 import sqlite3
+from pathlib import Path
 from typing import Any, TypedDict
 
-from datasketch import MinHash
 import polars as pl
+from datasketch import MinHash
+
+from zaic_2026_4.constants import (
+    ACCOUNTING_DASH_ZERO_REGEX,
+    ACCOUNTING_PARENTHESES_REGEX,
+    EN_DATE_ABBR_REGEX,
+    EN_DATE_FULL_REGEX,
+    EN_DATE_WEEKDAY_REGEX,
+    EXCEL_SERIAL_REGEX,
+    ISO_DATE_REGEX,
+    ISO_DATETIME_REGEX,
+    KEY_TOKENS,
+    NON_KEY_METRIC_TOKENS,
+    PLAIN_NUMBER_REGEX,
+    SCALED_BILLION_TY_REGEX,
+    SCALED_MILLION_TR_REGEX,
+    SCALED_THOUSAND_K_REGEX,
+    SLASH_DATE_REGEX,
+    SLASH_DATE_SHORT_REGEX,
+    STANDARD_THOUSAND_SEPARATOR_REGEX,
+    VIEW_FROM_REGEX,
+    VN_DATE_ABBR_REGEX,
+    VN_DATE_FULL_REGEX,
+    VN_DATE_WEEKDAY_REGEX,
+    VND_SYMBOL_REGEX,
+    VND_TEXT_REGEX,
+)
 
 
 class ColumnProfile(TypedDict):
@@ -59,81 +84,6 @@ class DatabaseProfile(TypedDict):
 
     tables: dict[str, TableProfile]
     undocumented_joins: list[UndocumentedJoin]
-
-
-# Regex patterns for Excel Custom Date Taxonomy
-ISO_DATE_REGEX = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
-ISO_DATETIME_REGEX = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?$")
-SLASH_DATE_REGEX = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
-SLASH_DATE_SHORT_REGEX = re.compile(r"^\d{1,2}/\d{1,2}/\d{2}$")
-VN_DATE_ABBR_REGEX = re.compile(r"^\d{1,2}\s+thg\s+\d{1,2}(?:\s+\d{4})?$", re.IGNORECASE)
-EN_DATE_ABBR_REGEX = re.compile(
-    r"^\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4}$",
-    re.IGNORECASE,
-)
-VN_DATE_FULL_REGEX = re.compile(
-    r"^(?:ngày\s+)?\d{1,2}\s+tháng\s+\d{1,2}(?:\s+năm\s+\d{4})?$",
-    re.IGNORECASE,
-)
-EN_DATE_FULL_REGEX = re.compile(
-    r"^(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,\s*|\s+)\d{4}$",
-    re.IGNORECASE,
-)
-VN_DATE_WEEKDAY_REGEX = re.compile(
-    r"^(?:thứ\s+(?:hai|ba|tư|bốn|năm|sáu|bảy|[2-7])|chủ\s+nhật|cn)[,\s]+\d{1,2}/\d{1,2}/\d{4}$",
-    re.IGNORECASE,
-)
-EN_DATE_WEEKDAY_REGEX = re.compile(
-    r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,\s]+\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}$",
-    re.IGNORECASE,
-)
-EXCEL_SERIAL_REGEX = re.compile(r"^\d{5}$")
-
-# Regex patterns for Excel Custom VNĐ Currency Taxonomy
-VND_TEXT_REGEX = re.compile(
-    r"^-?\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:vnđ|vnd)$",
-    re.IGNORECASE,
-)
-VND_SYMBOL_REGEX = re.compile(
-    r"^-?\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:₫|đ)$",
-    re.IGNORECASE,
-)
-ACCOUNTING_PARENTHESES_REGEX = re.compile(
-    r"^\(\s*\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:₫|đ|vnđ|vnd)?\s*\)$",
-    re.IGNORECASE,
-)
-ACCOUNTING_DASH_ZERO_REGEX = re.compile(
-    r"^-\s*(?:₫|đ|vnđ|vnd)?$",
-    re.IGNORECASE,
-)
-SCALED_THOUSAND_K_REGEX = re.compile(
-    r"^-?\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:k\s*vnđ|k\s*vnd|k)$",
-    re.IGNORECASE,
-)
-SCALED_MILLION_TR_REGEX = re.compile(
-    r"^-?\d+(?:[,\.]\d+)?\s*(?:tr\s*vnđ|tr\s*vnd|tr|triệu)$",
-    re.IGNORECASE,
-)
-SCALED_BILLION_TY_REGEX = re.compile(
-    r"^-?\d+(?:[,\.]\d+)?\s*(?:tỷ|ty)$",
-    re.IGNORECASE,
-)
-STANDARD_THOUSAND_SEPARATOR_REGEX = re.compile(r"^-?\d{1,3}(?:[,\.]\d{3})+(?:\.\d+)?$")
-PLAIN_NUMBER_REGEX = re.compile(r"^-?\d+(?:\.\d+)?$")
-
-# SQL FROM clause parser handling quoted identifiers with spaces/Vietnamese diacritics
-VIEW_FROM_REGEX = re.compile(
-    r'FROM\s+(?:\"([^\"]+)\"|\`([^\`]+)\`|\[([^\]]+)\]|([^\s,;]+))',
-    re.IGNORECASE,
-)
-
-# Token set for non-regex MinHash continuous numeric filtering
-KEY_TOKENS = frozenset({"id", "code", "stt", "key", "sku", "ref", "ma", "mã"})
-NON_KEY_METRIC_TOKENS = frozenset({
-    "tien", "tiền", "gia", "giá", "luong", "lượng", "phi", "phí",
-    "vat", "thue", "thuế", "du", "dư", "discount", "amount", "price",
-    "revenue", "cost", "total", "qty", "quantity", "count"
-})
 
 
 def _extract_name_tokens(col_name: str) -> set[str]:
