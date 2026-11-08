@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         "--gpu-mem",
         type=float,
         default=None,
-        help="GPU memory utilization override (e.g. 0.60 or 0.95).",
+        help="GPU memory utilization override (e.g. 0.60 or 0.70).",
     )
     parser.add_argument(
         "--mock",

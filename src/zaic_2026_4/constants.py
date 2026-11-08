@@ -22,7 +22,7 @@ DEFAULT_MAX_SAMPLE_VALUES: int = 10000
 # Profiling: LLM summarization defaults
 DEFAULT_PROD_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_LOCAL_MODEL: str = "Qwen/Qwen2.5-1.5B-Instruct"
-DEFAULT_PROD_GPU_UTIL: float = 0.95
+DEFAULT_PROD_GPU_UTIL: float = 0.70
 DEFAULT_LOCAL_GPU_UTIL: float = 0.60
 DEFAULT_LLM_MAX_LENGTH: int = 16384
 

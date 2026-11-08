@@ -114,7 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--gpu-memory-utilization",
         type=float,
         default=None,
-        help="Explicit GPU memory utilization fraction override (e.g., 0.95 or 0.60).",
+        help="Explicit GPU memory utilization fraction override (e.g., 0.70 or 0.60).",
     )
     parser.add_argument(
         "--mock-llm",

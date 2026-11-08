@@ -242,7 +242,7 @@ def create_engine(
     """Factory creating the appropriate LLM engine based on target environment.
 
     - Default (competition container with --gpus all):
-        Model: Qwen/Qwen2.5-7B-Instruct, gpu_memory_utilization: 0.95
+        Model: Qwen/Qwen2.5-7B-Instruct, gpu_memory_utilization: 0.70
     - Local mode (--local):
         Model: Qwen/Qwen2.5-1.5B-Instruct, gpu_memory_utilization: 0.60
     - Mock mode (mock=True):

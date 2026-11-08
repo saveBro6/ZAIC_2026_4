@@ -25,7 +25,7 @@ def test_default_constants() -> None:
     """Verify default models and GPU utilization constants adhere to technical requirements."""
     assert DEFAULT_PROD_MODEL == "Qwen/Qwen2.5-7B-Instruct"
     assert DEFAULT_LOCAL_MODEL == "Qwen/Qwen2.5-1.5B-Instruct"
-    assert DEFAULT_PROD_GPU_UTIL == 0.95
+    assert DEFAULT_PROD_GPU_UTIL == 0.70
     assert DEFAULT_LOCAL_GPU_UTIL == 0.60
 
 

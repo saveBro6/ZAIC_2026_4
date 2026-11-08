@@ -89,6 +89,12 @@ def main() -> None:
         help="Custom LLM model name or path.",
     )
     parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="Explicit GPU memory utilization fraction override (e.g. 0.70 or 0.60).",
+    )
+    parser.add_argument(
         "--seeds",
         type=int,
         nargs="+",
@@ -127,6 +133,7 @@ def main() -> None:
         local=args.local,
         model=args.model,
         mock=args.mock,
+        gpu_memory_utilization=args.gpu_memory_utilization,
     )
     embedder = MockEmbedder() if args.mock else None
     vector_model_path = "mock" if args.mock else "BAAI/bge-m3"
