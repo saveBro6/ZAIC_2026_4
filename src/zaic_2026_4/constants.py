@@ -223,7 +223,7 @@ NON_KEY_METRIC_TOKENS: frozenset[str] = frozenset({
 })
 
 # Profiling: Semantic vector indexer defaults
-DEFAULT_MODEL_PATH: str = "/app/models/bge-m3"
+DEFAULT_EMBED_MODEL_PATH: str = "/app/models/bge-m3"
 DEFAULT_MAX_LENGTH: int = 4096
 DEFAULT_BATCH_SIZE: int = 32
 DEFAULT_TOP_K: int = 10
@@ -259,14 +259,13 @@ __all__ = [
     "DEFAULT_BATCH_SIZE",
     "DEFAULT_EMBEDDING_DIM",
     "DEFAULT_EMBED_GPU_UTIL",
+    "DEFAULT_EMBED_MODEL_PATH",
     "DEFAULT_LOCAL_GPU_UTIL",
     "DEFAULT_LOCAL_MODEL",
     "DEFAULT_MAX_CHUNK_CHARS",
     "DEFAULT_MAX_LENGTH",
     "DEFAULT_MAX_SAMPLE_VALUES",
     "DEFAULT_MIN_CHUNK_CHARS",
-    # Vector indexer
-    "DEFAULT_MODEL_PATH",
     # LSH indexer
     "DEFAULT_NUM_PERM",
     "DEFAULT_PROD_GPU_UTIL",

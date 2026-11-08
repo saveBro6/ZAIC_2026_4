@@ -23,9 +23,7 @@ from zaic_2026_4.profiling.profile_summarizer import (
 )
 from zaic_2026_4.profiling.raw_profiler import RawDatabaseProfiler
 from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
-)
-from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_EMBED_MODEL_PATH,
     MockEmbedder,
     SemanticVectorIndexer,
 )
@@ -42,7 +40,7 @@ class ProfilingOrchestrator:
         rulebook_path: str | Path,
         llm_engine: LLMEngineProtocol | Any,
         embedder: Any | None = None,
-        vector_model_path: str = DEFAULT_VECTOR_MODEL_PATH,
+        vector_model_path: str = DEFAULT_EMBED_MODEL_PATH,
         cache_dir: str | Path | None = None,
         calendar_path: str | Path | None = None,
         calendar_cache_path: str | Path = "/tmp/calendar_profile.json",
@@ -322,7 +320,7 @@ def profile_split_calendar(
     calendar_path: str | Path,
     llm_engine: LLMEngineProtocol | Any,
     embedder: Any | None = None,
-    vector_model_path: str = DEFAULT_VECTOR_MODEL_PATH,
+    vector_model_path: str = DEFAULT_EMBED_MODEL_PATH,
     cache_path: str | Path = "/tmp/calendar_profile.json",
     force_rebuild: bool = False,
 ) -> dict[str, Any]:
@@ -465,7 +463,7 @@ def main() -> None:
     parser.add_argument(
         "--vector-model-path",
         type=str,
-        default=DEFAULT_VECTOR_MODEL_PATH,
+        default=DEFAULT_EMBED_MODEL_PATH,
         help="Embedding model path for FAISS indexer.",
     )
     parser.add_argument(

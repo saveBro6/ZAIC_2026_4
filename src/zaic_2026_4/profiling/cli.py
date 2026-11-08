@@ -18,14 +18,12 @@ from zaic_2026_4.profiling.profile_summarizer import (
 )
 from zaic_2026_4.profiling.raw_profiler import RawDatabaseProfiler
 from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
-)
-from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
-)
-from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_EMBED_MODEL_PATH,
     MockEmbedder,
     SemanticVectorIndexer,
+)
+from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
 )
 
 
@@ -164,9 +162,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vector-model",
         type=str,
-        default=DEFAULT_VECTOR_MODEL_PATH,
+        default=DEFAULT_EMBED_MODEL_PATH,
         help=(
-            f"Path or identifier for BGE-M3 model weights (default: {DEFAULT_VECTOR_MODEL_PATH})."
+            f"Path or identifier for BGE-M3 model weights (default: {DEFAULT_EMBED_MODEL_PATH})."
         ),
     )
     parser.add_argument(

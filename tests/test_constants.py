@@ -63,7 +63,7 @@ def test_constants_count_and_all() -> None:
         "KEY_TOKENS",
         "NON_KEY_METRIC_TOKENS",
         # Vector Indexer
-        "DEFAULT_MODEL_PATH",
+        "DEFAULT_EMBED_MODEL_PATH",
         "DEFAULT_MAX_LENGTH",
         "DEFAULT_BATCH_SIZE",
         "DEFAULT_TOP_K",
@@ -116,7 +116,7 @@ def test_constant_types_and_values() -> None:
     assert "tien" in constants.NON_KEY_METRIC_TOKENS
 
     # Vector Indexer
-    assert constants.DEFAULT_MODEL_PATH == "/app/models/bge-m3"
+    assert constants.DEFAULT_EMBED_MODEL_PATH == "/app/models/bge-m3"
     assert constants.DEFAULT_EMBEDDING_DIM == 1024
     assert constants.DEFAULT_BATCH_SIZE == 32
     assert constants.DEFAULT_EMBED_GPU_UTIL == 0.20
@@ -146,8 +146,8 @@ def test_backward_compatibility_reexports() -> None:
     assert zaic_2026_4.profiling.raw_profiler.NON_KEY_METRIC_TOKENS is constants.NON_KEY_METRIC_TOKENS
 
     # Vector Indexer
-    assert zaic_2026_4.profiling.vector_indexer.DEFAULT_MODEL_PATH is constants.DEFAULT_MODEL_PATH
-    assert zaic_2026_4.profiling.DEFAULT_VECTOR_MODEL_PATH is constants.DEFAULT_MODEL_PATH
+    assert zaic_2026_4.profiling.vector_indexer.DEFAULT_EMBED_MODEL_PATH is constants.DEFAULT_EMBED_MODEL_PATH
+    assert zaic_2026_4.profiling.DEFAULT_EMBED_MODEL_PATH is constants.DEFAULT_EMBED_MODEL_PATH
     assert zaic_2026_4.profiling.vector_indexer.DEFAULT_EMBEDDING_DIM is constants.DEFAULT_EMBEDDING_DIM
     assert zaic_2026_4.profiling.vector_indexer.DEFAULT_EMBED_GPU_UTIL is constants.DEFAULT_EMBED_GPU_UTIL
 

@@ -20,11 +20,11 @@ import numpy as np
 from zaic_2026_4.constants import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_EMBED_GPU_UTIL,
+    DEFAULT_EMBED_MODEL_PATH,
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_MAX_CHUNK_CHARS,
     DEFAULT_MAX_LENGTH,
     DEFAULT_MIN_CHUNK_CHARS,
-    DEFAULT_MODEL_PATH,
     DEFAULT_TOP_K,
     MIN_TABLE_ROWS_FOR_SPLIT,
 )
@@ -341,7 +341,7 @@ class SemanticVectorIndexer:
 
     def __init__(
         self,
-        model_path: str = DEFAULT_MODEL_PATH,
+        model_path: str = DEFAULT_EMBED_MODEL_PATH,
         embedder: Any | None = None,
         use_fp16: bool | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
@@ -757,7 +757,7 @@ class SemanticVectorIndexer:
     def load(
         cls,
         target_dir: str | Path,
-        model_path: str = DEFAULT_MODEL_PATH,
+        model_path: str = DEFAULT_EMBED_MODEL_PATH,
         embedder: Any | None = None,
     ) -> SemanticVectorIndexer:
         """Load a persisted FAISS index and doc_map metadata from disk.

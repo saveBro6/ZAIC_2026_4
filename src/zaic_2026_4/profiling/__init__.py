@@ -35,6 +35,7 @@ from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_BATCH_SIZE as DEFAULT_VECTOR_BATCH_SIZE,
 )
 from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_EMBED_MODEL_PATH,
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_MAX_CHUNK_CHARS,
     DEFAULT_MIN_CHUNK_CHARS,
@@ -51,14 +52,12 @@ from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
 )
 from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
-)
-from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_TOP_K as DEFAULT_VECTOR_TOP_K,
 )
 
 __all__ = [
     "DEFAULT_EMBEDDING_DIM",
+    "DEFAULT_EMBED_MODEL_PATH",
     "DEFAULT_LOCAL_GPU_UTIL",
     "DEFAULT_LOCAL_MODEL",
     "DEFAULT_MAX_CHUNK_CHARS",
@@ -71,7 +70,6 @@ __all__ = [
     "DEFAULT_THRESHOLD",
     "DEFAULT_VECTOR_BATCH_SIZE",
     "DEFAULT_VECTOR_MAX_LENGTH",
-    "DEFAULT_VECTOR_MODEL_PATH",
     "DEFAULT_VECTOR_TOP_K",
     "MAXIMAL_PROFILE_PROMPT",
     "MINIMAL_PROFILE_PROMPT",
