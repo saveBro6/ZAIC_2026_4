@@ -23,7 +23,7 @@ from zaic_2026_4.profiling.vector_indexer import (
     SemanticVectorIndexer,
 )
 from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_MAX_LENGTH as DEFAULT_VECTOR_MAX_LENGTH,
+    DEFAULT_EMBED_MAX_LENGTH,
 )
 
 
@@ -170,10 +170,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vector-max-len",
         type=int,
-        default=DEFAULT_VECTOR_MAX_LENGTH,
+        default=DEFAULT_EMBED_MAX_LENGTH,
         help=(
             f"Maximum token length for vLLM BGE-M3 pooling runner "
-            f"(default: {DEFAULT_VECTOR_MAX_LENGTH})."
+            f"(default: {DEFAULT_EMBED_MAX_LENGTH})."
         ),
     )
     parser.add_argument(

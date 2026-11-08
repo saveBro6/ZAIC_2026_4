@@ -11,6 +11,7 @@ from typing import Any, Protocol, runtime_checkable
 os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
 from zaic_2026_4.constants import (
+    DEFAULT_LLM_MAX_LENGTH,
     DEFAULT_LOCAL_GPU_UTIL,
     DEFAULT_LOCAL_MODEL,
     DEFAULT_PROD_GPU_UTIL,
@@ -45,7 +46,7 @@ class VLLMEngine:
         self,
         model: str = DEFAULT_PROD_MODEL,
         gpu_memory_utilization: float = DEFAULT_PROD_GPU_UTIL,
-        max_model_len: int = 4096,
+        max_model_len: int = DEFAULT_LLM_MAX_LENGTH,
         tensor_parallel_size: int = 1,
         trust_remote_code: bool = True,
         dtype: str = "auto",

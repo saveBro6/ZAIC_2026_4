@@ -20,10 +20,10 @@ import numpy as np
 from zaic_2026_4.constants import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_EMBED_GPU_UTIL,
+    DEFAULT_EMBED_MAX_LENGTH,
     DEFAULT_EMBED_MODEL_PATH,
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_MAX_CHUNK_CHARS,
-    DEFAULT_MAX_LENGTH,
     DEFAULT_MIN_CHUNK_CHARS,
     DEFAULT_TOP_K,
     MIN_TABLE_ROWS_FOR_SPLIT,
@@ -345,7 +345,7 @@ class SemanticVectorIndexer:
         embedder: Any | None = None,
         use_fp16: bool | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
-        max_length: int = DEFAULT_MAX_LENGTH,
+        max_length: int = DEFAULT_EMBED_MAX_LENGTH,
         normalize_embeddings: bool = True,
         gpu_memory_utilization: float | None = None,
         enforce_eager: bool = True,
@@ -780,11 +780,11 @@ class SemanticVectorIndexer:
         if not doc_map_file.is_file():
             raise FileNotFoundError(f"Doc map file not found: {doc_map_file}")
 
-        max_length = DEFAULT_MAX_LENGTH
+        max_length = DEFAULT_EMBED_MAX_LENGTH
         if meta_file.is_file():
             with open(meta_file, "r", encoding="utf-8") as f:
                 meta = json.load(f)
-                max_length = meta.get("max_length", DEFAULT_MAX_LENGTH)
+                max_length = meta.get("max_length", DEFAULT_EMBED_MAX_LENGTH)
 
         indexer = cls(
             model_path=model_path,

@@ -24,6 +24,7 @@ DEFAULT_PROD_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_LOCAL_MODEL: str = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_PROD_GPU_UTIL: float = 0.95
 DEFAULT_LOCAL_GPU_UTIL: float = 0.60
+DEFAULT_LLM_MAX_LENGTH: int = 16384
 
 MINIMAL_PROFILE_PROMPT: str = """<system>
 You are an expert data analyst for Vietnamese SMB (Small and Medium Business) databases.
@@ -224,7 +225,7 @@ NON_KEY_METRIC_TOKENS: frozenset[str] = frozenset({
 
 # Profiling: Semantic vector indexer defaults
 DEFAULT_EMBED_MODEL_PATH: str = "/app/models/bge-m3"
-DEFAULT_MAX_LENGTH: int = 4096
+DEFAULT_EMBED_MAX_LENGTH: int = 4096
 DEFAULT_BATCH_SIZE: int = 32
 DEFAULT_TOP_K: int = 10
 DEFAULT_EMBEDDING_DIM: int = 1024
@@ -269,12 +270,13 @@ __all__ = [
     "DEFAULT_CANDIDATE_SEEDS",
     "DEFAULT_EMBEDDING_DIM",
     "DEFAULT_EMBED_GPU_UTIL",
+    "DEFAULT_EMBED_MAX_LENGTH",
     "DEFAULT_EMBED_MODEL_PATH",
+    "DEFAULT_LLM_MAX_LENGTH",
     "DEFAULT_LOCAL_GPU_UTIL",
     "DEFAULT_LOCAL_MODEL",
     "DEFAULT_LOGS_DIR",
     "DEFAULT_MAX_CHUNK_CHARS",
-    "DEFAULT_MAX_LENGTH",
     "DEFAULT_MAX_SAMPLE_VALUES",
     "DEFAULT_MIN_CHUNK_CHARS",
     "DEFAULT_NUM_CANDIDATES",

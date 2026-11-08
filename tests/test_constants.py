@@ -36,6 +36,7 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_LOCAL_MODEL",
         "DEFAULT_PROD_GPU_UTIL",
         "DEFAULT_LOCAL_GPU_UTIL",
+        "DEFAULT_LLM_MAX_LENGTH",
         "MINIMAL_PROFILE_PROMPT",
         "MAXIMAL_PROFILE_PROMPT",
         # Raw Profiler
@@ -64,7 +65,7 @@ def test_constants_count_and_all() -> None:
         "NON_KEY_METRIC_TOKENS",
         # Vector Indexer
         "DEFAULT_EMBED_MODEL_PATH",
-        "DEFAULT_MAX_LENGTH",
+        "DEFAULT_EMBED_MAX_LENGTH",
         "DEFAULT_BATCH_SIZE",
         "DEFAULT_TOP_K",
         "DEFAULT_EMBEDDING_DIM",
@@ -83,7 +84,7 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_SUBMISSION_PATH",
     }
     assert set(constants.__all__) == expected_constants
-    assert len(constants.__all__) == 50
+    assert len(constants.__all__) == 51
 
     for name in expected_constants:
         assert hasattr(constants, name), f"constants module missing {name}"
@@ -106,6 +107,7 @@ def test_constant_types_and_values() -> None:
     assert constants.DEFAULT_LOCAL_MODEL == "Qwen/Qwen2.5-1.5B-Instruct"
     assert isinstance(constants.DEFAULT_PROD_GPU_UTIL, float)
     assert isinstance(constants.DEFAULT_LOCAL_GPU_UTIL, float)
+    assert constants.DEFAULT_LLM_MAX_LENGTH == 16384
     assert "<system>" in constants.MINIMAL_PROFILE_PROMPT
     assert "<system>" in constants.MAXIMAL_PROFILE_PROMPT
 
@@ -124,6 +126,7 @@ def test_constant_types_and_values() -> None:
 
     # Vector Indexer
     assert constants.DEFAULT_EMBED_MODEL_PATH == "/app/models/bge-m3"
+    assert constants.DEFAULT_EMBED_MAX_LENGTH == 4096
     assert constants.DEFAULT_EMBEDDING_DIM == 1024
     assert constants.DEFAULT_BATCH_SIZE == 32
     assert constants.DEFAULT_EMBED_GPU_UTIL == 0.20
@@ -163,6 +166,8 @@ def test_backward_compatibility_reexports() -> None:
     # Vector Indexer
     assert zaic_2026_4.profiling.vector_indexer.DEFAULT_EMBED_MODEL_PATH is constants.DEFAULT_EMBED_MODEL_PATH
     assert zaic_2026_4.profiling.DEFAULT_EMBED_MODEL_PATH is constants.DEFAULT_EMBED_MODEL_PATH
+    assert zaic_2026_4.profiling.vector_indexer.DEFAULT_EMBED_MAX_LENGTH is constants.DEFAULT_EMBED_MAX_LENGTH
+    assert zaic_2026_4.profiling.DEFAULT_EMBED_MAX_LENGTH is constants.DEFAULT_EMBED_MAX_LENGTH
     assert zaic_2026_4.profiling.vector_indexer.DEFAULT_EMBEDDING_DIM is constants.DEFAULT_EMBEDDING_DIM
     assert zaic_2026_4.profiling.vector_indexer.DEFAULT_EMBED_GPU_UTIL is constants.DEFAULT_EMBED_GPU_UTIL
 

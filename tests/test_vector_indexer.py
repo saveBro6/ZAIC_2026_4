@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_MAX_LENGTH,
+    DEFAULT_EMBED_MAX_LENGTH,
     MockEmbedder,
     SemanticVectorIndexer,
     clear_embedder_cache,
@@ -63,7 +63,7 @@ def test_indexer_initialization_with_mock() -> None:
     assert indexer.index.d == 128
     assert indexer.index.ntotal == 0
     assert len(indexer.doc_map) == 0
-    assert indexer.max_length == DEFAULT_MAX_LENGTH
+    assert indexer.max_length == DEFAULT_EMBED_MAX_LENGTH
 
 
 def test_recursive_split_paragraph_under_threshold() -> None:
