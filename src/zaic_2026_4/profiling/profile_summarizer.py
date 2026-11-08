@@ -31,6 +31,8 @@ class LLMEngineProtocol(Protocol):
         max_tokens: int = 512,
         temperature: float = 0.0,
         stop: list[str] | None = None,
+        seed: int | None = None,
+        **kwargs: Any,
     ) -> list[str] | str:
         """Generate text completions for a single prompt or batch of prompts."""
         ...
@@ -73,6 +75,8 @@ class VLLMEngine:
         max_tokens: int = 512,
         temperature: float = 0.0,
         stop: list[str] | None = None,
+        seed: int | None = None,
+        **kwargs: Any,
     ) -> list[str] | str:
         """Generate completions using vLLM continuous batching."""
         from vllm import SamplingParams
@@ -88,11 +92,16 @@ class VLLMEngine:
         default_stop = ["<|im_end|>", "<|endoftext|>", "</output>", "\n</output>"]
         stop_tokens = list(set(default_stop + (stop or [])))
 
-        sampling_params = SamplingParams(
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stop=stop_tokens,
-        )
+        sampling_kwargs: dict[str, Any] = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stop": stop_tokens,
+            **kwargs,
+        }
+        if seed is not None:
+            sampling_kwargs["seed"] = seed
+
+        sampling_params = SamplingParams(**sampling_kwargs)
 
         outputs = self.llm.generate(prompt_list, sampling_params)
         results = [output.outputs[0].text.strip() for output in outputs]
@@ -113,6 +122,8 @@ class MockLLMEngine:
         max_tokens: int = 512,
         temperature: float = 0.0,
         stop: list[str] | None = None,
+        seed: int | None = None,
+        **kwargs: Any,
     ) -> list[str] | str:
         """Generate mock Vietnamese metadata summaries from prompt hints."""
         is_single = isinstance(prompts, str)

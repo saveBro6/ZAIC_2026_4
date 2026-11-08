@@ -22,6 +22,7 @@ zaic-2026-4 = "zaic_2026_4:main"
 zaic-ingest = "zaic_2026_4.ingestion.cli:main"
 zaic-profile = "zaic_2026_4.profiling.cli:main"
 zaic-schema-link = "zaic_2026_4.schema_linking.cli:main"
+zaic-submit = "zaic_2026_4.submission.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]
