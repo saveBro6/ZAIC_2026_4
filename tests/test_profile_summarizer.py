@@ -93,6 +93,8 @@ def test_maximal_prompt_few_shots() -> None:
     assert '<example id="2">' in MAXIMAL_PROFILE_PROMPT
     assert 'Column: "Trạng thái xử lý"' in MAXIMAL_PROFILE_PROMPT
     assert 'Column: "ngay_lap"' in MAXIMAL_PROFILE_PROMPT
+    assert 'Minimal Profile: "' in MAXIMAL_PROFILE_PROMPT
+    assert "Sibling Columns:" in MAXIMAL_PROFILE_PROMPT
     assert "<target_column>" in MAXIMAL_PROFILE_PROMPT
     assert "<output>" in MAXIMAL_PROFILE_PROMPT
 
@@ -135,9 +137,13 @@ def test_summarizer_prompt_builders() -> None:
         col_stats=col_stats,
         total_rows=1000,
         business_readme="Tạp hóa Phương Linh\nQuy đổi: 1 lốc = 6 lon",
+        minimal_profile="Cột tiền hàng bán lẻ; định dạng số tiền VNĐ.",
+        sibling_cols=["id", "ngay"],
     )
     assert 'Table: "BanHang"' in max_p
     assert 'Column: "tien_hang"' in max_p
+    assert 'Minimal Profile: "Cột tiền hàng bán lẻ; định dạng số tiền VNĐ."' in max_p
+    assert "Sibling Columns: ['id', 'ngay']" in max_p
     assert "THOUSAND_SEPARATOR" in max_p
     assert "Formatted VND currency." in max_p
     assert "<business_readme>" in max_p
@@ -225,6 +231,7 @@ def test_summarizer_mock_workflow() -> None:
     assert ma_hd_meta["data_format"] == "STRING"
     assert len(ma_hd_meta["minimal_profile"]) > 0
     assert len(ma_hd_meta["maximal_profile"]) > 0
+    assert ma_hd_meta["minimal_profile"] in ma_hd_meta["maximal_profile"]
 
     ngay_meta = profiles["HoaDon.ngay_tao"]
     assert ngay_meta["data_format"] == "DATE"

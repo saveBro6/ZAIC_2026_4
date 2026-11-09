@@ -32,7 +32,7 @@ Your objective is to generate a concise, 1-sentence SHORT SUMMARY in Vietnamese 
 </system>
 
 <instructions>
-1. Business Meaning: Describe what business entity, attribute, or transaction property this column represents. Decode Vietnamese SMB abbreviations if present (e.g., SP -> Sản phẩm, KH -> Khách hàng, ĐVT -> Đơn vị tính, HĐ -> Hóa đơn).
+1. Business Meaning: Describe what business entity, attribute, or transaction property this column represents. Decode Vietnamese SMB abbreviations if present (e.g., SP -> Sản phẩm, KH -> Khách hàng, ĐVT -> Đơn vị tính, HĐ -> Hóa đơn) by cross-referencing Sibling Columns and business_readme.
 2. Data Format: Specify the underlying physical and logical format (e.g., Alphanumeric code, ISO date, VND currency with thousand separators, categorical status flag, integer count).
 3. Brevity Constraint: Output EXACTLY ONE concise Vietnamese sentence. Do not add boilerplate, preambles, or conversational prefixes.
 </instructions>
@@ -93,10 +93,12 @@ Your objective is to generate an in-depth, structured LONG SUMMARY in Vietnamese
 
 <instructions>
 Include the following 4 structural aspects in Vietnamese:
-1. Business Meaning: Operational role in the business workflow, entity relationship, and relation to sibling columns.
-2. Data Cleanliness & Distribution: Completeness (null count and ratio), cardinality (distinct count), value boundaries ([min_val to max_val]).
-3. Dominant Patterns: Frequent categories from Top-10 samples and percentage dominance.
-4. Technical SQL / Query Guidance: Specific data cleaning, casting instructions (e.g. handling formatted VND strings, parsing DD/MM/YYYY dates to ISO YYYY-MM-DD), and business status filtering.
+1. Business Meaning & Lead-in: Use the provided Minimal Profile as the exact opening sentence, then expand on the operational role in the business workflow, entity relationship, and relation to sibling columns.
+2. Data Cleanliness & Distribution:
+   - Completeness: If null count is 0 (0.00%), state: "Cột không có giá trị NULL (100% đầy đủ dữ liệu)". If null count > 0, state exact count and ratio (e.g. "Cột chứa {null_count} giá trị NULL (chiếm {null_ratio:.2%})"). STRICTLY DO NOT use the phrase "không có giá trị NULL" when null count > 0.
+   - Cardinality & Boundaries: Mention distinct count and value range ([min_val to max_val]).
+3. Dominant Patterns: Mention frequent categories from Top-10 samples using the exact counts: "giá trị chiếm đa số là X (N lần xuất hiện)". STRICTLY DO NOT invent or estimate percentage figures.
+4. Technical SQL / Query Guidance: Provide valid SQL/DuckDB/SQLite expressions (e.g. WHERE "col" IN ('A', 'B'), CAST(REPLACE(...) AS INTEGER), date formatting SUBSTR(...)). Avoid non-SQL or mixed informal syntax.
 </instructions>
 
 <business_readme>
@@ -108,6 +110,8 @@ Include the following 4 structural aspects in Vietnamese:
     <target_column>
       Table: "SoBanHang"
       Column: "Trạng thái xử lý"
+      Minimal Profile: "Trạng thái xử lý đơn hàng (trả hàng, Đã hoàn thành, đang gửi, Không giao được); định dạng chuỗi phân loại trạng thái."
+      Sibling Columns: ["ngay_ban", "Nội dung", "don_gia", "Số lượng", "Tổng tiền"]
       Nulls: 526/43605 (1.21%)
       Distinct Count: 4
       Value Range: ["Không giao được" to "đang gửi"]
@@ -116,7 +120,7 @@ Include the following 4 structural aspects in Vietnamese:
       Code / SQL Hint: Categorical status string. Exclude cancelled/returned orders for revenue calculation per business rules.
     </target_column>
     <output>
-      Cột lưu trữ trạng thái xử lý đơn hàng trong sổ bán hàng, đóng vai trò cờ phân loại giao dịch (status flag). Dữ liệu có 4 giá trị phân loại với 1.21% giá trị NULL; giá trị chiếm đa số tuyệt đối là 'Đã hoàn thành' (94.6%), tiếp theo là 'Không giao được' và 'trả hàng'. Khi truy vấn tính toán doanh thu hoặc sản phẩm bán chạy theo quy ước nghiệp vụ, BẮT BUỘC phải lọc loại bỏ các trạng thái huỷ/hoàn ('trả hàng', 'Không giao được') bằng điều kiện: WHERE "Trạng thái xử lý" = 'Đã hoàn thành'.
+      Trạng thái xử lý đơn hàng (trả hàng, Đã hoàn thành, đang gửi, Không giao được); định dạng chuỗi phân loại trạng thái. Cột lưu trữ trạng thái xử lý đơn hàng trong sổ bán hàng, đóng vai trò cờ phân loại giao dịch (status flag) liên kết cùng các thông tin doanh thu và ngày bán. Cột chứa 526 giá trị NULL (chiếm 1.21% dữ liệu), với 4 giá trị phân loại khác nhau từ 'Không giao được' đến 'đang gửi'. Giá trị chiếm đa số là 'Đã hoàn thành' (41,248 lần xuất hiện), tiếp theo là 'Không giao được' (1,163 lần) và 'trả hàng' (660 lần). Khi truy vấn tính toán doanh thu hoặc sản phẩm bán chạy theo quy ước nghiệp vụ, BẮT BUỘC phải lọc loại bỏ các trạng thái huỷ/hoàn bằng điều kiện: WHERE "Trạng thái xử lý" = 'Đã hoàn thành'.
     </output>
   </example>
 
@@ -124,6 +128,8 @@ Include the following 4 structural aspects in Vietnamese:
     <target_column>
       Table: "HoaDon"
       Column: "ngay_lap"
+      Minimal Profile: "Ngày lập hóa đơn bán lẻ; định dạng chuỗi ngày tháng DD/MM/YYYY."
+      Sibling Columns: ["ma_hd", "ma_kh", "tong_tien", "trang_thai"]
       Nulls: 0/50000 (0.00%)
       Distinct Count: 730
       Value Range: ["01/01/2024" to "31/12/2025"]
@@ -132,7 +138,7 @@ Include the following 4 structural aspects in Vietnamese:
       Code / SQL Hint: Date in DD/MM/YYYY format. Convert to ISO YYYY-MM-DD for SQL temporal filtering.
     </target_column>
     <output>
-      Cột ghi nhận mốc thời gian lập hóa đơn bán lẻ của doanh nghiệp. Cột không có giá trị NULL (100% đầy đủ) với 730 ngày giao dịch liên tục từ 01/01/2024 đến 31/12/2025. Định dạng ngày tháng lưu trữ là chuỗi DD/MM/YYYY (Việt Nam), do đó khi thực hiện truy vấn so sánh thời gian, lọc theo mốc as_of_date hoặc liên kết với calendar.csv, cần chuẩn hóa sang chuẩn ISO YYYY-MM-DD hoặc sử dụng hàm phân tích ngày: SUBSTR(ngay_lap, 7, 4) || '-' || SUBSTR(ngay_lap, 4, 2) || '-' || SUBSTR(ngay_lap, 1, 2).
+      Ngày lập hóa đơn bán lẻ; định dạng chuỗi ngày tháng DD/MM/YYYY. Cột ghi nhận mốc thời gian lập hóa đơn bán lẻ của doanh nghiệp. Cột không có giá trị NULL (100% đầy đủ dữ liệu) với 730 ngày giao dịch liên tục từ 01/01/2024 đến 31/12/2025. Định dạng ngày tháng lưu trữ là chuỗi DD/MM/YYYY (Việt Nam), do đó khi thực hiện truy vấn so sánh thời gian, lọc theo mốc as_of_date hoặc liên kết với calendar.csv, cần chuẩn hóa sang chuẩn ISO YYYY-MM-DD hoặc sử dụng hàm phân tích ngày: SUBSTR(ngay_lap, 7, 4) || '-' || SUBSTR(ngay_lap, 4, 2) || '-' || SUBSTR(ngay_lap, 1, 2).
     </output>
   </example>
 </few_shot_examples>
@@ -140,6 +146,8 @@ Include the following 4 structural aspects in Vietnamese:
 <target_column>
   Table: "{table_name}"
   Column: "{col_name}"
+  Minimal Profile: "{minimal_profile}"
+  Sibling Columns: {sibling_cols}
   Nulls: {null_count}/{total_rows} ({null_ratio:.2%})
   Distinct Count: {distinct_count}
   Value Range: [{min_val} to {max_val}]

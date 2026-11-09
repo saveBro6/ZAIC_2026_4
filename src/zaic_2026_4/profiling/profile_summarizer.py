@@ -142,7 +142,9 @@ class MockLLMEngine:
                 continue
 
             # Support SQL generation prompts for Mock testing
-            if "SQL engineer" in prompt or "<database_schema>" in prompt:
+            if "<target_column>" not in prompt and (
+                "SQL engineer" in prompt or "<database_schema>" in prompt
+            ):
                 import re
 
                 if "Fresno" in prompt:
@@ -222,8 +224,22 @@ class MockLLMEngine:
                 else:
                     summary = f"Thuộc tính thông tin {col_name} trong bảng {table_name}; kiểu dữ liệu {format_str}."
             else:
+                minimal_profile_in_prompt = ""
+                if 'Minimal Profile: "' in target_text:
+                    try:
+                        minimal_profile_in_prompt = (
+                            target_text.split('Minimal Profile: "')[1].split('"')[0]
+                        )
+                    except IndexError:
+                        pass
+
+                lead_in = (
+                    f"{minimal_profile_in_prompt} "
+                    if minimal_profile_in_prompt
+                    else f"Cột {col_name} thuộc bảng {table_name}, giữ vai trò quản lý thông tin trong luồng nghiệp vụ SMB. "
+                )
                 summary = (
-                    f"Cột {col_name} thuộc bảng {table_name}, giữ vai trò quản lý thông tin trong luồng nghiệp vụ SMB. "
+                    f"{lead_in}"
                     f"Kiểu dữ liệu và mẫu nhận diện: {format_str}. Dữ liệu được quản lý đồng nhất, phục vụ trực tiếp cho "
                     f"các câu truy vấn phân tích, kết hợp quy chuẩn tính toán và trích xuất theo quy ước nghiệp vụ."
                 )
@@ -316,6 +332,8 @@ class ProfileLLMSummarizer:
         col_stats: ColumnProfile | dict[str, Any],
         total_rows: int,
         business_readme: str = "",
+        minimal_profile: str = "",
+        sibling_cols: list[str] | None = None,
     ) -> str:
         """Construct the Maximal Profile XML prompt with full business_readme."""
         null_count = col_stats.get("null_count", 0) or 0
@@ -341,6 +359,8 @@ class ProfileLLMSummarizer:
         return MAXIMAL_PROFILE_PROMPT.format(
             table_name=table_name,
             col_name=col_name,
+            minimal_profile=minimal_profile.strip(),
+            sibling_cols=sibling_cols or [],
             null_count=null_count,
             total_rows=total_rows,
             null_ratio=null_ratio,
@@ -361,12 +381,13 @@ class ProfileLLMSummarizer:
     ) -> dict[str, Any]:
         """Generate Minimal and Maximal profiles for all columns across all tables.
 
-        Accepts business_readme as the sole domain documentation context in strict accordance
-        with code_template.txt. Leverages batched inference to send all column prompts to vLLM concurrently.
+        Follows a Two-Stage generation workflow:
+        Stage 1: Generate Minimal Profiles (concise business meaning & abbreviation decoding).
+        Stage 2: Inject Minimal Profiles into Maximal Prompts to generate in-depth summaries.
         """
         readme_clean = business_readme.strip()
 
-        # Phase 1: Collect prompt metadata for all columns
+        # Phase 1: Collect minimal prompt metadata for all columns
         work_items: list[dict[str, Any]] = []
 
         for table_name, table_info in db_profile.get("tables", {}).items():
@@ -384,30 +405,21 @@ class ProfileLLMSummarizer:
                     total_rows=total_rows,
                     business_readme=readme_clean,
                 )
-                max_prompt = self.build_maximal_prompt(
-                    table_name=table_name,
-                    col_name=col_name,
-                    col_stats=col_stats,
-                    total_rows=total_rows,
-                    business_readme=readme_clean,
-                )
                 work_items.append({
                     "col_key": f"{table_name}.{col_name}",
                     "table_name": table_name,
                     "col_name": col_name,
+                    "sibling_cols": sibling_cols,
+                    "total_rows": total_rows,
                     "col_stats": col_stats,
                     "min_prompt": min_prompt,
-                    "max_prompt": max_prompt,
                 })
 
         if not work_items:
             return {}
 
-        # Phase 2: Batch inference for minimal and maximal prompts
+        # Phase 2: Batch inference for minimal prompts (Stage 1)
         all_min_prompts = [item["min_prompt"] for item in work_items]
-        all_max_prompts = [item["max_prompt"] for item in work_items]
-
-        # Generate minimal profiles (1 sentence, constrained max_tokens)
         min_summaries: list[str] = []
         for i in range(0, len(all_min_prompts), self.batch_size):
             chunk = all_min_prompts[i : i + self.batch_size]
@@ -420,7 +432,21 @@ class ProfileLLMSummarizer:
                 chunk_outs = [chunk_outs]
             min_summaries.extend(chunk_outs)
 
-        # Generate maximal profiles (detailed summary)
+        # Phase 3: Build and batch inference for maximal prompts (Stage 2: Two-stage inheritance)
+        all_max_prompts: list[str] = []
+        for idx, item in enumerate(work_items):
+            min_summary = min_summaries[idx].strip()
+            max_prompt = self.build_maximal_prompt(
+                table_name=item["table_name"],
+                col_name=item["col_name"],
+                col_stats=item["col_stats"],
+                total_rows=item["total_rows"],
+                business_readme=readme_clean,
+                minimal_profile=min_summary,
+                sibling_cols=item["sibling_cols"],
+            )
+            all_max_prompts.append(max_prompt)
+
         max_summaries: list[str] = []
         for i in range(0, len(all_max_prompts), self.batch_size):
             chunk = all_max_prompts[i : i + self.batch_size]
@@ -433,7 +459,7 @@ class ProfileLLMSummarizer:
                 chunk_outs = [chunk_outs]
             max_summaries.extend(chunk_outs)
 
-        # Phase 3: Construct the final processed_metadata dictionary
+        # Phase 4: Construct the final processed_metadata dictionary
         processed_metadata: dict[str, Any] = {}
         for idx, item in enumerate(work_items):
             col_key = item["col_key"]
