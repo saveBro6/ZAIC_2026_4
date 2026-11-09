@@ -1,8 +1,8 @@
 """Unit and integration tests for RawDatabaseProfiler, Shape & Pattern, and MinHash joins."""
 
 import json
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -279,6 +279,50 @@ def test_numeric_range_not_inverted(tmp_path: Path) -> None:
     col = profile["tables"]["tbl"]["columns"]["num"]
     assert float(col["min_val"]) == 2.0
     assert float(col["max_val"]) == 100.0
+
+
+def test_currency_and_formatted_min_max_numeric_order(tmp_path: Path) -> None:
+    """Verify that formatted currency, thousand-separated numbers, and custom dates have numerically correct min_val and max_val."""
+    db_path = tmp_path / "currency_min_max.db"
+    df = pl.DataFrame(
+        {
+            "currency_thousand": ["1,056,000", "90,000", "4,000", "1,200,000"],
+            "currency_vnd": ["50,000 VNĐ", "15,000 VNĐ", "1,500,000 VNĐ", "200,000 VNĐ"],
+            "currency_accounting": ["(5,000)", "2,000", "10,000", "(100)"],
+            "currency_dash": ["-", "5,000", "100,000", "20,000"],
+            "date_vn": ["1 thg 1 2026", "9 thg 9 2025", "15 thg 6 2025", "20 thg 11 2025"],
+            "date_slash": ["25/09/2025", "01/10/2025", "15/01/2024", "10/05/2024"],
+        }
+    )
+    create_sqlite_db_from_dfs(db_path, {"tbl": df})
+
+    profiler = RawDatabaseProfiler(db_path)
+    profile = profiler.profile_database()
+    cols = profile["tables"]["tbl"]["columns"]
+
+    # Thousand separator: 4,000 is min, 1,200,000 is max (not lexicographical 1,056,000 and 90,000)
+    assert cols["currency_thousand"]["min_val"] == "4,000"
+    assert cols["currency_thousand"]["max_val"] == "1,200,000"
+
+    # VND text: 15,000 VNĐ is min, 1,500,000 VNĐ is max
+    assert cols["currency_vnd"]["min_val"] == "15,000 VNĐ"
+    assert cols["currency_vnd"]["max_val"] == "1,500,000 VNĐ"
+
+    # Accounting parentheses: (5,000) is min (-5000), 10,000 is max
+    assert cols["currency_accounting"]["min_val"] == "(5,000)"
+    assert cols["currency_accounting"]["max_val"] == "10,000"
+
+    # Accounting dash zero: - is min (0), 100,000 is max
+    assert cols["currency_dash"]["min_val"] == "-"
+    assert cols["currency_dash"]["max_val"] == "100,000"
+
+    # Vietnamese date: 15 thg 6 2025 is min, 1 thg 1 2026 is max
+    assert cols["date_vn"]["min_val"] == "15 thg 6 2025"
+    assert cols["date_vn"]["max_val"] == "1 thg 1 2026"
+
+    # Slash date: 15/01/2024 is min, 01/10/2025 is max (not lexicographical 01/10/2025)
+    assert cols["date_slash"]["min_val"] == "15/01/2024"
+    assert cols["date_slash"]["max_val"] == "01/10/2025"
 
 
 def test_fixed_length_and_free_text(tmp_path: Path) -> None:

@@ -224,7 +224,7 @@ class RawDatabaseProfiler:
             df = pl.read_database(
                 f'SELECT * FROM "{entity_name}"', conn, infer_schema_length=None
             )
-        except Exception:
+        except (sqlite3.Error, pl.exceptions.PolarsError, TypeError, ValueError):
             # Fallback to cursor fetch with string schema for heterogeneous SQLite columns
             cur = conn.cursor()
             cur.execute(f'SELECT * FROM "{entity_name}"')
@@ -307,30 +307,6 @@ class RawDatabaseProfiler:
         series_str = non_null_raw.cast(pl.String)
         distinct_count = int(series_str.n_unique())
 
-        # Compute typed min/max to avoid lexicographical inversion for numbers/dates
-        if non_null_raw.dtype.is_numeric() or non_null_raw.dtype in (
-            pl.Date,
-            pl.Datetime,
-            pl.Time,
-            pl.Duration,
-        ):
-            min_val = str(non_null_raw.min())
-            max_val = str(non_null_raw.max())
-        else:
-            first_val = series_str[0]
-            first_val_clean = first_val.lstrip("-").strip() if first_val else ""
-            if first_val_clean and (first_val_clean.isdigit() or first_val_clean.replace(".", "", 1).isdigit()):
-                try:
-                    num_series = non_null_raw.cast(pl.Float64)
-                    min_val = str(num_series.min())
-                    max_val = str(num_series.max())
-                except Exception:
-                    min_val = str(series_str.min())
-                    max_val = str(series_str.max())
-            else:
-                min_val = str(series_str.min())
-                max_val = str(series_str.max())
-
         # String length bounds
         char_lens = series_str.str.len_chars()
         min_str_len = int(char_lens.min()) if char_lens.len() > 0 else None
@@ -354,6 +330,13 @@ class RawDatabaseProfiler:
         # Shape & pattern recognition on head sample
         shape_info = self._infer_format_and_pattern(
             series_raw.dtype, series_str.head(50), is_fixed_length, is_free_text
+        )
+
+        # Compute typed and format-aware min/max to avoid lexicographical inversion for numbers/currency/dates
+        min_val, max_val = self._compute_column_min_max(
+            non_null_raw=non_null_raw,
+            series_str=series_str,
+            shape_info=shape_info,
         )
 
         col_profile: ColumnProfile = {
@@ -441,7 +424,7 @@ class RawDatabaseProfiler:
                     if not isinstance(parsed, (dict, list)):
                         is_valid_json = False
                         break
-                except Exception:
+                except (json.JSONDecodeError, TypeError, ValueError):
                     is_valid_json = False
                     break
             if is_valid_json:
@@ -454,7 +437,7 @@ class RawDatabaseProfiler:
         date_subtypes_found = self._check_date_patterns(samples)
         if date_subtypes_found:
             if len(date_subtypes_found) == 1:
-                single_subtype = list(date_subtypes_found)[0]
+                single_subtype = next(iter(date_subtypes_found))
                 result["date_subtype"] = single_subtype
                 if single_subtype in ("ISO_DATE", "ISO_DATETIME"):
                     result["data_format"] = single_subtype
@@ -636,6 +619,164 @@ class RawDatabaseProfiler:
             )
 
         return None, None, None
+
+    def _compute_column_min_max(
+        self,
+        non_null_raw: pl.Series,
+        series_str: pl.Series,
+        shape_info: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        """Compute typed and format-aware min and max values to avoid lexicographical inversion."""
+        if len(non_null_raw) == 0:
+            return None, None
+
+        # 1. Native numeric and date/time types
+        if non_null_raw.dtype.is_numeric() or non_null_raw.dtype in (
+            pl.Date,
+            pl.Datetime,
+            pl.Time,
+            pl.Duration,
+        ):
+            return str(non_null_raw.min()), str(non_null_raw.max())
+
+        # 2. Formatted currency and scaled numbers
+        if (
+            shape_info.get("data_format") == "CURRENCY"
+            or shape_info.get("currency_subtype") is not None
+        ):
+            parsed_num = self._parse_currency_series(
+                series_str,
+                subtype=shape_info.get("currency_subtype"),
+                scale=shape_info.get("currency_scale_multiplier"),
+            )
+            if parsed_num.null_count() < len(series_str):
+                min_idx = parsed_num.arg_min()
+                max_idx = parsed_num.arg_max()
+                if min_idx is not None and max_idx is not None:
+                    return str(series_str[min_idx]), str(series_str[max_idx])
+
+        # 3. Numeric strings (plain or with thousand separators)
+        df_clean = pl.select(
+            num=pl.lit(series_str)
+            .str.replace_all(r"\s", "")
+            .str.replace_all(",", "")
+            .cast(pl.Float64, strict=False)
+        )
+        parsed_plain = df_clean["num"]
+        if parsed_plain.null_count() <= len(series_str) * 0.3:
+            min_idx = parsed_plain.arg_min()
+            max_idx = parsed_plain.arg_max()
+            if min_idx is not None and max_idx is not None:
+                return str(series_str[min_idx]), str(series_str[max_idx])
+
+        # 4. Dates formatted as strings (SLASH_DATE, VN_DATE_ABBR)
+        date_subtype = shape_info.get("date_subtype")
+        if date_subtype in ("SLASH_DATE", "SLASH_DATE_SHORT", "VN_DATE_ABBR"):
+            parsed_dates = self._parse_date_series_to_iso(series_str, date_subtype)
+            if parsed_dates.null_count() <= len(series_str) * 0.3:
+                min_idx = parsed_dates.arg_min()
+                max_idx = parsed_dates.arg_max()
+                if min_idx is not None and max_idx is not None:
+                    return str(series_str[min_idx]), str(series_str[max_idx])
+
+        # 5. Fallback: string lexicographical min/max
+        return str(series_str.min()), str(series_str.max())
+
+    @staticmethod
+    def _parse_currency_series(
+        series_str: pl.Series,
+        subtype: str | None = None,
+        scale: float | None = None,
+    ) -> pl.Series:
+        """Parse currency string series to float values using Polars expressions."""
+        if subtype == "ACCOUNTING_PARENTHESES":
+            return pl.select(
+                clean=pl.lit(series_str)
+                .str.replace_all(r"(?i)[()₫vnđvnd\s]", "")
+                .str.replace_all(",", "")
+                .cast(pl.Float64, strict=False),
+                is_paren=pl.lit(series_str).str.starts_with("(")
+                & pl.lit(series_str).str.ends_with(")"),
+            ).select(
+                num=pl.when(pl.col("is_paren"))
+                .then(-pl.col("clean"))
+                .otherwise(pl.col("clean"))
+            )["num"]
+
+        if subtype == "ACCOUNTING_DASH_ZERO":
+            return pl.select(
+                clean=pl.lit(series_str).str.replace_all(r"\s", ""),
+            ).select(
+                num=pl.when(pl.col("clean") == "-")
+                .then(0.0)
+                .otherwise(
+                    pl.col("clean")
+                    .str.replace_all(",", "")
+                    .cast(pl.Float64, strict=False)
+                )
+            )["num"]
+
+        if subtype in ("SCALED_BILLION_TY", "SCALED_MILLION_TR", "SCALED_THOUSAND_K"):
+            multiplier = scale if scale is not None else 1.0
+            return pl.select(
+                num=pl.lit(series_str)
+                .str.replace_all(r"(?i)[tỷtytrtriệutrieuknghìnnghinngànngan₫vnđvnd\s]", "")
+                .str.replace_all(",", ".")
+                .cast(pl.Float64, strict=False)
+                * multiplier
+            )["num"]
+
+        # Default currency / thousand separator (VND_TEXT, VND_SYMBOL, THOUSAND_SEPARATOR)
+        return pl.select(
+            num=pl.lit(series_str)
+            .str.replace_all(r"(?i)[₫vnđvnd\s]", "")
+            .str.replace_all(",", "")
+            .cast(pl.Float64, strict=False)
+        )["num"]
+
+    @staticmethod
+    def _parse_date_series_to_iso(
+        series_str: pl.Series,
+        date_subtype: str | None = None,
+    ) -> pl.Series:
+        """Parse formatted dates into sortable ISO YYYY-MM-DD string series."""
+        if date_subtype in ("SLASH_DATE", "SLASH_DATE_SHORT"):
+            df = pl.DataFrame({"s": series_str})
+            return df.select(
+                parts=pl.col("s").str.extract_groups(
+                    r"^(?P<day>\d{1,2})/(?P<month>\d{1,2})/(?P<year>\d{2,4})"
+                )
+            ).unnest("parts").select(
+                iso=pl.concat_str(
+                    [
+                        pl.when(pl.col("year").str.len_chars() == 2)
+                        .then(pl.concat_str([pl.lit("20"), pl.col("year")]))
+                        .otherwise(pl.col("year")),
+                        pl.col("month").str.zfill(2),
+                        pl.col("day").str.zfill(2),
+                    ],
+                    separator="-",
+                )
+            )["iso"]
+
+        if date_subtype == "VN_DATE_ABBR":
+            df = pl.DataFrame({"s": series_str})
+            return df.select(
+                parts=pl.col("s").str.extract_groups(
+                    r"^(?P<day>\d{1,2})\s*thg\s*(?P<month>\d{1,2})\s*(?P<year>\d{4})"
+                )
+            ).unnest("parts").select(
+                iso=pl.concat_str(
+                    [
+                        pl.col("year"),
+                        pl.col("month").str.zfill(2),
+                        pl.col("day").str.zfill(2),
+                    ],
+                    separator="-",
+                )
+            )["iso"]
+
+        return series_str
 
     def _is_eligible_for_minhash(
         self,
