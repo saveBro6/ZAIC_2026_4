@@ -239,7 +239,7 @@ def test_summarizer_mock_workflow() -> None:
     assert len(ma_hd_meta["minimal_profile"]) > 0
     assert len(ma_hd_meta["maximal_profile"]) > 0
     assert ma_hd_meta["minimal_profile"] in ma_hd_meta["maximal_profile"]
-    assert "Top-10 giá trị phổ biến: ['HD001', 'HD002']" in ma_hd_meta["maximal_profile"]
+    assert "Các giá trị phổ biến: ['HD001', 'HD002']" in ma_hd_meta["maximal_profile"]
 
     ngay_meta = profiles["HoaDon.ngay_tao"]
     assert ngay_meta["data_format"] == "DATE"

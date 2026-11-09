@@ -106,7 +106,9 @@ class RawDatabaseProfiler:
         jaccard_threshold: float = 0.7,
         max_sample_values: int = 10000,
         exclude_continuous_numerics: bool = True,
-        skip_calendar_table: bool = True,
+        skip_calendar_table: bool = False,
+        calendar_path: str | Path | None = None,
+        calendar_jaccard_threshold: float = 0.1,
     ) -> None:
         """Initialize the profiler with configuration options.
 
@@ -121,8 +123,9 @@ class RawDatabaseProfiler:
             max_sample_values: Maximum number of unique values to sample for MinHash and LSH.
             exclude_continuous_numerics: Whether to exclude continuous floating-point amounts
                 from MinHash Jaccard similarity to prevent false-positive joins.
-            skip_calendar_table: Whether to skip table 'calendar' if present in the database,
-                allowing it to be loaded from the split-level shared cache.
+            skip_calendar_table: Whether to skip table 'calendar' if present in the database.
+            calendar_path: Optional path to calendar.csv for direct table and join profiling.
+            calendar_jaccard_threshold: Jaccard resemblance threshold for calendar date joins.
         """
         self.db_path = Path(db_path) if db_path else Path("")
         self.num_perm = num_perm
@@ -133,6 +136,8 @@ class RawDatabaseProfiler:
         self.max_sample_values = max_sample_values
         self.exclude_continuous_numerics = exclude_continuous_numerics
         self.skip_calendar_table = skip_calendar_table
+        self.calendar_path = Path(calendar_path).resolve() if calendar_path else None
+        self.calendar_jaccard_threshold = calendar_jaccard_threshold
 
     def profile_database(self) -> DatabaseProfile:
         """Profile all tables and candidate joins in the database.
@@ -140,14 +145,21 @@ class RawDatabaseProfiler:
         Returns:
             DatabaseProfile matching downstream contract for summarizers and indexers.
         """
-        if not self.db_path.exists():
-            raise FileNotFoundError(f"Database file not found: {self.db_path}")
+        if self.db_path and self.db_path.exists():
+            conn = sqlite3.connect(self.db_path)
+            try:
+                return self._profile_with_connection(conn)
+            finally:
+                conn.close()
 
-        conn = sqlite3.connect(self.db_path)
-        try:
-            return self._profile_with_connection(conn)
-        finally:
-            conn.close()
+        if self.calendar_path and self.calendar_path.is_file():
+            cal_table, _ = self._profile_calendar_csv_file(self.calendar_path)
+            return {
+                "tables": {"calendar": cal_table},
+                "undocumented_joins": [],
+            }
+
+        raise FileNotFoundError(f"Database file not found: {self.db_path}")
 
     def _profile_with_connection(self, conn: sqlite3.Connection) -> DatabaseProfile:
         """Internal execution with an active SQLite connection."""
@@ -183,6 +195,7 @@ class RawDatabaseProfiler:
 
         # Build list of entities to profile
         targets_to_profile: list[tuple[str, str, bool, list[str]]] = []
+        has_calendar_entity = False
         for name, typ, _ in entities:
             if typ == "view":
                 if not self.include_views:
@@ -192,6 +205,8 @@ class RawDatabaseProfiler:
             elif typ == "table":
                 if self.skip_calendar_table and name.lower() == "calendar":
                     continue
+                if name.lower() == "calendar":
+                    has_calendar_entity = True
                 if name in partition_tables_to_skip:
                     continue
                 targets_to_profile.append((name, typ, False, []))
@@ -206,9 +221,48 @@ class RawDatabaseProfiler:
             db_profile["tables"][entity_name] = table_profile
             minhashes.update(table_minhashes)
 
+        # Profile calendar.csv if not in database but calendar_path is provided
+        if (
+            not has_calendar_entity
+            and not self.skip_calendar_table
+            and self.calendar_path
+            and self.calendar_path.is_file()
+        ):
+            cal_table_profile, cal_minhashes = self._profile_calendar_csv_file(self.calendar_path)
+            db_profile["tables"]["calendar"] = cal_table_profile
+            minhashes.update(cal_minhashes)
+
         # Detect undocumented joins via MinHash Jaccard similarity
         db_profile["undocumented_joins"] = self._detect_undocumented_joins(minhashes)
         return db_profile
+
+    def _profile_calendar_csv_file(
+        self, path: Path
+    ) -> tuple[TableProfile, dict[str, MinHash]]:
+        """Profile split-level calendar.csv directly using Polars lazy evaluation."""
+        q = pl.scan_csv(str(path))
+        df = q.collect()
+        row_count = df.height
+
+        table_profile: TableProfile = {
+            "row_count": row_count,
+            "is_view": False,
+            "is_unified_view": False,
+            "source_tables": [],
+            "columns": {},
+            "note": "Split-level shared Solar-Lunar calendar lookup table.",
+        }
+        cal_minhashes: dict[str, MinHash] = {}
+
+        for col in df.columns:
+            col_prof, mhash = self._profile_single_column(
+                df[col], col, row_count, "calendar"
+            )
+            table_profile["columns"][col] = col_prof
+            if mhash is not None:
+                cal_minhashes[f"calendar.{col}"] = mhash
+
+        return table_profile, cal_minhashes
 
     def _profile_single_entity(
         self,
@@ -365,9 +419,23 @@ class RawDatabaseProfiler:
             series_raw.dtype, col_name, shape_info["data_format"], distinct_count, total_rows
         ):
             minhash_obj = MinHash(num_perm=self.num_perm)
-            for val in unique_samples:
-                if len(val.strip()) > 0:
-                    minhash_obj.update(val.encode("utf-8"))
+            date_subtype = shape_info.get("date_subtype")
+            if (
+                date_subtype
+                or shape_info.get("data_format") in ("DATE", "ISO_DATE", "ISO_DATETIME", "EXCEL_SERIAL")
+                or any(k in col_name.lower() for k in ("ngay", "ngày", "date", "thoi_gian"))
+            ):
+                parsed_series = self._parse_date_series_to_iso(
+                    pl.Series("s", unique_samples, dtype=pl.String),
+                    date_subtype=date_subtype,
+                )
+                for val in parsed_series.to_list():
+                    if val is not None and len(str(val).strip()) > 0:
+                        minhash_obj.update(str(val).strip().encode("utf-8"))
+            else:
+                for val in unique_samples:
+                    if len(val.strip()) > 0:
+                        minhash_obj.update(val.encode("utf-8"))
 
         return col_profile, minhash_obj
 
@@ -746,44 +814,65 @@ class RawDatabaseProfiler:
         series_str: pl.Series,
         date_subtype: str | None = None,
     ) -> pl.Series:
-        """Parse formatted dates into sortable ISO YYYY-MM-DD string series."""
-        if date_subtype in ("SLASH_DATE", "SLASH_DATE_SHORT"):
-            df = pl.DataFrame({"s": series_str})
+        """Parse formatted dates into sortable ISO YYYY-MM-DD string series, stripping any time parts."""
+        df = pl.DataFrame({"s": series_str.cast(pl.String, strict=False)})
+
+        if date_subtype == "EXCEL_SERIAL":
+            days = pl.col("s").cast(pl.Float64, strict=False).floor().cast(pl.Int64, strict=False)
+            base = pl.lit("1899-12-30").str.to_date("%Y-%m-%d")
             return df.select(
-                parts=pl.col("s").str.extract_groups(
-                    r"^(?P<day>\d{1,2})/(?P<month>\d{1,2})/(?P<year>\d{2,4})"
-                )
-            ).unnest("parts").select(
-                iso=pl.concat_str(
-                    [
-                        pl.when(pl.col("year").str.len_chars() == 2)
-                        .then(pl.concat_str([pl.lit("20"), pl.col("year")]))
-                        .otherwise(pl.col("year")),
-                        pl.col("month").str.zfill(2),
-                        pl.col("day").str.zfill(2),
-                    ],
-                    separator="-",
-                )
+                iso=(base + pl.duration(days=days)).dt.to_string("%Y-%m-%d")
             )["iso"]
 
-        if date_subtype == "VN_DATE_ABBR":
-            df = pl.DataFrame({"s": series_str})
-            return df.select(
-                parts=pl.col("s").str.extract_groups(
-                    r"^(?P<day>\d{1,2})\s*thg\s*(?P<month>\d{1,2})\s*(?P<year>\d{4})"
-                )
-            ).unnest("parts").select(
-                iso=pl.concat_str(
-                    [
-                        pl.col("year"),
-                        pl.col("month").str.zfill(2),
-                        pl.col("day").str.zfill(2),
-                    ],
-                    separator="-",
-                )
-            )["iso"]
+        slash = df.select(
+            parts=pl.col("s").str.extract_groups(
+                r"^(?P<day>\d{1,2})/(?P<month>\d{1,2})/(?P<year>\d{2,4})"
+            )
+        ).unnest("parts").select(
+            iso=pl.concat_str(
+                [
+                    pl.when(pl.col("year").str.len_chars() == 2)
+                    .then(pl.concat_str([pl.lit("20"), pl.col("year")]))
+                    .otherwise(pl.col("year")),
+                    pl.col("month").str.zfill(2),
+                    pl.col("day").str.zfill(2),
+                ],
+                separator="-",
+            )
+        )["iso"]
 
-        return series_str
+        iso = df.select(
+            parts=pl.col("s").str.extract_groups(
+                r"^(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})"
+            )
+        ).unnest("parts").select(
+            iso=pl.concat_str(
+                [
+                    pl.col("year"),
+                    pl.col("month").str.zfill(2),
+                    pl.col("day").str.zfill(2),
+                ],
+                separator="-",
+            )
+        )["iso"]
+
+        vn = df.select(
+            parts=pl.col("s").str.extract_groups(
+                r"^(?P<day>\d{1,2})\s*thg\s*(?P<month>\d{1,2})\s*(?P<year>\d{4})"
+            )
+        ).unnest("parts").select(
+            iso=pl.concat_str(
+                [
+                    pl.col("year"),
+                    pl.col("month").str.zfill(2),
+                    pl.col("day").str.zfill(2),
+                ],
+                separator="-",
+            )
+        )["iso"]
+
+        coalesced = pl.coalesce([slash, iso, vn, pl.col("s")])
+        return df.select(res=coalesced)["res"]
 
     def _is_eligible_for_minhash(
         self,
@@ -840,7 +929,20 @@ class RawDatabaseProfiler:
                         continue
 
                 score = float(minhashes[k1].jaccard(minhashes[k2]))
-                if score >= self.jaccard_threshold:
+                is_calendar_date_join = (
+                    "calendar.date" in (k1, k2)
+                    or (
+                        (k1.startswith("calendar.") or k2.startswith("calendar."))
+                        and any("date" in k.lower() or "ngay" in k.lower() for k in (k1, k2))
+                    )
+                )
+                threshold = (
+                    self.calendar_jaccard_threshold
+                    if is_calendar_date_join
+                    else self.jaccard_threshold
+                )
+
+                if score >= threshold:
                     undocumented_joins.append(
                         {
                             "col1": k1,

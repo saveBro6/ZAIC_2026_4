@@ -102,7 +102,7 @@ def main() -> None:
         vector_model_path=vector_model_path,
         cache_dir=args.cache_dir,
     )
-    pipeline_res = orchestrator.run_pipeline(force_rebuild=False)
+    pipeline_res = orchestrator.run_pipeline()
     processed_metadata = pipeline_res["metadata"]
     lsh_indexer = pipeline_res["lsh_indexer"]
     vector_indexer = pipeline_res["vector_indexer"]

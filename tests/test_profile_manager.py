@@ -265,6 +265,35 @@ def test_pipeline_force_rebuild(
     assert "metadata" in res2
 
 
+def test_pipeline_multiple_executions(
+    sample_business_csv: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """Verify each independent orchestrator run freshly computes profiling."""
+    biz_dir, rulebook_path = sample_business_csv
+    cache_dir = tmp_path / "cache_fresh"
+
+    orchestrator1 = ProfilingOrchestrator(
+        business_dir=biz_dir,
+        rulebook_path=rulebook_path,
+        llm_engine=MockLLMEngine(),
+        embedder=MockEmbedder(dimension=128),
+        cache_dir=cache_dir,
+    )
+    res1 = orchestrator1.run_pipeline()
+
+    orchestrator2 = ProfilingOrchestrator(
+        business_dir=biz_dir,
+        rulebook_path=rulebook_path,
+        llm_engine=MockLLMEngine(),
+        embedder=MockEmbedder(dimension=128),
+        cache_dir=cache_dir,
+    )
+    res2 = orchestrator2.run_pipeline()
+    assert res1 is not res2
+    assert "metadata" in res2
+    assert "raw_profile" in res2
+
+
 def test_convenience_methods(
     sample_business_csv: tuple[Path, Path], tmp_path: Path
 ) -> None:
