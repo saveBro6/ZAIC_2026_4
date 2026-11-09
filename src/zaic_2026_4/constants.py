@@ -185,7 +185,7 @@ EN_DATE_WEEKDAY_REGEX: re.Pattern[str] = re.compile(
     r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,\s]+\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}$",
     re.IGNORECASE,
 )
-EXCEL_SERIAL_REGEX: re.Pattern[str] = re.compile(r"^\d{5}$")
+EXCEL_SERIAL_REGEX: re.Pattern[str] = re.compile(r"^\d{5}(?:\.\d+)?$")
 
 # Profiling: Raw profiler currency and numeric regex patterns
 VND_TEXT_REGEX: re.Pattern[str] = re.compile(

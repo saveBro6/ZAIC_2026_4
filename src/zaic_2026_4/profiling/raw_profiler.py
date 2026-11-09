@@ -526,7 +526,7 @@ class RawDatabaseProfiler:
             elif EXCEL_SERIAL_REGEX.match(val):
                 col_tokens = _extract_name_tokens(col_name) if col_name else set()
                 if not (col_tokens & NON_KEY_METRIC_TOKENS):
-                    int_v = int(val)
+                    int_v = int(float(val))
                     # Valid Excel serial range for years 2000 to 2050 (36526 to 55153)
                     if 36526 <= int_v <= 55153:
                         subtypes.add("EXCEL_SERIAL")

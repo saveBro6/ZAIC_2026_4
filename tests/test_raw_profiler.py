@@ -512,3 +512,23 @@ def test_vietnamese_dong_currency_parsing_and_hints(tmp_path: Path) -> None:
     assert "CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS INTEGER)" in col["llm_hint"]
 
 
+def test_excel_serial_float_representation(tmp_path: Path) -> None:
+    """Verify recognition of Excel serial dates stored as floats (e.g. '45717.0' in biz_107)."""
+    db_path = tmp_path / "float_serials.db"
+    df = pl.DataFrame(
+        {
+            "ngay_ban": ["45717.0", "46021.0", "46105.0", "46225.5"],
+        }
+    )
+    create_sqlite_db_from_dfs(db_path, {"SoBanHang": df})
+
+    profiler = RawDatabaseProfiler(db_path)
+    profile = profiler.profile_database()
+    col = profile["tables"]["SoBanHang"]["columns"]["ngay_ban"]
+
+    assert col["data_format"] == "EXCEL_SERIAL"
+    assert col["date_subtype"] == "EXCEL_SERIAL"
+    assert "date(julianday('1899-12-30') + CAST(col AS REAL))" in col["llm_hint"]
+
+
+
