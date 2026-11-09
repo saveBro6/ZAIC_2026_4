@@ -233,4 +233,46 @@ def test_submission_pipeline_permission_fallback(mock_dataset_env: dict[str, Pat
     assert pipeline.output_path.parent == Path("result").resolve()
 
 
+def test_submission_pipeline_auto_saves_schema_linking_result(mock_dataset_env: dict[str, Path]) -> None:
+    from zaic_2026_4.submission.models import QuestionItem
+
+    llm = MockLLMEngine()
+    embedder = MockEmbedder()
+    cache_dir = mock_dataset_env["cache_dir"]
+
+    pipeline = SubmissionPipeline(
+        data_dir=mock_dataset_env["data_dir"],
+        rulebook_path=mock_dataset_env["rulebook_path"],
+        llm_engine=llm,
+        embedder=embedder,
+        vector_model_path="mock",
+        calendar_path=mock_dataset_env["calendar_path"],
+        output_path=mock_dataset_env["output_path"],
+        logs_dir=mock_dataset_env["logs_dir"],
+        cache_base_dir=cache_dir,
+    )
+
+    q = QuestionItem(
+        id="q_test_101",
+        business_id="biz_test",
+        question="Tổng số lượng Sting dâu?",
+        as_of_date="2026-05-25",
+    )
+    sub = pipeline.process_question(q)
+    assert sub.id == "q_test_101"
+
+    biz_cache = cache_dir / "cache_biz_test"
+    schema_link_file = biz_cache / "schema_linking_result.json"
+    assert schema_link_file.is_file()
+
+    content = json.loads(schema_link_file.read_text(encoding="utf-8"))
+    assert "final_linked_schema" in content
+    assert "variant_traces" in content
+    assert content["question_id"] == "q_test_101"
+
+    per_q_file = biz_cache / "schema_linking_result_q_test_101.json"
+    assert per_q_file.is_file()
+
+
+
 

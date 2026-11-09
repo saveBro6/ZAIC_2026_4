@@ -140,28 +140,13 @@ def main() -> None:
         vector_indexer=vector_indexer,
         raw_profile=raw_profile,
         cases=args.cases,
+        cache_dir=orchestrator.cache_dir,
     )
     elapsed = time.perf_counter() - t0
 
-    print(json.dumps({
-        "question": args.question,
-        "elapsed_seconds": round(elapsed, 3),
-        "total_retries": result.total_retries,
-        "final_linked_schema": sorted(result.final_linked_schema),
-        "canonical_schema": sorted(result.canonical_schema),
-        "preserved_keys": sorted(result.preserved_keys),
-        "variant_traces": [
-            {
-                "case_name": t.case_name,
-                "profile_type": t.profile_type,
-                "retry_count": t.retry_count,
-                "fields": sorted(t.fields_harvested),
-                "mismatches": t.mismatches_detected,
-                "final_sql": t.final_sql,
-            }
-            for t in result.variant_traces
-        ],
-    }, ensure_ascii=False, indent=2))
+    out_data = result.to_dict(question=args.question)
+    out_data["elapsed_seconds"] = round(elapsed, 3)
+    print(json.dumps(out_data, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

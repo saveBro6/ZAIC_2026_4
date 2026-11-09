@@ -10,6 +10,8 @@ Verifies:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -617,3 +619,45 @@ def test_schema_post_processor_multi_table_resolution() -> None:
     assert '<table name="ban_hang">' in xml_output
     assert '<table name="khach_hang">' in xml_output
     assert '<column name="Tên khách"' in xml_output
+
+
+def test_schema_linking_auto_save_cache(
+    sample_metadata: dict[str, Any],
+    sample_lsh_indexer: Any,
+    sample_vector_indexer: Any,
+    sample_raw_profile: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    from zaic_2026_4.schema_linking.task_aligned_linker import TaskAlignedSchemaLinker
+
+    linker = TaskAlignedSchemaLinker(
+        llm_engine=MockLLMEngine(),
+        max_retries=1,
+    )
+
+    question = "List the zip code of all charter schools in Fresno"
+    cache_dir = tmp_path / "cache_test"
+
+    result = linker.link_schema(
+        question=question,
+        processed_metadata=sample_metadata,
+        lsh_indexer=sample_lsh_indexer,
+        vector_indexer=sample_vector_indexer,
+        raw_profile=sample_raw_profile,
+        cache_dir=cache_dir,
+        question_id="q_123",
+    )
+    assert result.final_linked_schema is not None
+
+    res_file = cache_dir / "schema_linking_result.json"
+    assert res_file.is_file()
+
+    data = json.loads(res_file.read_text(encoding="utf-8"))
+    assert "final_linked_schema" in data
+    assert "variant_traces" in data
+    assert data["question"] == question
+    assert data["question_id"] == "q_123"
+
+    per_q_file = cache_dir / "schema_linking_result_q_123.json"
+    assert per_q_file.is_file()
+

@@ -8,8 +8,10 @@ and undocumented join keys.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from zaic_2026_4.schema_linking.ast_parser import SQLASTExtractor
@@ -52,6 +54,36 @@ class SchemaLinkingResult:
     def format_for_sql_generation(self, processed_metadata: dict[str, Any]) -> str:
         """Format quoted schema into clean XML context for downstream Phase 04 SQL Generation."""
         return SchemaPostProcessor.format_for_sql_generation(self.final_linked_schema, processed_metadata)
+
+    def to_dict(
+        self,
+        question: str | None = None,
+        question_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Convert linking result into serializable JSON dictionary."""
+        data: dict[str, Any] = {
+            "final_linked_schema": sorted(self.final_linked_schema),
+            "canonical_schema": sorted(self.canonical_schema),
+            "preserved_keys": sorted(self.preserved_keys),
+            "total_retries": self.total_retries,
+            "variant_traces": [
+                {
+                    "case_name": t.case_name,
+                    "profile_type": t.profile_type,
+                    "retry_count": t.retry_count,
+                    "fields": sorted(t.fields_harvested),
+                    "literals": sorted(t.literals_extracted),
+                    "mismatches": t.mismatches_detected,
+                    "final_sql": t.final_sql,
+                }
+                for t in self.variant_traces
+            ],
+        }
+        if question is not None:
+            data["question"] = question
+        if question_id is not None:
+            data["question_id"] = question_id
+        return data
 
 
 class TaskAlignedSchemaLinker:
@@ -194,6 +226,8 @@ class TaskAlignedSchemaLinker:
         max_retries: int | None = None,
         batch_generate: bool = True,
         cases: str | list[str] | set[str] | None = None,
+        cache_dir: Path | str | None = None,
+        question_id: str | None = None,
     ) -> SchemaLinkingResult:
         """Execute Task-Aligned Schema Linking across specified context variants.
 
@@ -206,6 +240,8 @@ class TaskAlignedSchemaLinker:
             max_retries: Maximum re-prompting retries on literal mismatch (default: self.max_retries).
             batch_generate: Whether to execute initial prompts using batched LLM generation.
             cases: Specific context variants to run, e.g. "abcde", "abce", "abe", or None (defaults to all).
+            cache_dir: Optional business cache directory to automatically persist schema_linking_result.json.
+            question_id: Optional question ID for logging per-question schema linking results.
 
         Returns:
             SchemaLinkingResult with final linked schema, execution traces, and diagnostics.
@@ -360,7 +396,7 @@ class TaskAlignedSchemaLinker:
 
         preserved = canonical_schema - linked_fields
 
-        return SchemaLinkingResult(
+        result = SchemaLinkingResult(
             final_linked_schema=quoted_schema,
             canonical_schema=canonical_schema,
             variant_traces=traces,
@@ -368,6 +404,25 @@ class TaskAlignedSchemaLinker:
             all_harvested_fields=linked_fields,
             preserved_keys=preserved,
         )
+
+        # Automatically persist schema_linking_result.json to cache_dir if provided
+        if cache_dir is not None:
+            c_dir = Path(cache_dir)
+            try:
+                c_dir.mkdir(parents=True, exist_ok=True)
+                out_dict = result.to_dict(question=question, question_id=question_id)
+                res_file = c_dir / "schema_linking_result.json"
+                with open(res_file, "w", encoding="utf-8") as f:
+                    json.dump(out_dict, f, ensure_ascii=False, indent=2)
+
+                if question_id:
+                    q_file = c_dir / f"schema_linking_result_{question_id}.json"
+                    with open(q_file, "w", encoding="utf-8") as f:
+                        json.dump(out_dict, f, ensure_ascii=False, indent=2)
+            except (OSError, TypeError, ValueError) as exc:
+                logger.warning("Failed to save schema_linking_result.json in %s: %s", c_dir, exc)
+
+        return result
 
 
 def task_aligned_schema_linking(
@@ -379,6 +434,8 @@ def task_aligned_schema_linking(
     raw_profile: dict[str, Any] | None = None,
     max_retries: int = 2,
     cases: str | list[str] | set[str] | None = None,
+    cache_dir: Path | str | None = None,
+    question_id: str | None = None,
 ) -> set[str]:
     """Functional interface for Task-Aligned Schema Linking matching the original paper's pseudo-code.
 
@@ -391,6 +448,8 @@ def task_aligned_schema_linking(
         - raw_profile: Raw database statistics and undocumented join paths.
         - max_retries: Maximum number of re-prompting retries on literal mismatch.
         - cases: Specific context variants to run, e.g. "abcde", "abce", or None.
+        - cache_dir: Optional directory to persist schema_linking_result.json.
+        - question_id: Optional question ID for per-question result files.
 
     Output:
         - final_linked_schema: Set of selected columns formatted as 'TableName.ColumnName'.
@@ -410,5 +469,7 @@ def task_aligned_schema_linking(
         raw_profile=raw_profile,
         max_retries=max_retries,
         cases=cases,
+        cache_dir=cache_dir,
+        question_id=question_id,
     )
     return result.final_linked_schema

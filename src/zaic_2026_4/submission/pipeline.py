@@ -37,6 +37,7 @@ class BusinessContext:
     vector_indexer: Any
     voting_executor: VotingExecutor
     linker: TaskAlignedSchemaLinker
+    cache_dir: Path | None = None
 
 
 class SubmissionPipeline:
@@ -208,6 +209,7 @@ class SubmissionPipeline:
             vector_indexer=vector_indexer,
             voting_executor=voting_executor,
             linker=linker,
+            cache_dir=biz_cache_dir,
         )
         self._business_cache[business_id] = context
         return context
@@ -237,6 +239,8 @@ class SubmissionPipeline:
                 vector_indexer=biz_ctx.vector_indexer,
                 raw_profile=biz_ctx.raw_profile,
                 cases=self.cases,
+                cache_dir=biz_ctx.cache_dir,
+                question_id=item.id,
             )
             reduced_schema = linking_res.final_linked_schema
         except Exception as exc:
