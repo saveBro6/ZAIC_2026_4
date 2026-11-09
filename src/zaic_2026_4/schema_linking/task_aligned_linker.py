@@ -193,8 +193,9 @@ class TaskAlignedSchemaLinker:
         raw_profile: dict[str, Any] | None = None,
         max_retries: int | None = None,
         batch_generate: bool = True,
+        cases: str | list[str] | set[str] | None = None,
     ) -> SchemaLinkingResult:
-        """Execute Task-Aligned Schema Linking across 5 context variants.
+        """Execute Task-Aligned Schema Linking across specified context variants.
 
         Args:
             question: User natural language query in Vietnamese or English.
@@ -204,6 +205,7 @@ class TaskAlignedSchemaLinker:
             raw_profile: Optional raw database profile containing undocumented_joins.
             max_retries: Maximum re-prompting retries on literal mismatch (default: self.max_retries).
             batch_generate: Whether to execute initial prompts using batched LLM generation.
+            cases: Specific context variants to run, e.g. "abcde", "abce", "abe", or None (defaults to all).
 
         Returns:
             SchemaLinkingResult with final linked schema, execution traces, and diagnostics.
@@ -211,12 +213,13 @@ class TaskAlignedSchemaLinker:
         retries_limit = max_retries if max_retries is not None else self.max_retries
         all_columns = self.context_builder.get_all_tables_and_columns(processed_metadata)
 
-        # Step 1: Construct 5 context variants (Cases a to e)
+        # Step 1: Construct context variants (Cases a to e as specified)
         variants = self.context_builder.build_5_variants(
             question=question,
             processed_metadata=processed_metadata,
             lsh_indexer=lsh_indexer,
             vector_indexer=vector_indexer,
+            cases=cases,
         )
 
         # Step 2: Generate initial trial SQL queries
@@ -375,6 +378,7 @@ def task_aligned_schema_linking(
     llm_engine: Any | None = None,
     raw_profile: dict[str, Any] | None = None,
     max_retries: int = 2,
+    cases: str | list[str] | set[str] | None = None,
 ) -> set[str]:
     """Functional interface for Task-Aligned Schema Linking matching the original paper's pseudo-code.
 
@@ -386,6 +390,7 @@ def task_aligned_schema_linking(
         - llm_engine: LLM inference engine supporting text generation.
         - raw_profile: Raw database statistics and undocumented join paths.
         - max_retries: Maximum number of re-prompting retries on literal mismatch.
+        - cases: Specific context variants to run, e.g. "abcde", "abce", or None.
 
     Output:
         - final_linked_schema: Set of selected columns formatted as 'TableName.ColumnName'.
@@ -404,5 +409,6 @@ def task_aligned_schema_linking(
         vector_indexer=vector_indexer,
         raw_profile=raw_profile,
         max_retries=max_retries,
+        cases=cases,
     )
     return result.final_linked_schema

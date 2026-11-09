@@ -73,6 +73,14 @@ def main() -> None:
         default=2,
         help="Maximum re-prompting retries on literal mismatch (default: 2).",
     )
+    parser.add_argument(
+        "--cases",
+        "--case",
+        type=str,
+        default="abcde",
+        dest="cases",
+        help="Context variant cases to run (e.g. 'abcde', 'abce', 'abe'). Default: 'abcde'.",
+    )
 
     args = parser.parse_args()
 
@@ -131,6 +139,7 @@ def main() -> None:
         lsh_indexer=lsh_indexer,
         vector_indexer=vector_indexer,
         raw_profile=raw_profile,
+        cases=args.cases,
     )
     elapsed = time.perf_counter() - t0
 

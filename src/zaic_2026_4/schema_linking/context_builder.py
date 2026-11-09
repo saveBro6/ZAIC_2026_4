@@ -30,6 +30,53 @@ class SchemaVariant:
     extra_metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def parse_case_spec(cases: str | list[str] | set[str] | None) -> list[str]:
+    """Parse case specification into an ordered list of case identifiers ('a' through 'e').
+
+    Supports inputs like 'abcde', 'abce', 'a,b,c,e', ['a', 'b', 'c', 'e'], 'case_a', etc.
+    If cases is None or empty, defaults to ['a', 'b', 'c', 'd', 'e'].
+
+    Raises:
+        ValueError: If cases contains no valid case identifiers from 'a' to 'e'.
+    """
+    if cases is None:
+        return ["a", "b", "c", "d", "e"]
+
+    valid_keys = ("a", "b", "c", "d", "e")
+
+    if isinstance(cases, str):
+        raw = cases.strip().lower()
+        if not raw:
+            return ["a", "b", "c", "d", "e"]
+
+        # Check if delimiter separated (comma, space, semicolon, pipe)
+        if any(sep in raw for sep in (",", " ", ";", "|")):
+            tokens = re.split(r"[,;\s|]+", raw)
+            selected = []
+            for t in tokens:
+                c = t.replace("case_", "").strip()
+                if c in valid_keys and c not in selected:
+                    selected.append(c)
+        else:
+            selected = []
+            for char in raw:
+                if char in valid_keys and char not in selected:
+                    selected.append(char)
+    else:
+        selected = []
+        for item in cases:
+            c = str(item).strip().lower().replace("case_", "")
+            if c in valid_keys and c not in selected:
+                selected.append(c)
+
+    if not selected:
+        raise ValueError(
+            f"Invalid cases specification '{cases}'. Must contain at least one of 'a', 'b', 'c', 'd', 'e'."
+        )
+
+    return selected
+
+
 class SchemaContextBuilder:
     """Constructs focused schema subsets and formats prompts for the 5 context variants."""
 
@@ -293,8 +340,9 @@ class SchemaContextBuilder:
         processed_metadata: dict[str, Any],
         lsh_indexer: Any,
         vector_indexer: Any,
+        cases: str | list[str] | set[str] | None = None,
     ) -> list[SchemaVariant]:
-        """Generate all 5 context variants for Task-Aligned Schema Linking.
+        """Generate context variants for Task-Aligned Schema Linking.
 
         Variants:
           - case_a: Focused + Minimal Profile
@@ -303,91 +351,116 @@ class SchemaContextBuilder:
           - case_d: Full + Maximal Profile
           - case_e: Focused + Full Profile (Maximal Profile + Prompt-Level SME & Rulebook)
 
+        Args:
+            question: Natural language question text.
+            processed_metadata: Enriched database metadata dictionary.
+            lsh_indexer: VietnameseLSHIndexer instance.
+            vector_indexer: SemanticVectorIndexer instance.
+            cases: Specific cases to run, e.g. "abcde", "abce", "abe", or None (defaults to all).
+
         Returns:
-            List of 5 SchemaVariant instances.
+            List of SchemaVariant instances matching the requested cases.
         """
-        # Step 1: Compute focused schema and full schema
-        focused_schema = self.get_focused_schema(
-            question=question,
-            lsh_indexer=lsh_indexer,
-            vector_indexer=vector_indexer,
-        )
-        full_schema = self.get_all_tables_and_columns(processed_metadata)
+        case_keys = parse_case_spec(cases)
+
+        # Step 1: Compute focused schema if needed by cases a, b, or e
+        need_focused = any(k in case_keys for k in ("a", "b", "e"))
+        need_full = any(k in case_keys for k in ("c", "d"))
+
+        focused_schema: set[str] = set()
+        if need_focused:
+            focused_schema = self.get_focused_schema(
+                question=question,
+                lsh_indexer=lsh_indexer,
+                vector_indexer=vector_indexer,
+            )
+
+        full_schema: set[str] = set()
+        if need_full or (need_focused and not focused_schema):
+            full_schema = self.get_all_tables_and_columns(processed_metadata)
 
         # Fallback: If focused schema is empty, fall back to full schema
-        if not focused_schema:
+        if need_focused and not focused_schema:
             focused_schema = set(full_schema)
 
-        # Case a: Focused + Minimal
-        prompt_a = self.build_variant_prompt(
-            question=question,
-            schema_cols=focused_schema,
-            profile_type="minimal_profile",
-            processed_metadata=processed_metadata,
-        )
-        case_a = SchemaVariant(
-            case_name="case_a",
-            schema_cols=set(focused_schema),
-            profile_type="minimal_profile",
-            formatted_prompt=prompt_a,
-        )
+        variants: list[SchemaVariant] = []
+        for key in case_keys:
+            if key == "a":
+                prompt_a = self.build_variant_prompt(
+                    question=question,
+                    schema_cols=focused_schema,
+                    profile_type="minimal_profile",
+                    processed_metadata=processed_metadata,
+                )
+                variants.append(
+                    SchemaVariant(
+                        case_name="case_a",
+                        schema_cols=set(focused_schema),
+                        profile_type="minimal_profile",
+                        formatted_prompt=prompt_a,
+                    )
+                )
+            elif key == "b":
+                prompt_b = self.build_variant_prompt(
+                    question=question,
+                    schema_cols=focused_schema,
+                    profile_type="maximal_profile",
+                    processed_metadata=processed_metadata,
+                )
+                variants.append(
+                    SchemaVariant(
+                        case_name="case_b",
+                        schema_cols=set(focused_schema),
+                        profile_type="maximal_profile",
+                        formatted_prompt=prompt_b,
+                    )
+                )
+            elif key == "c":
+                prompt_c = self.build_variant_prompt(
+                    question=question,
+                    schema_cols=full_schema,
+                    profile_type="minimal_profile",
+                    processed_metadata=processed_metadata,
+                )
+                variants.append(
+                    SchemaVariant(
+                        case_name="case_c",
+                        schema_cols=set(full_schema),
+                        profile_type="minimal_profile",
+                        formatted_prompt=prompt_c,
+                    )
+                )
+            elif key == "d":
+                prompt_d = self.build_variant_prompt(
+                    question=question,
+                    schema_cols=full_schema,
+                    profile_type="maximal_profile",
+                    processed_metadata=processed_metadata,
+                )
+                variants.append(
+                    SchemaVariant(
+                        case_name="case_d",
+                        schema_cols=set(full_schema),
+                        profile_type="maximal_profile",
+                        formatted_prompt=prompt_d,
+                    )
+                )
+            elif key == "e":
+                prompt_e, sme_ctx, rule_ctx = self.build_case_e_prompt(
+                    question=question,
+                    focused_schema=focused_schema,
+                    processed_metadata=processed_metadata,
+                    vector_indexer=vector_indexer,
+                )
+                variants.append(
+                    SchemaVariant(
+                        case_name="case_e",
+                        schema_cols=set(focused_schema),
+                        profile_type="full_profile",
+                        formatted_prompt=prompt_e,
+                        sme_context=sme_ctx,
+                        rulebook_context=rule_ctx,
+                    )
+                )
 
-        # Case b: Focused + Maximal
-        prompt_b = self.build_variant_prompt(
-            question=question,
-            schema_cols=focused_schema,
-            profile_type="maximal_profile",
-            processed_metadata=processed_metadata,
-        )
-        case_b = SchemaVariant(
-            case_name="case_b",
-            schema_cols=set(focused_schema),
-            profile_type="maximal_profile",
-            formatted_prompt=prompt_b,
-        )
-
-        # Case c: Full + Minimal
-        prompt_c = self.build_variant_prompt(
-            question=question,
-            schema_cols=full_schema,
-            profile_type="minimal_profile",
-            processed_metadata=processed_metadata,
-        )
-        case_c = SchemaVariant(
-            case_name="case_c",
-            schema_cols=set(full_schema),
-            profile_type="minimal_profile",
-            formatted_prompt=prompt_c,
-        )
-
-        # Case d: Full + Maximal
-        prompt_d = self.build_variant_prompt(
-            question=question,
-            schema_cols=full_schema,
-            profile_type="maximal_profile",
-            processed_metadata=processed_metadata,
-        )
-        case_d = SchemaVariant(
-            case_name="case_d",
-            schema_cols=set(full_schema),
-            profile_type="maximal_profile",
-            formatted_prompt=prompt_d,
-        )
-
-        # Case e: Focused + Full (Maximal Profile + Prompt-Level SME & Rulebook)
-        prompt_e, sme_ctx, rule_ctx = self.build_case_e_prompt(
-            question=question,
-            focused_schema=focused_schema,
-            processed_metadata=processed_metadata,
-            vector_indexer=vector_indexer,
-        )
-        case_e = SchemaVariant(
-            case_name="case_e",
-            schema_cols=set(focused_schema),
-            profile_type="full_profile",
-            formatted_prompt=prompt_e,
-            sme_context=sme_ctx,
-            rulebook_context=rule_ctx,
-        )
-
-        return [case_a, case_b, case_c, case_d, case_e]
+        return variants

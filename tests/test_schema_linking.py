@@ -283,6 +283,51 @@ def test_context_builder_5_variants(
     assert "<business_readme>" in variants[4].formatted_prompt
 
 
+def test_parse_case_spec() -> None:
+    """Verify parsing and validation of case specification strings and collections."""
+    from zaic_2026_4.schema_linking.context_builder import parse_case_spec
+
+    assert parse_case_spec(None) == ["a", "b", "c", "d", "e"]
+    assert parse_case_spec("") == ["a", "b", "c", "d", "e"]
+    assert parse_case_spec("abcde") == ["a", "b", "c", "d", "e"]
+    assert parse_case_spec("abce") == ["a", "b", "c", "e"]
+    assert parse_case_spec("case_a, case_b, case_e") == ["a", "b", "e"]
+    assert parse_case_spec("a;c;e") == ["a", "c", "e"]
+    assert parse_case_spec(["a", "b", "e"]) == ["a", "b", "e"]
+    assert parse_case_spec("ABCE") == ["a", "b", "c", "e"]
+
+    # Deduplication and order preservation
+    assert parse_case_spec("aabcee") == ["a", "b", "c", "e"]
+
+    # Invalid input
+    import pytest
+    with pytest.raises(ValueError, match="Invalid cases specification"):
+        parse_case_spec("xyz")
+
+
+def test_context_builder_subset_variants(
+    sample_metadata: dict[str, Any],
+    sample_lsh_indexer: VietnameseLSHIndexer,
+    sample_vector_indexer: SemanticVectorIndexer,
+) -> None:
+    """Verify building only a specified subset of variants (e.g. abce)."""
+    builder = SchemaContextBuilder()
+    question = "List the zip code of all charter schools in Fresno"
+
+    variants = builder.build_5_variants(
+        question=question,
+        processed_metadata=sample_metadata,
+        lsh_indexer=sample_lsh_indexer,
+        vector_indexer=sample_vector_indexer,
+        cases="abce",
+    )
+
+    assert len(variants) == 4
+    case_names = [v.case_name for v in variants]
+    assert case_names == ["case_a", "case_b", "case_c", "case_e"]
+    assert "case_d" not in case_names
+
+
 # ---------------------------------------------------------------------------
 # Test Checklist 3 & 4: Paper Benchmark & Re-prompting Loop (Fresno Example)
 # ---------------------------------------------------------------------------
