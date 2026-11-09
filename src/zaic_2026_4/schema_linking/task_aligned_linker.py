@@ -16,7 +16,10 @@ from zaic_2026_4.schema_linking.ast_parser import SQLASTExtractor
 from zaic_2026_4.schema_linking.context_builder import (
     SchemaContextBuilder,
 )
-from zaic_2026_4.schema_linking.post_processor import SchemaPostProcessor
+from zaic_2026_4.schema_linking.post_processor import (
+    SchemaPostProcessor,
+    normalize_identifier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,50 @@ class TaskAlignedSchemaLinker:
         self.ast_parser = ast_parser or SQLASTExtractor()
         self.context_builder = context_builder or SchemaContextBuilder()
         self.max_retries = max_retries
+
+    @staticmethod
+    def is_candidate_key_column(col_name: str, table_name: str = "") -> bool:
+        """Check if column is a primary key, foreign key, or entity identification code.
+
+        Handles both English conventions (id, order_id, code, CDSCode) and Vietnamese
+        business conventions (Mã hóa đơn, Mã KH, Mã SP, Số HĐ, Số phiếu, etc.).
+        """
+        c_clean = col_name.strip().lstrip("\ufeff")
+        c_lower = c_clean.lower()
+        c_norm = normalize_identifier(c_clean)
+        tbl_norm = normalize_identifier(table_name) if table_name else ""
+        tbl_base = tbl_norm.rstrip("s") if tbl_norm else ""
+
+        # 1. Vietnamese explicit code prefix ('Mã...', 'Ma...', 'ma_...')
+        # Note: 'mã ' or 'ma_' distinguishes entity codes from words like 'mẫu...'
+        if c_lower.startswith(("mã ", "mã_", "ma_", "ma ", "mã-", "ma-")):
+            return True
+
+        # 2. Direct key keywords and table-specific id/code patterns
+        if c_norm in (
+            "id",
+            "code",
+            f"{tbl_norm}id",
+            f"id{tbl_norm}",
+            f"ma{tbl_norm}",
+            f"code{tbl_norm}",
+            f"{tbl_base}id",
+            f"{tbl_base}code",
+        ):
+            return True
+
+        # 3. Delimited or CamelCase id/code prefix or suffix (e.g. order_id, CDSCode, CustomerID, ID_SP, Product_Code)
+        if (
+            c_lower.endswith(("_id", "_code", "-id", "-code", " id", " code", " mã"))
+            or c_lower.startswith(("id_", "code_", "id-", "code-", "id ", "code "))
+            or c_clean.endswith(("ID", "Id", "Code", "CODE"))
+            or c_clean.startswith(("ID", "Id", "Code", "CODE"))
+        ):
+            return True
+
+        # 4. Vietnamese invoice, bill, receipt serial / document numbers
+        # Explicitly excludes measures / metrics like 'soluong' or 'sodienthoai'
+        return c_norm in ("sohd", "sohoadon", "soct", "sophieu", "sokh", "sochungtu")
 
     def preserve_linking_keys(
         self,
@@ -132,11 +179,7 @@ class TaskAlignedSchemaLinker:
                 ]
 
             for c in candidate_cols:
-                c_lower = c.lower()
-                # Common primary key conventions
-                if c_lower in ("id", f"{tbl.lower()}_id", "code", f"ma_{tbl.lower()}") or (
-                    c_lower.startswith("ma_") and ("bill" in c_lower or "don" in c_lower or "hd" in c_lower)
-                ):
+                if self.is_candidate_key_column(c, tbl):
                     final_schema.add(f"{tbl}.{c}")
 
         return final_schema

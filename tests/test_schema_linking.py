@@ -355,6 +355,87 @@ def test_preserve_linking_keys(
     assert "schools.CDSCode" in extended
 
 
+def test_is_candidate_key_column() -> None:
+    """Verify detection of various English and Vietnamese primary/foreign key conventions."""
+    is_key = TaskAlignedSchemaLinker.is_candidate_key_column
+
+    # English key formats
+    assert is_key("id", "orders") is True
+    assert is_key("order_id", "orders") is True
+    assert is_key("CustomerID", "customers") is True
+    assert is_key("CDSCode", "schools") is True
+    assert is_key("code", "products") is True
+
+    # Vietnamese key formats (with accents, mixed cases, spaces, abbreviations)
+    assert is_key("Mã hóa đơn", "ban_hang") is True
+    assert is_key("Mã KH", "khach_hang") is True
+    assert is_key("Mã SP", "san_pham") is True
+    assert is_key("Mã phiếu thu", "thu_chi") is True
+    assert is_key("Mã barcode", "san_pham") is True
+    assert is_key("Ma don", "don_hang") is True
+    assert is_key("Số HĐ", "hoa_don") is True
+    assert is_key("Số CT", "chung_tu") is True
+    assert is_key("Số phiếu", "phieu_xuat") is True
+    assert is_key("Số KH", "khach_hang") is True
+
+    # Non-key fields (measures, phone numbers, descriptive text, notes, boolean flags ending in 'id')
+    assert is_key("is_paid", "invoices") is False
+    assert is_key("paid", "orders") is False
+    assert is_key("valid", "tokens") is False
+    assert is_key("is_valid", "users") is False
+    assert is_key("grid", "layout") is False
+    assert is_key("mid", "audio") is False
+    assert is_key("solid", "geometry") is False
+    assert is_key("idea", "notes") is False
+    assert is_key("idle", "status") is False
+    assert is_key("Số lượng lẻ", "ban_hang") is False
+    assert is_key("Số lượng", "ban_hang") is False
+    assert is_key("Số điện thoại", "khach_hang") is False
+    assert is_key("Mẫu ghi chú", "ban_hang") is False
+    assert is_key("Thanh tien", "ban_hang") is False
+    assert is_key("Giá bán", "ban_hang") is False
+    assert is_key("Đối tác", "ban_hang") is False
+
+
+def test_preserve_vietnamese_primary_keys() -> None:
+    """Verify automatic preservation of Vietnamese primary keys for referenced tables."""
+    linker = TaskAlignedSchemaLinker(llm_engine=MockLLMEngine())
+    raw_profile = {
+        "tables": {
+            "ban_hang": {
+                "columns": {
+                    "Mã hóa đơn": {},
+                    "Ngày tháng": {},
+                    "Số lượng lẻ": {},
+                    "Thanh tien": {},
+                    "Mẫu ghi chú": {},
+                }
+            }
+        }
+    }
+    metadata = {
+        "ban_hang.Mã hóa đơn": {"data_format": "STRING"},
+        "ban_hang.Ngày tháng": {"data_format": "DATE"},
+        "ban_hang.Số lượng lẻ": {"data_format": "INTEGER"},
+        "ban_hang.Thanh tien": {"data_format": "INTEGER"},
+        "ban_hang.Mẫu ghi chú": {"data_format": "STRING"},
+    }
+
+    # Only 'Thanh tien' harvested initially
+    harvested = {"ban_hang.Thanh tien"}
+    extended = linker.preserve_linking_keys(
+        linked_fields=harvested,
+        raw_profile=raw_profile,
+        processed_metadata=metadata,
+    )
+
+    # 'Mã hóa đơn' must be preserved as table PK
+    assert "ban_hang.Mã hóa đơn" in extended
+    # Non-key metrics and text should NOT be preserved
+    assert "ban_hang.Số lượng lẻ" not in extended
+    assert "ban_hang.Mẫu ghi chú" not in extended
+
+
 def test_functional_task_aligned_schema_linking(
     sample_metadata: dict[str, Any],
     sample_lsh_indexer: VietnameseLSHIndexer,
