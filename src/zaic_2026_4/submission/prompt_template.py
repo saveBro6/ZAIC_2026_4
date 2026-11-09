@@ -5,6 +5,36 @@ from __future__ import annotations
 import random
 from typing import Any
 
+# Few-shot SQL examples in Vietnamese for SQLite generation
+FEW_SHOT_SQL_EXAMPLES_VI: str = (
+    "<few_shot_examples>\n"
+    '  <example id="1">\n'
+    '    <user_question>Tổng doanh thu của mặt hàng "Sữa tươi" trong tháng này là bao nhiêu?</user_question>\n'
+    '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
+    "    <sql>\n"
+    'SELECT SUM(T1."Thành tiền") AS "Tổng doanh thu"\n'
+    'FROM "ban_hang" AS T1\n'
+    'WHERE T1."Tên hàng" LIKE \'%Sữa tươi%\'\n'
+    '  AND T1."Trạng thái" != \'Đã hủy\'\n'
+    '  AND T1."Ngày bán" >= \'2026-05-01\'\n'
+    '  AND T1."Ngày bán" <= \'2026-05-25\';\n'
+    "    </sql>\n"
+    "  </example>\n\n"
+    '  <example id="2">\n'
+    '    <user_question>Sản phẩm nào có đơn giá thấp nhất còn tồn kho?</user_question>\n'
+    '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
+    "    <sql>\n"
+    'SELECT T1."Tên sản phẩm", T1."Đơn giá"\n'
+    'FROM "san_pham" AS T1\n'
+    'WHERE T1."Đơn giá" IS NOT NULL\n'
+    '  AND T1."Số lượng tồn" > 0\n'
+    'ORDER BY T1."Đơn giá" ASC\n'
+    "LIMIT 1;\n"
+    "    </sql>\n"
+    "  </example>\n"
+    "</few_shot_examples>"
+)
+
 
 def permute_schema(reduced_schema: set[str], seed: int) -> list[str]:
     """Deterministically permute tables and columns of the reduced schema using a random seed.
@@ -127,7 +157,7 @@ def format_rulebook_context(
     if retrieved_text:
         sections.append(
             "<focal_rulebook_sections>\n"
-            "The following rule sections are identified as highly relevant to this specific question:\n"
+            "Các điều khoản quy tắc sau đây được xác định là đặc biệt liên quan đến câu hỏi này:\n"
             f"{retrieved_text}\n"
             "</focal_rulebook_sections>"
         )
@@ -143,8 +173,9 @@ def build_sql_generation_prompt(
     rulebook_text: str = "",
     vector_indexer: Any | None = None,
     rulebook_mode: str = "hybrid",
+    include_few_shot: bool = True,
 ) -> str:
-    """Build complete prompt for LLM SQLite generation with permuted schema and dynamic rulebook."""
+    """Build complete prompt for LLM SQLite generation with permuted schema, Vietnamese guidelines, and few-shot examples."""
     schema_xml = format_permuted_schema_xml(schema_keys, processed_metadata)
     rulebook_xml = format_rulebook_context(
         rulebook_text=rulebook_text,
@@ -155,20 +186,20 @@ def build_sql_generation_prompt(
 
     prompt_parts = [
         "<system>",
-        "You are an expert SQL engineer specializing in SQLite databases for Vietnamese Small and Medium Businesses (SMBs).",
-        "Your task is to write a single, clean, valid SQLite query that precisely answers the user question.",
+        "Bạn là một chuyên gia kỹ thuật SQL chuyên sâu về cơ sở dữ liệu SQLite cho các doanh nghiệp vừa và nhỏ (SMB) tại Việt Nam.",
+        "Nhiệm vụ của bạn là viết một câu truy vấn SQLite duy nhất, chuẩn xác và hợp lệ để trả lời chính xác câu hỏi của người dùng.",
         "",
-        "CRITICAL SQL & BUSINESS GUIDELINES:",
-        "1. Output ONLY the raw executable SQLite SQL statement. Do not provide conversational explanations or preambles.",
-        '2. Wrap table and column names with double quotes if they contain Vietnamese diacritics, spaces, or special characters (e.g. SELECT T1."Tên hàng" FROM "ban_hang" AS T1).',
-        "3. Relative Temporal Grounding: All relative date expressions (e.g. 'tháng này', 'hôm nay', 'tuần này', 'cùng kỳ năm ngoái') MUST be anchored against the provided <as_of_date>.",
-        "   - 'tháng này' means from the 1st of the month of as_of_date up to and including as_of_date.",
-        "4. NULL Handling in Ordering and Aggregates:",
-        "   - In SQLite, NULL is considered smaller than any other value. If ordering ASC, you MUST add a NOT NULL check (e.g. WHERE \"field\" IS NOT NULL).",
-        "   - When using MIN(f), ensure 'f IS NOT NULL'.",
-        "5. Subqueries vs Ordering: Avoid nested subqueries for min/max calculations. Use 'ORDER BY ... LIMIT 1' instead.",
-        "6. Do not perform string concatenation ('||' or CONCAT) on fields in SELECT; return the columns individually.",
-        "7. Adhere strictly to the business rules in <split_rulebook> (revenue definitions, discount treatments, order status exclusions).",
+        "HƯỚNG DẪN SQL VÀ QUY TẮC NGHIỆP VỤ QUAN TRỌNG:",
+        "1. Chỉ xuất DUY NHẤT câu lệnh SQLite SQL thô có thể thực thi được. Tuyệt đối không thêm lời giải thích, chào hỏi hoặc văn bản mở đầu/kết thúc.",
+        '2. Bọc tên bảng và tên cột trong dấu ngoặc kép (double quotes) nếu chứa dấu tiếng Việt, khoảng trắng hoặc ký tự đặc biệt (ví dụ: SELECT T1."Tên hàng" FROM "ban_hang" AS T1).',
+        "3. Neo mốc thời gian tương đối: Mọi biểu thức thời gian tương đối (ví dụ: 'tháng này', 'hôm nay', 'tuần này', 'cùng kỳ năm ngoái') BẮT BUỘC phải được tính toán dựa trên ngày mốc được cung cấp trong <temporal_anchor> (as_of_date).",
+        "   - 'tháng này' nghĩa là từ ngày mùng 1 của tháng thuộc as_of_date đến hết ngày as_of_date.",
+        "4. Xử lý NULL khi sắp xếp và tính hàm tổng hợp:",
+        "   - Trong SQLite, giá trị NULL được coi là nhỏ hơn mọi giá trị khác. Khi sắp xếp tăng dần (ASC), bạn BẮT BUỘC phải thêm điều kiện kiểm tra NOT NULL (ví dụ: WHERE \"field\" IS NOT NULL).",
+        "   - Khi sử dụng hàm MIN(f), phải đảm bảo điều kiện 'f IS NOT NULL'.",
+        "5. Ưu tiên sắp xếp thay vì truy vấn con (subquery): Tránh dùng subquery lồng nhau để tìm min/max. Sử dụng 'ORDER BY ... LIMIT 1' để thay thế.",
+        "6. Không thực hiện nối chuỗi ('||' hoặc CONCAT) các trường trong SELECT; hãy trả về các cột riêng biệt.",
+        "7. Tuân thủ nghiêm ngặt các quy tắc nghiệp vụ trong <split_rulebook> (định nghĩa doanh thu, xử lý chiết khấu, loại trừ đơn hàng bị hủy/hoàn).",
         "</system>",
         "",
     ]
@@ -181,6 +212,15 @@ def build_sql_generation_prompt(
         f"<temporal_anchor>\nas_of_date: {as_of_date}\n</temporal_anchor>",
         "",
         schema_xml,
+    ])
+
+    if include_few_shot:
+        prompt_parts.extend([
+            "",
+            FEW_SHOT_SQL_EXAMPLES_VI,
+        ])
+
+    prompt_parts.extend([
         "",
         f"<user_question>\n{question}\n</user_question>",
         "",
@@ -201,9 +241,9 @@ def build_sql_correction_prompt(
 
     return (
         "<system>\n"
-        "You are an expert SQL engineer. Your previously generated SQLite query had validation errors or violated domain guidelines.\n"
-        "Please fix the query according to the feedback below.\n"
-        "Output ONLY the corrected, executable SQLite statement.\n"
+        "Bạn là một chuyên gia kỹ thuật SQL. Câu truy vấn SQLite bạn đã sinh trước đó có lỗi kiểm tra tính hợp lệ hoặc vi phạm quy tắc nghiệp vụ/kỹ thuật.\n"
+        "Vui lòng sửa lại câu truy vấn dựa trên các phản hồi bên dưới.\n"
+        "Chỉ xuất DUY NHẤT câu lệnh SQLite SQL đã sửa và có thể thực thi được.\n"
         "</system>\n\n"
         f"<user_question>\n{question}\n</user_question>\n\n"
         f"<temporal_anchor>\nas_of_date: {as_of_date}\n</temporal_anchor>\n\n"
@@ -214,6 +254,7 @@ def build_sql_correction_prompt(
 
 
 __all__ = [
+    "FEW_SHOT_SQL_EXAMPLES_VI",
     "build_sql_correction_prompt",
     "build_sql_generation_prompt",
     "format_permuted_schema_xml",

@@ -7,6 +7,9 @@ from typing import Any
 from zaic_2026_4.profiling.profile_summarizer import MockLLMEngine
 from zaic_2026_4.submission.candidate_generator import CandidateGenerator
 from zaic_2026_4.submission.prompt_template import (
+    FEW_SHOT_SQL_EXAMPLES_VI,
+    build_sql_correction_prompt,
+    build_sql_generation_prompt,
     format_rulebook_context,
     permute_schema,
 )
@@ -142,3 +145,61 @@ def test_candidate_generator_all_candidates() -> None:
     for idx, c in enumerate(candidates):
         assert c.candidate_id == idx
         assert c.seed in (42, 100, 2026)
+
+
+def test_few_shot_sql_examples_structure() -> None:
+    """Verify that FEW_SHOT_SQL_EXAMPLES_VI contains 2 complete examples."""
+    assert '<example id="1">' in FEW_SHOT_SQL_EXAMPLES_VI
+    assert '<example id="2">' in FEW_SHOT_SQL_EXAMPLES_VI
+    assert '<example id="3">' not in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "Sữa tươi" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "IS NOT NULL" in FEW_SHOT_SQL_EXAMPLES_VI
+
+
+def test_build_sql_generation_prompt_vietnamese() -> None:
+    """Verify Vietnamese prompt formatting and structure in build_sql_generation_prompt."""
+    metadata = {
+        "ban_hang.Doanh thu": {"data_format": "REAL", "minimal_profile": "Doanh thu ban hang"},
+    }
+    prompt = build_sql_generation_prompt(
+        question="Doanh thu hôm nay là bao nhiêu?",
+        as_of_date="2026-05-25",
+        schema_keys=["ban_hang.Doanh thu"],
+        processed_metadata=metadata,
+        rulebook_text="1. Loai tru hoa don bi huy.",
+        include_few_shot=True,
+    )
+
+    # Check Vietnamese system instruction presence
+    assert "Bạn là một chuyên gia kỹ thuật SQL" in prompt
+    assert "HƯỚNG DẪN SQL VÀ QUY TẮC NGHIỆP VỤ QUAN TRỌNG:" in prompt
+    assert "Neo mốc thời gian tương đối" in prompt
+    assert "Xử lý NULL khi sắp xếp" in prompt
+
+    # Check XML sections
+    assert "<system>" in prompt
+    assert "<split_rulebook>" in prompt
+    assert "<temporal_anchor>\nas_of_date: 2026-05-25\n</temporal_anchor>" in prompt
+    assert "<selected_schema>" in prompt
+    assert "<few_shot_examples>" in prompt
+    assert "<user_question>\nDoanh thu hôm nay là bao nhiêu?\n</user_question>" in prompt
+    assert "<output>" in prompt
+
+
+def test_build_sql_correction_prompt_vietnamese() -> None:
+    """Verify Vietnamese SQL correction prompt content and structure."""
+    prompt = build_sql_correction_prompt(
+        question="Tổng số lượng hàng?",
+        as_of_date="2026-05-25",
+        faulty_sql="SELECT name FROM users ORDER BY price ASC;",
+        validation_issues=["Null values not handled in ASC ordering."],
+    )
+
+    assert "Bạn là một chuyên gia kỹ thuật SQL" in prompt
+    assert "Vui lòng sửa lại câu truy vấn dựa trên các phản hồi bên dưới." in prompt
+    assert "<user_question>\nTổng số lượng hàng?\n</user_question>" in prompt
+    assert "<temporal_anchor>\nas_of_date: 2026-05-25\n</temporal_anchor>" in prompt
+    assert "<previous_sql>\nSELECT name FROM users ORDER BY price ASC;\n</previous_sql>" in prompt
+    assert "<validation_errors>\n- Null values not handled in ASC ordering.\n</validation_errors>" in prompt
+    assert "<corrected_sql>" in prompt
+

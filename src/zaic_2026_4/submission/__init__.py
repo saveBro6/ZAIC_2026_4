@@ -15,6 +15,7 @@ from zaic_2026_4.submission.pipeline import (
     resolve_split_paths,
 )
 from zaic_2026_4.submission.prompt_template import (
+    FEW_SHOT_SQL_EXAMPLES_VI,
     build_sql_correction_prompt,
     build_sql_generation_prompt,
     format_permuted_schema_xml,
@@ -34,6 +35,7 @@ from zaic_2026_4.submission.voting_executor import (
 )
 
 __all__ = [
+    "FEW_SHOT_SQL_EXAMPLES_VI",
     "BusinessContext",
     "CandidateGenerator",
     "CandidateQuery",
