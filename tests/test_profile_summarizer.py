@@ -77,8 +77,10 @@ def test_minimal_prompt_few_shots() -> None:
     assert "<few_shot_examples>" in MINIMAL_PROFILE_PROMPT
     assert '<example id="1">' in MINIMAL_PROFILE_PROMPT
     assert '<example id="2">' in MINIMAL_PROFILE_PROMPT
-    assert 'Column: "ma_kh"' in MINIMAL_PROFILE_PROMPT
-    assert 'Column: "thanh_tien"' in MINIMAL_PROFILE_PROMPT
+    assert 'Cột: "ma_bien_so"' in MINIMAL_PROFILE_PROMPT
+    assert 'Cột: "phi_dich_vu"' in MINIMAL_PROFILE_PROMPT
+    assert 'Cột "ma_bien_so"' in MINIMAL_PROFILE_PROMPT
+    assert 'Cột "phi_dich_vu"' in MINIMAL_PROFILE_PROMPT
     assert "<target_column>" in MINIMAL_PROFILE_PROMPT
     assert "<output>" in MINIMAL_PROFILE_PROMPT
 
@@ -91,12 +93,16 @@ def test_maximal_prompt_few_shots() -> None:
     assert "<few_shot_examples>" in MAXIMAL_PROFILE_PROMPT
     assert '<example id="1">' in MAXIMAL_PROFILE_PROMPT
     assert '<example id="2">' in MAXIMAL_PROFILE_PROMPT
-    assert 'Column: "Trạng thái xử lý"' in MAXIMAL_PROFILE_PROMPT
-    assert 'Column: "ngay_lap"' in MAXIMAL_PROFILE_PROMPT
-    assert 'Minimal Profile: "' in MAXIMAL_PROFILE_PROMPT
-    assert "Sibling Columns:" in MAXIMAL_PROFILE_PROMPT
+    assert 'Cột: "tien_do_sua"' in MAXIMAL_PROFILE_PROMPT
+    assert 'Cột: "ngay_kham_hen"' in MAXIMAL_PROFILE_PROMPT
+    assert 'Tóm tắt rút gọn: "' in MAXIMAL_PROFILE_PROMPT
+    assert "Các cột khác trong bảng:" in MAXIMAL_PROFILE_PROMPT
     assert "<target_column>" in MAXIMAL_PROFILE_PROMPT
     assert "<output>" in MAXIMAL_PROFILE_PROMPT
+    assert "{null_ratio" not in MAXIMAL_PROFILE_PROMPT
+    assert "lần xuất hiện" not in MAXIMAL_PROFILE_PROMPT
+    assert "{top_10}" not in MAXIMAL_PROFILE_PROMPT
+    assert "Top giá trị phổ biến" not in MAXIMAL_PROFILE_PROMPT
 
 
 def test_summarizer_prompt_builders() -> None:
@@ -106,7 +112,6 @@ def test_summarizer_prompt_builders() -> None:
     col_stats = {
         "null_count": 10,
         "distinct_count": 50,
-        "null_ratio": 0.01,
         "min_val": "1000",
         "max_val": "50000",
         "data_format": "CURRENCY",
@@ -124,12 +129,12 @@ def test_summarizer_prompt_builders() -> None:
         total_rows=1000,
         business_readme="Tạp hóa Phương Linh\nQuy đổi: 1 lốc = 6 lon",
     )
-    assert 'Table: "BanHang"' in min_p
-    assert 'Column: "tien_hang"' in min_p
-    assert "10/1000" in min_p
+    assert 'Bảng: "BanHang"' in min_p
+    assert 'Cột: "tien_hang"' in min_p
     assert "CURRENCY" in min_p
     assert "<business_readme>" in min_p
     assert "Tạp hóa Phương Linh\nQuy đổi: 1 lốc = 6 lon" in min_p
+    assert "Formatted VND currency." not in min_p
 
     max_p = summarizer.build_maximal_prompt(
         table_name="BanHang",
@@ -137,17 +142,21 @@ def test_summarizer_prompt_builders() -> None:
         col_stats=col_stats,
         total_rows=1000,
         business_readme="Tạp hóa Phương Linh\nQuy đổi: 1 lốc = 6 lon",
-        minimal_profile="Cột tiền hàng bán lẻ; định dạng số tiền VNĐ.",
+        minimal_profile='Cột "tien_hang" chứa số tiền bán hàng; định dạng số tiền VNĐ.',
         sibling_cols=["id", "ngay"],
     )
-    assert 'Table: "BanHang"' in max_p
-    assert 'Column: "tien_hang"' in max_p
-    assert 'Minimal Profile: "Cột tiền hàng bán lẻ; định dạng số tiền VNĐ."' in max_p
-    assert "Sibling Columns: ['id', 'ngay']" in max_p
+    assert 'Bảng: "BanHang"' in max_p
+    assert 'Cột: "tien_hang"' in max_p
+    assert 'Tóm tắt rút gọn: "Cột "tien_hang" chứa số tiền bán hàng; định dạng số tiền VNĐ."' in max_p
+    assert "Các cột khác trong bảng: ['id', 'ngay']" in max_p
     assert "THOUSAND_SEPARATOR" in max_p
-    assert "Formatted VND currency." in max_p
+    assert "Formatted VND currency." not in max_p
     assert "<business_readme>" in max_p
     assert "Tạp hóa Phương Linh\nQuy đổi: 1 lốc = 6 lon" in max_p
+    assert "null_ratio" not in max_p
+    assert "lần xuất hiện" not in max_p
+    assert "Top giá trị phổ biến" not in max_p
+    assert "Giá trị NULL: 10/1000" in max_p
 
 
 def test_summarizer_empty_database() -> None:
@@ -171,7 +180,6 @@ def test_summarizer_mock_workflow() -> None:
                     "ma_hd": {
                         "null_count": 0,
                         "distinct_count": 100,
-                        "null_ratio": 0.0,
                         "min_val": "HD001",
                         "max_val": "HD100",
                         "min_str_len": 5,
@@ -190,7 +198,6 @@ def test_summarizer_mock_workflow() -> None:
                     "ngay_tao": {
                         "null_count": 0,
                         "distinct_count": 50,
-                        "null_ratio": 0.0,
                         "min_val": "2025-01-01",
                         "max_val": "2025-02-19",
                         "min_str_len": 10,
@@ -232,6 +239,7 @@ def test_summarizer_mock_workflow() -> None:
     assert len(ma_hd_meta["minimal_profile"]) > 0
     assert len(ma_hd_meta["maximal_profile"]) > 0
     assert ma_hd_meta["minimal_profile"] in ma_hd_meta["maximal_profile"]
+    assert "Top-10 giá trị phổ biến: ['HD001', 'HD002']" in ma_hd_meta["maximal_profile"]
 
     ngay_meta = profiles["HoaDon.ngay_tao"]
     assert ngay_meta["data_format"] == "DATE"

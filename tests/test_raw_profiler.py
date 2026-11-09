@@ -51,7 +51,6 @@ def test_empty_table_profiling(tmp_path: Path) -> None:
     tbl = profile["tables"]["empty_table"]
     assert tbl["row_count"] == 0
     assert tbl["columns"]["id"]["null_count"] == 0
-    assert tbl["columns"]["id"]["null_ratio"] == 0.0
     assert tbl["columns"]["id"]["distinct_count"] == 0
     assert tbl["columns"]["id"]["sample_values"] == []
 
@@ -74,7 +73,6 @@ def test_null_column_profiling(tmp_path: Path) -> None:
     tbl = profile["tables"]["test_nulls"]
     assert tbl["row_count"] == 3
     assert tbl["columns"]["all_null"]["null_count"] == 3
-    assert tbl["columns"]["all_null"]["null_ratio"] == 1.0
     assert tbl["columns"]["all_null"]["distinct_count"] == 0
     assert tbl["columns"]["all_null"]["data_format"] == "EMPTY"
 
@@ -229,7 +227,6 @@ def test_downstream_contract_compatibility(tmp_path: Path) -> None:
     required_keys = [
         "null_count",
         "distinct_count",
-        "null_ratio",
         "min_val",
         "max_val",
         "min_str_len",

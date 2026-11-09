@@ -177,7 +177,7 @@ class MockLLMEngine:
                 continue
 
             # Check whether it is a minimal or maximal prompt
-            is_minimal = "SHORT SUMMARY" in prompt
+            is_minimal = "SHORT SUMMARY" in prompt or "TÓM TẮT RÚT GỌN" in prompt
 
             # Scope extraction to the target column section (after <few_shot_examples>)
             target_text = (
@@ -194,15 +194,28 @@ class MockLLMEngine:
                     table_name = target_text.split('Table: "')[1].split('"')[0]
                 except IndexError:
                     pass
+            elif 'Bảng: "' in target_text:
+                try:
+                    table_name = target_text.split('Bảng: "')[1].split('"')[0]
+                except IndexError:
+                    pass
+
             if 'Column: "' in target_text:
                 try:
                     col_name = target_text.split('Column: "')[1].split('"')[0]
                 except IndexError:
                     pass
+            elif 'Cột: "' in target_text:
+                try:
+                    col_name = target_text.split('Cột: "')[1].split('"')[0]
+                except IndexError:
+                    pass
 
             # Extract data format
             format_str = "STRING"
-            if "Format & Hints: " in target_text:
+            if "Định dạng: " in target_text:
+                format_str = target_text.split("Định dạng: ")[1].split("\n")[0]
+            elif "Format & Hints: " in target_text:
                 format_str = (
                     target_text.split("Format & Hints: ")[1]
                     .split("\n")[0]
@@ -214,29 +227,38 @@ class MockLLMEngine:
             col_lower = col_name.lower()
             if is_minimal:
                 if any(k in col_lower for k in ("ngay", "ngày", "date", "time")):
-                    summary = f"Cột ngày tháng giao dịch ({col_name}) trong bảng {table_name}; định dạng thời gian cần chuẩn hóa ISO YYYY-MM-DD khi truy vấn."
+                    summary = f'Cột "{col_name}" lưu trữ ngày tháng giao dịch trong bảng {table_name}; định dạng thời gian cần chuẩn hóa ISO YYYY-MM-DD khi truy vấn.'
                 elif any(k in col_lower for k in ("tien", "tiền", "gia", "giá", "cost", "price", "amount")):
-                    summary = f"Cột giá trị tiền tệ ({col_name}) trong bảng {table_name}; định dạng số tiền VNĐ cần làm sạch dấu phân cách trước khi tính toán tổng/bình quân."
+                    summary = f'Cột "{col_name}" chứa giá trị tiền tệ trong bảng {table_name}; định dạng số tiền VNĐ cần làm sạch dấu phân cách trước khi tính toán tổng/bình quân.'
                 elif any(k in col_lower for k in ("ma", "mã", "id", "code", "sku")):
-                    summary = f"Mã định danh nghiệp vụ ({col_name}) trong bảng {table_name}; định dạng chuỗi mã số/ký tự chữ và số."
-                elif any(k in col_lower for k in ("trang_thai", "trạng thái", "status", "ket_qua", "kết quả")):
-                    summary = f"Trạng thái xử lý giao dịch ({col_name}) trong bảng {table_name}; cờ phân loại cần lọc theo quy ước nghiệp vụ."
+                    summary = f'Cột "{col_name}" là mã định danh nghiệp vụ trong bảng {table_name}; định dạng chuỗi mã số/ký tự chữ và số.'
+                elif any(k in col_lower for k in ("trang_thai", "trạng thái", "status", "ket_qua", "kết quả", "tien_do")):
+                    summary = f'Cột "{col_name}" theo dõi trạng thái xử lý giao dịch trong bảng {table_name}; cờ phân loại cần lọc theo quy ước nghiệp vụ.'
                 else:
-                    summary = f"Thuộc tính thông tin {col_name} trong bảng {table_name}; kiểu dữ liệu {format_str}."
+                    summary = f'Cột "{col_name}" lưu trữ thuộc tính thông tin trong bảng {table_name}; kiểu dữ liệu {format_str}.'
             else:
                 minimal_profile_in_prompt = ""
-                if 'Minimal Profile: "' in target_text:
+                if 'Tóm tắt rút gọn: "' in target_text:
                     try:
-                        minimal_profile_in_prompt = (
-                            target_text.split('Minimal Profile: "')[1].split('"')[0]
-                        )
+                        raw_line = target_text.split('Tóm tắt rút gọn: "')[1].split("\n")[0].strip()
+                        if raw_line.endswith('"'):
+                            raw_line = raw_line[:-1]
+                        minimal_profile_in_prompt = raw_line
+                    except IndexError:
+                        pass
+                elif 'Minimal Profile: "' in target_text:
+                    try:
+                        raw_line = target_text.split('Minimal Profile: "')[1].split("\n")[0].strip()
+                        if raw_line.endswith('"'):
+                            raw_line = raw_line[:-1]
+                        minimal_profile_in_prompt = raw_line
                     except IndexError:
                         pass
 
                 lead_in = (
                     f"{minimal_profile_in_prompt} "
                     if minimal_profile_in_prompt
-                    else f"Cột {col_name} thuộc bảng {table_name}, giữ vai trò quản lý thông tin trong luồng nghiệp vụ SMB. "
+                    else f'Cột "{col_name}" thuộc bảng {table_name}, giữ vai trò quản lý thông tin trong luồng nghiệp vụ SMB. '
                 )
                 summary = (
                     f"{lead_in}"
@@ -299,28 +321,18 @@ class ProfileLLMSummarizer:
         col_name: str,
         col_stats: ColumnProfile | dict[str, Any],
         sibling_cols: list[str],
-        total_rows: int,
+        total_rows: int = 0,
         business_readme: str = "",
     ) -> str:
         """Construct the Minimal Profile XML prompt with full business_readme."""
-        null_count = col_stats.get("null_count", 0) or 0
-        null_ratio = (null_count / total_rows) if total_rows > 0 else 0.0
-        distinct_count = col_stats.get("distinct_count", 0) or 0
         data_format = col_stats.get("data_format", "STRING") or "STRING"
-        llm_hint = col_stats.get("llm_hint") or "Standard tabular column"
-
         samples = (col_stats.get("sample_values") or [])[:5]
 
         return MINIMAL_PROFILE_PROMPT.format(
             table_name=table_name,
             col_name=col_name,
             sibling_cols=sibling_cols,
-            null_count=null_count,
-            total_rows=total_rows,
-            null_ratio=null_ratio,
-            distinct_count=distinct_count,
             data_format=data_format,
-            llm_hint=llm_hint,
             samples=samples,
             business_readme=business_readme.strip(),
         )
@@ -337,7 +349,6 @@ class ProfileLLMSummarizer:
     ) -> str:
         """Construct the Maximal Profile XML prompt with full business_readme."""
         null_count = col_stats.get("null_count", 0) or 0
-        null_ratio = (null_count / total_rows) if total_rows > 0 else 0.0
         distinct_count = col_stats.get("distinct_count", 0) or 0
         min_val = col_stats.get("min_val", "N/A")
         if min_val is None:
@@ -352,9 +363,6 @@ class ProfileLLMSummarizer:
             or col_stats.get("currency_subtype")
             or "Standard"
         )
-        llm_hint = col_stats.get("llm_hint") or "Standard tabular column"
-        top_10 = col_stats.get("top_10_samples") or {}
-        top_10_samples = dict(list(top_10.items())[:6])
 
         return MAXIMAL_PROFILE_PROMPT.format(
             table_name=table_name,
@@ -363,14 +371,11 @@ class ProfileLLMSummarizer:
             sibling_cols=sibling_cols or [],
             null_count=null_count,
             total_rows=total_rows,
-            null_ratio=null_ratio,
             distinct_count=distinct_count,
             min_val=min_val,
             max_val=max_val,
             data_format=data_format,
             subtype_info=subtype,
-            top_10=top_10_samples,
-            llm_hint=llm_hint,
             business_readme=business_readme.strip(),
         )
 
@@ -467,9 +472,16 @@ class ProfileLLMSummarizer:
             short_summary = min_summaries[idx].strip()
             long_summary = max_summaries[idx].strip()
 
+            top_10_list = list((col_stats.get("top_10_samples") or {}).keys())[:10]
+            if top_10_list:
+                top_str = f"Các giá trị phổ biến: {top_10_list}"
+                maximal_profile = f"{long_summary} {top_str}" if long_summary else top_str
+            else:
+                maximal_profile = long_summary
+
             processed_metadata[col_key] = {
                 "minimal_profile": short_summary,
-                "maximal_profile": long_summary,
+                "maximal_profile": maximal_profile,
                 "raw_samples": col_stats.get("sample_values") or [],
                 # Enriched attributes preserved for downstream vector and schema operations
                 "table_name": item["table_name"],

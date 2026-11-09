@@ -41,7 +41,6 @@ class ColumnProfile(TypedDict):
     # Core data contract keys
     null_count: int
     distinct_count: int
-    null_ratio: float
     min_val: str | None
     max_val: str | None
     min_str_len: int | None
@@ -276,7 +275,6 @@ class RawDatabaseProfiler:
     ) -> tuple[ColumnProfile, MinHash | None]:
         """Profile a single column's statistical properties and MinHash sketch."""
         null_count = int(series_raw.null_count())
-        null_ratio = round(null_count / total_rows, 4) if total_rows > 0 else 0.0
 
         non_null_raw = series_raw.drop_nulls()
         non_null_len = non_null_raw.len()
@@ -285,7 +283,6 @@ class RawDatabaseProfiler:
             empty_profile: ColumnProfile = {
                 "null_count": null_count,
                 "distinct_count": 0,
-                "null_ratio": null_ratio,
                 "min_val": None,
                 "max_val": None,
                 "min_str_len": None,
@@ -346,7 +343,6 @@ class RawDatabaseProfiler:
         col_profile: ColumnProfile = {
             "null_count": null_count,
             "distinct_count": distinct_count,
-            "null_ratio": null_ratio,
             "min_val": min_val,
             "max_val": max_val,
             "min_str_len": min_str_len,

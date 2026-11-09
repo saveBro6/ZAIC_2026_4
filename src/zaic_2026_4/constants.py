@@ -27,14 +27,15 @@ DEFAULT_LOCAL_GPU_UTIL: float = 0.60
 DEFAULT_LLM_MAX_LENGTH: int = 16384
 
 MINIMAL_PROFILE_PROMPT: str = """<system>
-You are an expert data analyst for Vietnamese SMB (Small and Medium Business) databases.
-Your objective is to generate a concise, 1-sentence SHORT SUMMARY in Vietnamese describing the exact business meaning and basic data format of the target column.
+Bạn là chuyên gia phân tích dữ liệu cho các cơ sở dữ liệu doanh nghiệp vừa và nhỏ (SMB) tại Việt Nam.
+Mục tiêu của bạn là tạo ra một câu TÓM TẮT RÚT GỌN (đúng 1 câu duy nhất) bằng tiếng Việt giải nghĩa chính xác vai trò nghiệp vụ của cột, bóc tách các từ viết tắt và nêu định dạng dữ liệu cơ bản.
 </system>
 
 <instructions>
-1. Business Meaning: Describe what business entity, attribute, or transaction property this column represents. Decode Vietnamese SMB abbreviations if present (e.g., SP -> Sản phẩm, KH -> Khách hàng, ĐVT -> Đơn vị tính, HĐ -> Hóa đơn) by cross-referencing Sibling Columns and business_readme.
-2. Data Format: Specify the underlying physical and logical format (e.g., Alphanumeric code, ISO date, VND currency with thousand separators, categorical status flag, integer count).
-3. Brevity Constraint: Output EXACTLY ONE concise Vietnamese sentence. Do not add boilerplate, preambles, or conversational prefixes.
+1. Quy cách mở đầu: Câu tóm tắt BẮT BUỘC bắt đầu bằng tên cột theo mẫu: Cột "{col_name}" là... hoặc Cột "{col_name}" chứa... hoặc Cột "{col_name}" lưu trữ... hoặc Cột "{col_name}" theo dõi...
+2. Ý nghĩa nghiệp vụ: Mô tả thực thể, thuộc tính hoặc đặc tính giao dịch mà cột đại diện. Bóc tách và giải nghĩa các từ viết tắt tiếng Việt SMB nếu có (ví dụ: SP -> Sản phẩm, KH -> Khách hàng, ĐVT -> Đơn vị tính, HĐ -> Hóa đơn) bằng cách đối chiếu với danh sách các cột khác trong bảng và tài liệu kinh doanh.
+3. Định dạng dữ liệu: Nêu rõ định dạng lưu trữ cơ bản (ví dụ: Chuỗi mã chữ và số, ngày tháng, số tiền VNĐ có dấu phân cách, cờ trạng thái phân loại, số nguyên/thực).
+4. Ràng buộc độ dài: Đầu ra BẮT BUỘC ĐÚNG 1 CÂU súc tích. Không thêm lời mở đầu hay giải thích thừa ngoài câu tóm tắt.
 </instructions>
 
 <business_readme>
@@ -44,61 +45,53 @@ Your objective is to generate a concise, 1-sentence SHORT SUMMARY in Vietnamese 
 <few_shot_examples>
   <example id="1">
     <target_column>
-      Table: "DonHang"
-      Column: "ma_kh"
-      Sibling Columns: ["id", "ngay_tao", "tong_tien", "trang_thai"]
-      Nulls: 0/15000 (0.00%)
-      Distinct Count: 3200
-      Format & Hints: STRING | Code identifier
-      Sample Values: ["KH0001", "KH0002", "KH0158", "VANG_LAI"]
+      Bảng: "PhieuTiepNhan"
+      Cột: "ma_bien_so"
+      Các cột khác trong bảng: ["ma_phieu", "thoi_diem_vao", "phi_uoc_tinh", "tien_do_sua"]
+      Định dạng: STRING
+      Các giá trị mẫu: ["59P1-12345", "60B2-98765", "43C1-45678", "VANG_LAI"]
     </target_column>
     <output>
-      Mã định danh khách hàng (KH: Khách Hàng, VANG_LAI: khách mua vãng lai không lưu hồ sơ); định dạng chuỗi mã ký tự chữ và số.
+      Cột "ma_bien_so" lưu trữ biển số xe của khách mang vào sửa chữa (VANG_LAI: khách vãng lai không lưu hồ sơ); định dạng chuỗi mã ký tự chữ và số.
     </output>
   </example>
 
   <example id="2">
     <target_column>
-      Table: "ChiTietDonHang"
-      Column: "thanh_tien"
-      Sibling Columns: ["ma_sp", "so_luong", "don_gia", "chiet_khau"]
-      Nulls: 0/45000 (0.00%)
-      Distinct Count: 1250
-      Format & Hints: CURRENCY | Formatted VND currency. Clean thousand separators before aggregations.
-      Sample Values: ["12,000", "45,000", "150,000", "0"]
+      Bảng: "ChiTietTienCong"
+      Cột: "phi_dich_vu"
+      Các cột khác trong bảng: ["ma_cong", "ten_hang_muc", "so_gio_cong", "giam_tru"]
+      Định dạng: CURRENCY
+      Các giá trị mẫu: ["150,000", "350,000", "80,000", "0"]
     </target_column>
     <output>
-      Tổng số tiền thực thu của dòng sản phẩm sau khi trừ chiết khấu dòng; định dạng số tiền VNĐ có dấu phân cách hàng nghìn cần làm sạch trước khi tính toán.
+      Cột "phi_dich_vu" chứa số tiền phí dịch vụ kỹ thuật sửa chữa sau khi trừ chiết khấu giảm trừ; định dạng số tiền VNĐ có dấu phân cách hàng nghìn.
     </output>
   </example>
 </few_shot_examples>
 
 <target_column>
-  Table: "{table_name}"
-  Column: "{col_name}"
-  Sibling Columns: {sibling_cols}
-  Nulls: {null_count}/{total_rows} ({null_ratio:.2%})
-  Distinct Count: {distinct_count}
-  Format & Hints: {data_format} | {llm_hint}
-  Sample Values: {samples}
+  Bảng: "{table_name}"
+  Cột: "{col_name}"
+  Các cột khác trong bảng: {sibling_cols}
+  Định dạng: {data_format}
+  Các giá trị mẫu: {samples}
 </target_column>
 
 <output>
 """
 
 MAXIMAL_PROFILE_PROMPT: str = """<system>
-You are an expert data architect and SQL engineer for Vietnamese SMB databases.
-Your objective is to generate an in-depth, structured LONG SUMMARY in Vietnamese for the target column to guide downstream Text-to-SQL generation and semantic vector retrieval.
+Bạn là chuyên gia phân tích và kiến trúc dữ liệu cho cơ sở dữ liệu doanh nghiệp vừa và nhỏ (SMB) tại Việt Nam.
+Mục tiêu của bạn là tạo ra một đoạn TÓM TẮT ĐẦY ĐỦ bằng tiếng Việt cho cột mục tiêu, hợp nhất ý nghĩa nghiệp vụ từ Tóm tắt rút gọn (Minimal Profile) với toàn bộ thông số phân bổ dữ liệu thực tế.
 </system>
 
 <instructions>
-Include the following 4 structural aspects in Vietnamese:
-1. Business Meaning & Lead-in: Use the provided Minimal Profile as the exact opening sentence, then expand on the operational role in the business workflow, entity relationship, and relation to sibling columns.
-2. Data Cleanliness & Distribution:
-   - Completeness: If null count is 0 (0.00%), state: "Cột không có giá trị NULL (100% đầy đủ dữ liệu)". If null count > 0, state exact count and ratio (e.g. "Cột chứa {null_count} giá trị NULL (chiếm {null_ratio:.2%})"). STRICTLY DO NOT use the phrase "không có giá trị NULL" when null count > 0.
-   - Cardinality & Boundaries: Mention distinct count and value range ([min_val to max_val]).
-3. Dominant Patterns: Mention frequent categories from Top-10 samples using the exact counts: "giá trị chiếm đa số là X (N lần xuất hiện)". STRICTLY DO NOT invent or estimate percentage figures.
-4. Technical SQL / Query Guidance: Provide valid SQL/DuckDB/SQLite expressions (e.g. WHERE "col" IN ('A', 'B'), CAST(REPLACE(...) AS INTEGER), date formatting SUBSTR(...)). Avoid non-SQL or mixed informal syntax.
+Bao gồm các nội dung có cấu trúc sau bằng tiếng Việt:
+1. Ý nghĩa nghiệp vụ & Mở đầu: BẮT BUỘC dùng câu Tóm tắt rút gọn (Minimal Profile) làm câu mở đầu nguyên vẹn (bắt đầu bằng Cột "{col_name}"...), sau đó mở rộng về vai trò trong quy trình vận hành và mối liên hệ với các cột khác trong bảng.
+2. Phân bổ dữ liệu thực tế:
+   - Giá trị NULL: Nếu số lượng NULL là 0, khẳng định rõ: "Cột không có giá trị NULL". Nếu số lượng NULL > 0, ghi rõ số lượng (ví dụ: "Cột chứa {null_count} giá trị NULL"). TUYỆT ĐỐI KHÔNG dùng cụm từ "không có giá trị NULL" khi có giá trị NULL.
+   - Độ biến thiên & Giới hạn: Nêu số lượng giá trị duy nhất (distinct_count) và khoảng giá trị thực tế từ min_val đến max_val.
 </instructions>
 
 <business_readme>
@@ -108,52 +101,46 @@ Include the following 4 structural aspects in Vietnamese:
 <few_shot_examples>
   <example id="1">
     <target_column>
-      Table: "SoBanHang"
-      Column: "Trạng thái xử lý"
-      Minimal Profile: "Trạng thái xử lý đơn hàng (trả hàng, Đã hoàn thành, đang gửi, Không giao được); định dạng chuỗi phân loại trạng thái."
-      Sibling Columns: ["ngay_ban", "Nội dung", "don_gia", "Số lượng", "Tổng tiền"]
-      Nulls: 526/43605 (1.21%)
-      Distinct Count: 4
-      Value Range: ["Không giao được" to "đang gửi"]
-      Format & Pattern: STRING (Categorical status)
-      Top 10 Samples: {{"Đã hoàn thành": 41248, "Không giao được": 1163, "trả hàng": 660, "đang gửi": 8}}
-      Code / SQL Hint: Categorical status string. Exclude cancelled/returned orders for revenue calculation per business rules.
+      Bảng: "NhatKyBaoDuong"
+      Cột: "tien_do_sua"
+      Tóm tắt rút gọn: "Cột \\"tien_do_sua\\" theo dõi tiến độ xử lý bảo dưỡng xe (Chờ phụ tùng, Đang sửa, Đã bàn giao, Khách hủy); định dạng chuỗi phân loại trạng thái."
+      Các cột khác trong bảng: ["ma_xe", "thoi_diem_vao", "phi_dich_vu", "so_gio_cong"]
+      Giá trị NULL: 120/15000
+      Số giá trị duy nhất: 4
+      Khoảng giá trị: ["Chờ phụ tùng" đến "Đang sửa"]
+      Định dạng: STRING (Categorical status)
     </target_column>
     <output>
-      Trạng thái xử lý đơn hàng (trả hàng, Đã hoàn thành, đang gửi, Không giao được); định dạng chuỗi phân loại trạng thái. Cột lưu trữ trạng thái xử lý đơn hàng trong sổ bán hàng, đóng vai trò cờ phân loại giao dịch (status flag) liên kết cùng các thông tin doanh thu và ngày bán. Cột chứa 526 giá trị NULL (chiếm 1.21% dữ liệu), với 4 giá trị phân loại khác nhau từ 'Không giao được' đến 'đang gửi'. Giá trị chiếm đa số là 'Đã hoàn thành' (41,248 lần xuất hiện), tiếp theo là 'Không giao được' (1,163 lần) và 'trả hàng' (660 lần). Khi truy vấn tính toán doanh thu hoặc sản phẩm bán chạy theo quy ước nghiệp vụ, BẮT BUỘC phải lọc loại bỏ các trạng thái huỷ/hoàn bằng điều kiện: WHERE "Trạng thái xử lý" = 'Đã hoàn thành'.
+      Cột "tien_do_sua" theo dõi tiến độ xử lý bảo dưỡng xe (Chờ phụ tùng, Đang sửa, Đã bàn giao, Khách hủy); định dạng chuỗi phân loại trạng thái. Cột giữ vai trò quản lý tiến trình thực hiện dịch vụ kỹ thuật trong xưởng sửa chữa, liên kết với thời điểm nhận xe và phí dịch vụ. Cột chứa 120 giá trị NULL, với 4 giá trị phân loại khác nhau từ 'Chờ phụ tùng' đến 'Đang sửa'.
     </output>
   </example>
 
   <example id="2">
     <target_column>
-      Table: "HoaDon"
-      Column: "ngay_lap"
-      Minimal Profile: "Ngày lập hóa đơn bán lẻ; định dạng chuỗi ngày tháng DD/MM/YYYY."
-      Sibling Columns: ["ma_hd", "ma_kh", "tong_tien", "trang_thai"]
-      Nulls: 0/50000 (0.00%)
-      Distinct Count: 730
-      Value Range: ["01/01/2024" to "31/12/2025"]
-      Format & Pattern: DATE (SLASH_DATE_DD_MM_YYYY)
-      Top 10 Samples: {{"15/01/2025": 140, "20/01/2025": 135, "05/02/2025": 128}}
-      Code / SQL Hint: Date in DD/MM/YYYY format. Convert to ISO YYYY-MM-DD for SQL temporal filtering.
+      Bảng: "LichHenKham"
+      Cột: "ngay_kham_hen"
+      Tóm tắt rút gọn: "Cột \\"ngay_kham_hen\\" ghi nhận mốc thời gian hẹn khám chuyên khoa; định dạng chuỗi ngày tháng DD/MM/YYYY."
+      Các cột khác trong bảng: ["ma_ho_so", "bac_si_phu_trach", "tong_chi_phi"]
+      Giá trị NULL: 0/8500
+      Số giá trị duy nhất: 365
+      Khoảng giá trị: ["01/01/2025" đến "31/12/2025"]
+      Định dạng: DATE (SLASH_DATE_DD_MM_YYYY)
     </target_column>
     <output>
-      Ngày lập hóa đơn bán lẻ; định dạng chuỗi ngày tháng DD/MM/YYYY. Cột ghi nhận mốc thời gian lập hóa đơn bán lẻ của doanh nghiệp. Cột không có giá trị NULL (100% đầy đủ dữ liệu) với 730 ngày giao dịch liên tục từ 01/01/2024 đến 31/12/2025. Định dạng ngày tháng lưu trữ là chuỗi DD/MM/YYYY (Việt Nam), do đó khi thực hiện truy vấn so sánh thời gian, lọc theo mốc as_of_date hoặc liên kết với calendar.csv, cần chuẩn hóa sang chuẩn ISO YYYY-MM-DD hoặc sử dụng hàm phân tích ngày: SUBSTR(ngay_lap, 7, 4) || '-' || SUBSTR(ngay_lap, 4, 2) || '-' || SUBSTR(ngay_lap, 1, 2).
+      Cột "ngay_kham_hen" ghi nhận mốc thời gian hẹn khám chuyên khoa; định dạng chuỗi ngày tháng DD/MM/YYYY. Cột giữ vai trò quản lý lịch hẹn khám của khách hàng tại phòng khám. Cột không có giá trị NULL với 365 mốc ngày khác nhau từ 01/01/2025 đến 31/12/2025.
     </output>
   </example>
 </few_shot_examples>
 
 <target_column>
-  Table: "{table_name}"
-  Column: "{col_name}"
-  Minimal Profile: "{minimal_profile}"
-  Sibling Columns: {sibling_cols}
-  Nulls: {null_count}/{total_rows} ({null_ratio:.2%})
-  Distinct Count: {distinct_count}
-  Value Range: [{min_val} to {max_val}]
-  Format & Pattern: {data_format} ({subtype_info})
-  Top 10 Samples: {top_10}
-  Code / SQL Hint: {llm_hint}
+  Bảng: "{table_name}"
+  Cột: "{col_name}"
+  Tóm tắt rút gọn: "{minimal_profile}"
+  Các cột khác trong bảng: {sibling_cols}
+  Giá trị NULL: {null_count}/{total_rows}
+  Số giá trị duy nhất: {distinct_count}
+  Khoảng giá trị: [{min_val} đến {max_val}]
+  Định dạng: {data_format} ({subtype_info})
 </target_column>
 
 <output>
