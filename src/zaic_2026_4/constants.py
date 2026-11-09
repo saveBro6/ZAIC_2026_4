@@ -252,8 +252,18 @@ DEFAULT_CANDIDATE_SEEDS: tuple[int, ...] = (42, 100, 2026)
 DEFAULT_NUM_CANDIDATES: int = 3
 DEFAULT_SQL_MAX_RETRIES: int = 3
 DEFAULT_SQL_TIMEOUT_SECONDS: float = 10.0
-DEFAULT_SUBMISSION_PATH: Path = Path(os.environ.get("ZAIC_SUBMISSION_PATH", "/result/submission.jsonl"))
-DEFAULT_LOGS_DIR: Path = Path(os.environ.get("ZAIC_LOGS_DIR", "/result/logs"))
+
+_DEFAULT_RESULT_BASE: Path = (
+    Path("/result")
+    if Path("/result").is_dir()
+    else Path(os.environ.get("ZAIC_RESULT_DIR", "result")).resolve()
+)
+DEFAULT_SUBMISSION_PATH: Path = Path(
+    os.environ.get("ZAIC_SUBMISSION_PATH", str(_DEFAULT_RESULT_BASE / "submission.jsonl"))
+)
+DEFAULT_LOGS_DIR: Path = Path(
+    os.environ.get("ZAIC_LOGS_DIR", str(_DEFAULT_RESULT_BASE / "logs"))
+)
 
 __all__ = [
     "ACCOUNTING_DASH_ZERO_REGEX",

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from pathlib import Path
 
 from zaic_2026_4.constants import (
     DEFAULT_CANDIDATE_SEEDS,
@@ -15,31 +14,25 @@ from zaic_2026_4.constants import (
 )
 from zaic_2026_4.profiling.profile_summarizer import create_engine
 from zaic_2026_4.profiling.vector_indexer import MockEmbedder
-from zaic_2026_4.submission.pipeline import SubmissionPipeline
+from zaic_2026_4.submission.pipeline import SubmissionPipeline, resolve_split_paths
 
 
-def main() -> None:
-    """CLI execution function for zaic-submit."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build argument parser for zaic-submit."""
     parser = argparse.ArgumentParser(
-        description="Run ZAIC 2026-4 Submission Pipeline on questions.jsonl."
+        description="Run ZAIC 2026-4 Submission Pipeline on dataset split."
     )
     parser.add_argument(
-        "--questions",
+        "--split",
         type=str,
         required=True,
-        help="Path to questions.jsonl file.",
+        help="Name or path of dataset split (e.g. 'train', 'public_test', 'private_test').",
     )
     parser.add_argument(
-        "--data-dir",
+        "--base-dir",
         type=str,
-        required=True,
-        help="Path to directory containing business subfolders (e.g. dataset/train/data).",
-    )
-    parser.add_argument(
-        "--rulebook",
-        type=str,
-        default="dataset/train/rulebook.md",
-        help="Path to dataset split rulebook.md.",
+        default="dataset",
+        help="Base directory containing dataset splits (default: 'dataset').",
     )
     parser.add_argument(
         "--rulebook-mode",
@@ -49,10 +42,12 @@ def main() -> None:
         help="Rulebook context injection mode (default: hybrid).",
     )
     parser.add_argument(
-        "--calendar",
+        "--cases",
+        "--case",
         type=str,
-        default=None,
-        help="Path to calendar.csv file (auto-discovered if omitted).",
+        default="abcde",
+        dest="cases",
+        help="Context variant cases to run for schema linking (e.g. 'abcde', 'abce', 'abe'). Default: 'abcde'.",
     )
     parser.add_argument(
         "--output",
@@ -113,20 +108,24 @@ def main() -> None:
         default=None,
         help="Limit number of questions to process (for testing).",
     )
+    return parser
 
-    args = parser.parse_args()
 
-    questions_path = Path(args.questions).resolve()
-    data_dir = Path(args.data_dir).resolve()
-    rulebook_path = Path(args.rulebook).resolve()
+def main(argv: list[str] | None = None) -> None:
+    """CLI execution function for zaic-submit."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
-    if not questions_path.is_file():
-        print(f"Error: Questions file not found: {questions_path}", file=sys.stderr)
+    try:
+        paths = resolve_split_paths(args.split, base_dir=args.base_dir)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    if not data_dir.is_dir():
-        print(f"Error: Data directory not found: {data_dir}", file=sys.stderr)
-        sys.exit(1)
+    questions_path = paths["questions_path"]
+    data_dir = paths["data_dir"]
+    rulebook_path = paths["rulebook_path"]
+    calendar_path = paths["calendar_path"]
 
     # 1. Initialize LLM engine and embedder
     llm = create_engine(
@@ -145,13 +144,14 @@ def main() -> None:
         llm_engine=llm,
         embedder=embedder,
         vector_model_path=vector_model_path,
-        calendar_path=args.calendar,
+        calendar_path=calendar_path,
         output_path=args.output,
         logs_dir=args.log_dir,
         cache_base_dir=args.cache_dir,
         seeds=tuple(args.seeds),
         max_retries=args.max_retries,
         rulebook_mode=args.rulebook_mode,
+        cases=args.cases,
     )
 
     t0 = time.perf_counter()

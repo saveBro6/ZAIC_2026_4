@@ -9,7 +9,11 @@ from zaic_2026_4.submission.models import (
     QuestionSubmission,
     ValidationResult,
 )
-from zaic_2026_4.submission.pipeline import BusinessContext, SubmissionPipeline
+from zaic_2026_4.submission.pipeline import (
+    BusinessContext,
+    SubmissionPipeline,
+    resolve_split_paths,
+)
 from zaic_2026_4.submission.prompt_template import (
     build_sql_correction_prompt,
     build_sql_generation_prompt,
@@ -49,5 +53,6 @@ __all__ = [
     "normalize_cell",
     "normalize_contract_string",
     "permute_schema",
+    "resolve_split_paths",
     "summarize_result_set",
 ]

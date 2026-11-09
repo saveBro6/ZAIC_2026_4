@@ -56,6 +56,7 @@ class SubmissionPipeline:
         seeds: tuple[int, ...] = DEFAULT_CANDIDATE_SEEDS,
         max_retries: int = DEFAULT_SQL_MAX_RETRIES,
         rulebook_mode: str = "hybrid",
+        cases: str | list[str] | set[str] | None = "abcde",
     ) -> None:
         """Initialize submission pipeline.
 
@@ -72,6 +73,7 @@ class SubmissionPipeline:
             seeds: Randomization seeds for candidate generation.
             max_retries: Retries for self-correction.
             rulebook_mode: Mode for injecting split rulebook ('hybrid', 'full', 'retrieval').
+            cases: Specific context variants to run for schema linking (default: 'abcde').
         """
         self.data_dir = Path(data_dir).resolve()
         self.rulebook_path = Path(rulebook_path).resolve()
@@ -85,12 +87,65 @@ class SubmissionPipeline:
         self.seeds = seeds
         self.max_retries = max_retries
         self.rulebook_mode = rulebook_mode
+        self.cases = cases
 
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            fallback_dir = Path("result").resolve()
+            logger.warning(
+                "Permission denied creating %s or %s. Falling back to local directory %s",
+                self.output_path.parent,
+                self.logs_dir,
+                fallback_dir,
+            )
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            self.output_path = fallback_dir / self.output_path.name
+            self.logs_dir = fallback_dir / "logs"
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
 
         self._business_cache: dict[str, BusinessContext] = {}
         self._rulebook_text = self._read_text_file(self.rulebook_path)
+
+    @classmethod
+    def from_split(
+        cls,
+        split: str | Path,
+        llm_engine: Any,
+        base_dir: Path | str = "dataset",
+        embedder: Any | None = None,
+        vector_model_path: str = "BAAI/bge-m3",
+        output_path: Path | str = DEFAULT_SUBMISSION_PATH,
+        logs_dir: Path | str = DEFAULT_LOGS_DIR,
+        cache_base_dir: Path | str = "/tmp",
+        seeds: tuple[int, ...] = DEFAULT_CANDIDATE_SEEDS,
+        max_retries: int = DEFAULT_SQL_MAX_RETRIES,
+        rulebook_mode: str = "hybrid",
+        cases: str | list[str] | set[str] | None = "abcde",
+    ) -> tuple[SubmissionPipeline, Path]:
+        """Create a SubmissionPipeline from a dataset split.
+
+        Returns:
+            Tuple of (pipeline_instance, questions_path).
+        """
+        paths = resolve_split_paths(split, base_dir=base_dir)
+        pipeline = cls(
+            data_dir=paths["data_dir"],
+            rulebook_path=paths["rulebook_path"],
+            llm_engine=llm_engine,
+            embedder=embedder,
+            vector_model_path=vector_model_path,
+            calendar_path=paths["calendar_path"],
+            output_path=output_path,
+            logs_dir=logs_dir,
+            cache_base_dir=cache_base_dir,
+            seeds=seeds,
+            max_retries=max_retries,
+            rulebook_mode=rulebook_mode,
+            cases=cases,
+        )
+        return pipeline, paths["questions_path"]
 
     @staticmethod
     def _read_text_file(path: Path) -> str:
@@ -181,6 +236,7 @@ class SubmissionPipeline:
                 lsh_indexer=biz_ctx.lsh_indexer,
                 vector_indexer=biz_ctx.vector_indexer,
                 raw_profile=biz_ctx.raw_profile,
+                cases=self.cases,
             )
             reduced_schema = linking_res.final_linked_schema
         except Exception as exc:
@@ -289,7 +345,67 @@ class SubmissionPipeline:
         return submissions
 
 
+def resolve_split_paths(
+    split_name_or_path: str | Path,
+    base_dir: Path | str = "dataset",
+) -> dict[str, Any]:
+    """Resolve standard dataset paths within a split folder.
+
+    Args:
+        split_name_or_path: Split name ('train', 'public_test', 'private_test') or direct path.
+        base_dir: Base directory containing splits (default: 'dataset').
+
+    Returns:
+        Dict containing:
+            - split_dir: Path to split root directory.
+            - questions_path: Path to questions.jsonl.
+            - data_dir: Path to data/ directory.
+            - rulebook_path: Path to rulebook.md.
+            - calendar_path: Path to calendar.csv (or None if not present).
+    """
+    raw_path = Path(split_name_or_path)
+
+    if raw_path.is_dir():
+        split_dir = raw_path.resolve()
+    else:
+        candidate = Path(base_dir) / split_name_or_path
+        if candidate.is_dir():
+            split_dir = candidate.resolve()
+        else:
+            raise FileNotFoundError(
+                f"Could not locate dataset split directory for '{split_name_or_path}' "
+                f"(checked '{raw_path}' and '{candidate}')."
+            )
+
+    questions_path = split_dir / "questions.jsonl"
+    if not questions_path.is_file():
+        raise FileNotFoundError(f"Questions file not found: {questions_path}")
+
+    data_dir = split_dir / "data"
+    if not data_dir.is_dir():
+        if any(p.is_dir() for p in split_dir.iterdir() if not p.name.startswith(".")):
+            data_dir = split_dir
+        else:
+            raise FileNotFoundError(f"Data directory not found in split: {data_dir}")
+
+    rulebook_path = split_dir / "rulebook.md"
+    if not rulebook_path.is_file():
+        raise FileNotFoundError(f"Rulebook file not found in split: {rulebook_path}")
+
+    calendar_candidate = split_dir / "calendar.csv"
+    calendar_path = calendar_candidate if calendar_candidate.is_file() else None
+
+    return {
+        "split_dir": split_dir,
+        "questions_path": questions_path,
+        "data_dir": data_dir,
+        "rulebook_path": rulebook_path,
+        "calendar_path": calendar_path,
+    }
+
+
 __all__ = [
     "BusinessContext",
     "SubmissionPipeline",
+    "resolve_split_paths",
 ]
