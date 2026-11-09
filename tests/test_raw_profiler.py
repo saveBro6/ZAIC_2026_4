@@ -405,9 +405,9 @@ def test_excel_custom_currency_formats(tmp_path: Path) -> None:
     df = pl.DataFrame(
         {
             "vnd_text": ["1,500,000 VNĐ", "-50,000 VNĐ", "0 VNĐ"],
-            "vnd_symbol": ["1,500,000 ₫", "-50,000 ₫", "0 ₫"],
-            "accounting_paren": ["1,500,000 ₫", "(50,000 ₫)", "0 ₫"],
-            "accounting_dash": ["1,500,000 ₫", "- ₫", "200,000 ₫"],
+            "vnd_symbol": ["1,500,000 đ", "-50,000 đ", "0 đ"],
+            "accounting_paren": ["1,500,000 đ", "(50,000 đ)", "0 đ"],
+            "accounting_dash": ["1,500,000 đ", "- đ", "200,000 đ"],
             "scaled_k": ["1,500 k VNĐ", "500 k VNĐ", "0 k VNĐ"],
             "scaled_tr": ["1.5 tr VNĐ", "2.0 tr VNĐ", "0.5 tr VNĐ"],
             "scaled_ty": ["1.50 tỷ", "2.30 tỷ", "0.00 tỷ"],
@@ -459,3 +459,56 @@ def test_real_db_biz_101() -> None:
     # Ngày tháng in biz_101 has values like "1 thg 6 2025"
     date_col = tbl["columns"]["Ngày tháng"]
     assert date_col["date_subtype"] == "VN_DATE_ABBR"
+
+
+def test_excel_serial_date_hint_and_no_false_positive_on_prices(tmp_path: Path) -> None:
+    """Verify Excel serial date conversion formula and avoid false positives on price columns."""
+    db_path = tmp_path / "serial_and_prices.db"
+    df = pl.DataFrame(
+        {
+            "date_col": ["45717", "45718", "45719"],
+            "gia_san_pham": ["42000", "51000", "45000"],
+            "ngay_giao_dich": ["45689", "01/02/2025", "45700"],
+        }
+    )
+    create_sqlite_db_from_dfs(db_path, {"tbl": df})
+
+    profiler = RawDatabaseProfiler(db_path)
+    profile = profiler.profile_database()
+    cols = profile["tables"]["tbl"]["columns"]
+
+    # 1. Pure serial date column
+    assert cols["date_col"]["data_format"] == "EXCEL_SERIAL"
+    assert "date(julianday('1899-12-30') + CAST(col AS REAL))" in cols["date_col"]["llm_hint"]
+
+    # 2. Metric/price column should NOT be recognized as date
+    assert cols["gia_san_pham"]["data_format"] in ("NUMERIC", "NUMERIC_STRING", "CURRENCY")
+    assert "date" not in cols["gia_san_pham"]["data_format"].lower()
+    assert cols["gia_san_pham"]["date_subtype"] is None
+
+    # 3. Mixed date column
+    assert cols["ngay_giao_dich"]["data_format"] == "DATE_MIXED"
+    assert "date(julianday('1899-12-30') + CAST(col AS REAL))" in cols["ngay_giao_dich"]["llm_hint"]
+
+
+def test_vietnamese_dong_currency_parsing_and_hints(tmp_path: Path) -> None:
+    """Verify currency with Vietnamese Latin 'đ' symbol, dot separators, and clean SQLite hint."""
+    db_path = tmp_path / "vnd_dot.db"
+    df = pl.DataFrame(
+        {
+            "gia_ban": ["25.000đ", "500đ", "19.440.000đ", "-30.500đ"],
+        }
+    )
+    create_sqlite_db_from_dfs(db_path, {"tbl": df})
+
+    profiler = RawDatabaseProfiler(db_path)
+    profile = profiler.profile_database()
+    col = profile["tables"]["tbl"]["columns"]["gia_ban"]
+
+    assert col["data_format"] == "CURRENCY"
+    assert col["currency_subtype"] == "VND_SYMBOL"
+    assert col["min_val"] == "-30.500đ"
+    assert col["max_val"] == "19.440.000đ"
+    assert "CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS INTEGER)" in col["llm_hint"]
+
+

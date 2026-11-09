@@ -185,15 +185,15 @@ VND_TEXT_REGEX: re.Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 VND_SYMBOL_REGEX: re.Pattern[str] = re.compile(
-    r"^-?\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:₫|đ)$",
+    r"^-?\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*đ$",
     re.IGNORECASE,
 )
 ACCOUNTING_PARENTHESES_REGEX: re.Pattern[str] = re.compile(
-    r"^\(\s*\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:₫|đ|vnđ|vnd)?\s*\)$",
+    r"^\(\s*\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:đ|vnđ|vnd)?\s*\)$",
     re.IGNORECASE,
 )
 ACCOUNTING_DASH_ZERO_REGEX: re.Pattern[str] = re.compile(
-    r"^-\s*(?:₫|đ|vnđ|vnd)?$",
+    r"^-\s*(?:đ|vnđ|vnd)?$",
     re.IGNORECASE,
 )
 SCALED_THOUSAND_K_REGEX: re.Pattern[str] = re.compile(

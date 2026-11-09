@@ -329,7 +329,11 @@ class RawDatabaseProfiler:
 
         # Shape & pattern recognition on head sample
         shape_info = self._infer_format_and_pattern(
-            series_raw.dtype, series_str.head(50), is_fixed_length, is_free_text
+            series_raw.dtype,
+            series_str.head(50),
+            is_fixed_length,
+            is_free_text,
+            col_name=col_name,
         )
 
         # Compute typed and format-aware min/max to avoid lexicographical inversion for numbers/currency/dates
@@ -377,6 +381,7 @@ class RawDatabaseProfiler:
         sample_head: pl.Series,
         is_fixed_length: bool,
         is_free_text: bool,
+        col_name: str = "",
     ) -> dict[str, Any]:
         """Recognize data format, date/currency subtypes, and actionable hints."""
         result: dict[str, Any] = {
@@ -434,7 +439,7 @@ class RawDatabaseProfiler:
                 return result
 
         # 3. Excel Custom Date Engine
-        date_subtypes_found = self._check_date_patterns(samples)
+        date_subtypes_found = self._check_date_patterns(samples, col_name=col_name)
         if date_subtypes_found:
             if len(date_subtypes_found) == 1:
                 single_subtype = next(iter(date_subtypes_found))
@@ -444,21 +449,23 @@ class RawDatabaseProfiler:
                     result["llm_hint"] = "Standard ISO Date string. Perform direct string comparisons: WHERE col >= 'YYYY-MM-DD'."
                 elif single_subtype == "EXCEL_SERIAL":
                     result["data_format"] = "EXCEL_SERIAL"
-                    result["llm_hint"] = "Contains Excel numeric serials (e.g. 45717 -> 2025-03-01). Convert via (julianday('1899-12-30') + CAST(col AS REAL)) or pd.to_datetime(col, unit='D', origin='1899-12-30')."
+                    result["llm_hint"] = "Excel date serials. Convert via date(julianday('1899-12-30') + CAST(col AS REAL))."
                 elif single_subtype == "VN_DATE_ABBR":
                     result["data_format"] = "VN_DATE_ABBR"
-                    result["llm_hint"] = "Vietnamese abbreviated date ('d thg m yyyy'). Normalize 'thg ' to month number before temporal queries."
+                    result["llm_hint"] = "Vietnamese date ('d thg m yyyy'). Filter via LIKE '%thg M YYYY%' or match against calendar.csv."
                 elif single_subtype == "SLASH_DATE":
                     result["data_format"] = "SLASH_DATE"
-                    result["llm_hint"] = "Vietnamese DD/MM/YYYY date. Convert to YYYY-MM-DD for standard SQLite comparisons."
+                    result["llm_hint"] = "Vietnamese date (D/M/YYYY). Filter month/year via LIKE '%/M/YYYY' (e.g. LIKE '%/9/2025') or exact date string."
                 else:
                     result["data_format"] = "DATE"
-                    result["llm_hint"] = f"Custom date format ({single_subtype}). Parse or normalize before temporal comparisons."
+                    result["llm_hint"] = f"Custom date format ({single_subtype}). Filter via LIKE or date comparisons."
             else:
                 result["data_format"] = "DATE_MIXED"
                 subtypes_str = ", ".join(sorted(date_subtypes_found))
                 result["date_subtype"] = subtypes_str
-                result["llm_hint"] = f"Mixed date representations detected ({subtypes_str}). Normalize using Excel epoch (1899-12-30) and date parser before querying."
+                result["llm_hint"] = (
+                    f"Mixed date representations ({subtypes_str}). Filter via LIKE '%/YYYY' or date(julianday('1899-12-30') + CAST(col AS REAL))."
+                )
             return result
 
         # 4. Excel Custom VNĐ Currency Engine
@@ -485,10 +492,11 @@ class RawDatabaseProfiler:
             result["llm_hint"] = "Fixed-length identifier or code. Prioritize exact equality comparisons (= 'code')."
         else:
             result["data_format"] = "STRING"
+            result["llm_hint"] = "Text column. Prioritize exact match (= 'value') or partial match (LIKE '%keyword%')."
 
         return result
 
-    def _check_date_patterns(self, samples: list[str]) -> set[str]:
+    def _check_date_patterns(self, samples: list[str], col_name: str = "") -> set[str]:
         """Check sample values against Excel Custom Date taxonomy."""
         subtypes: set[str] = set()
         match_count = 0
@@ -516,10 +524,14 @@ class RawDatabaseProfiler:
             elif EN_DATE_WEEKDAY_REGEX.match(val):
                 subtypes.add("EN_DATE_WEEKDAY")
             elif EXCEL_SERIAL_REGEX.match(val):
-                int_v = int(val)
-                # Valid Excel serial range for years 2000 to 2050 (36526 to 55153)
-                if 36526 <= int_v <= 55153:
-                    subtypes.add("EXCEL_SERIAL")
+                col_tokens = _extract_name_tokens(col_name) if col_name else set()
+                if not (col_tokens & NON_KEY_METRIC_TOKENS):
+                    int_v = int(val)
+                    # Valid Excel serial range for years 2000 to 2050 (36526 to 55153)
+                    if 36526 <= int_v <= 55153:
+                        subtypes.add("EXCEL_SERIAL")
+                    else:
+                        matched = False
                 else:
                     matched = False
             else:
@@ -585,37 +597,35 @@ class RawDatabaseProfiler:
             return (
                 "ACCOUNTING_PARENTHESES",
                 -1.0,
-                "Accounting negative currency format '(val)'. Must convert to negative: CASE WHEN col LIKE '(%)' THEN -CAST(REPLACE(REPLACE(REPLACE(REPLACE(col, '(', ''), ')', ''), ',', ''), ' ₫', '') AS NUMERIC) ELSE CAST(REPLACE(col, ',', '') AS NUMERIC) END.",
+                "Accounting negative currency format '(val)'. Clean and negate: CASE WHEN col LIKE '(%)' THEN -CAST(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(col, '(', ''), ')', ''), 'đ', ''), '.', ''), ',', '') AS NUMERIC) ELSE CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS NUMERIC) END.",
             )
         if selected_subtype == "ACCOUNTING_DASH_ZERO":
             return (
                 "ACCOUNTING_DASH_ZERO",
                 0.0,
-                "Accounting zero currency format '-'. Map dash entries to 0: CASE WHEN col LIKE '-%' THEN 0 ELSE CAST(col AS NUMERIC) END.",
+                "Accounting zero currency format '-'. Map dash entries to 0: CASE WHEN col LIKE '-%' THEN 0 ELSE CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS NUMERIC) END.",
             )
-        if selected_subtype == "SCALED_BILLION_TY":
+        if selected_subtype in ("SCALED_BILLION_TY", "SCALED_MILLION_TR", "SCALED_THOUSAND_K"):
+            scale_map = {
+                "SCALED_BILLION_TY": 1000000000.0,
+                "SCALED_MILLION_TR": 1000000.0,
+                "SCALED_THOUSAND_K": 1000.0,
+            }
             return (
-                "SCALED_BILLION_TY",
-                1000000000.0,
-                "Amounts scaled in Billions (tỷ). Multiply by 1,000,000,000 for actual VND amounts: CAST(REPLACE(REPLACE(col, ' tỷ', ''), ',', '.') AS REAL) * 1000000000.",
-            )
-        if selected_subtype == "SCALED_MILLION_TR":
-            return (
-                "SCALED_MILLION_TR",
-                1000000.0,
-                "Amounts scaled in Millions (tr VNĐ). Multiply by 1,000,000 for actual VND amounts: CAST(REPLACE(REPLACE(col, ' tr VNĐ', ''), ',', '.') AS REAL) * 1000000.",
-            )
-        if selected_subtype == "SCALED_THOUSAND_K":
-            return (
-                "SCALED_THOUSAND_K",
-                1000.0,
-                "Amounts scaled in Thousands (k VNĐ). Multiply by 1,000 for actual VND amounts: CAST(REPLACE(REPLACE(col, ' k VNĐ', ''), ',', '') AS NUMERIC) * 1000.",
+                selected_subtype,
+                scale_map[selected_subtype],
+                (
+                    "Scaled currency (tr/k/tỷ). Clean and scale: "
+                    "CASE WHEN col LIKE '%tr%' THEN CAST(REPLACE(REPLACE(col, 'tr', '.'), ',', '') AS REAL) * 1000000 "
+                    "WHEN col LIKE '%k%' THEN CAST(REPLACE(col, 'k', '') AS REAL) * 1000 "
+                    "ELSE CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS REAL) END."
+                ),
             )
         if selected_subtype in ("VND_TEXT", "VND_SYMBOL", "THOUSAND_SEPARATOR"):
             return (
                 selected_subtype,
                 1.0,
-                "Formatted VND currency. Clean thousand separators before aggregations: CAST(REPLACE(REPLACE(REPLACE(col, ' VNĐ', ''), ' ₫', ''), ',', '') AS INTEGER).",
+                "Formatted VND currency (e.g. '25.000đ'). Clean symbols and separators: CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS INTEGER).",
             )
 
         return None, None, None
@@ -692,8 +702,8 @@ class RawDatabaseProfiler:
         if subtype == "ACCOUNTING_PARENTHESES":
             return pl.select(
                 clean=pl.lit(series_str)
-                .str.replace_all(r"(?i)[()₫vnđvnd\s]", "")
-                .str.replace_all(",", "")
+                .str.replace_all(r"(?i)[()đvnđvnd\s]", "")
+                .str.replace_all(r"[,.]", "")
                 .cast(pl.Float64, strict=False),
                 is_paren=pl.lit(series_str).str.starts_with("(")
                 & pl.lit(series_str).str.ends_with(")"),
@@ -711,7 +721,8 @@ class RawDatabaseProfiler:
                 .then(0.0)
                 .otherwise(
                     pl.col("clean")
-                    .str.replace_all(",", "")
+                    .str.replace_all(r"(?i)[đvnđvnd\s]", "")
+                    .str.replace_all(r"[,.]", "")
                     .cast(pl.Float64, strict=False)
                 )
             )["num"]
@@ -720,7 +731,7 @@ class RawDatabaseProfiler:
             multiplier = scale if scale is not None else 1.0
             return pl.select(
                 num=pl.lit(series_str)
-                .str.replace_all(r"(?i)[tỷtytrtriệutrieuknghìnnghinngànngan₫vnđvnd\s]", "")
+                .str.replace_all(r"(?i)[tỷtytrtriệutrieuknghìnnghinngànnganđvnđvnd\s]", "")
                 .str.replace_all(",", ".")
                 .cast(pl.Float64, strict=False)
                 * multiplier
@@ -729,8 +740,8 @@ class RawDatabaseProfiler:
         # Default currency / thousand separator (VND_TEXT, VND_SYMBOL, THOUSAND_SEPARATOR)
         return pl.select(
             num=pl.lit(series_str)
-            .str.replace_all(r"(?i)[₫vnđvnd\s]", "")
-            .str.replace_all(",", "")
+            .str.replace_all(r"(?i)[đvnđvnd\s]", "")
+            .str.replace_all(r"[,.]", "")
             .cast(pl.Float64, strict=False)
         )["num"]
 
