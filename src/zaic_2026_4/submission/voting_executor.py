@@ -98,6 +98,10 @@ class VotingExecutor:
                 cand.execution_error = "Skipped execution due to static syntax/construction errors."
                 continue
 
+            # Reuse cached outcome if already executed successfully during dry-run
+            if cand.execution_success and cand.result_set is not None and cand.raw_result is not None:
+                continue
+
             success, err, raw_rows, r_set = self.execute_query(cand.final_sql)
             cand.execution_success = success
             cand.execution_error = err

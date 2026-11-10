@@ -11,6 +11,7 @@ from typing import Any
 
 from zaic_2026_4.constants import (
     DEFAULT_CANDIDATE_SEEDS,
+    DEFAULT_EXECUTION_MAX_RETRIES,
     DEFAULT_LOGS_DIR,
     DEFAULT_SQL_MAX_RETRIES,
     DEFAULT_SUBMISSION_PATH,
@@ -55,7 +56,9 @@ class SubmissionPipeline:
         logs_dir: Path | str = DEFAULT_LOGS_DIR,
         cache_base_dir: Path | str = "/tmp",
         seeds: tuple[int, ...] = DEFAULT_CANDIDATE_SEEDS,
-        max_retries: int = DEFAULT_SQL_MAX_RETRIES,
+        sql_max_retries: int = DEFAULT_SQL_MAX_RETRIES,
+        execution_max_retries: int = DEFAULT_EXECUTION_MAX_RETRIES,
+        max_retries: int | None = None,
         rulebook_mode: str = "hybrid",
         cases: str | list[str] | set[str] | None = "abcde",
     ) -> None:
@@ -72,7 +75,9 @@ class SubmissionPipeline:
             logs_dir: Directory to record per-question diagnostic traces.
             cache_base_dir: Base directory for storing temporary profiling caches.
             seeds: Randomization seeds for candidate generation.
-            max_retries: Retries for self-correction.
+            sql_max_retries: Retries for static AST self-correction.
+            execution_max_retries: Retries for dry-run runtime execution self-correction.
+            max_retries: Backward-compatible alias for sql_max_retries.
             rulebook_mode: Mode for injecting split rulebook ('hybrid', 'full', 'retrieval').
             cases: Specific context variants to run for schema linking (default: 'abcde').
         """
@@ -86,7 +91,9 @@ class SubmissionPipeline:
         self.logs_dir = Path(logs_dir).resolve()
         self.cache_base_dir = Path(cache_base_dir).resolve()
         self.seeds = seeds
-        self.max_retries = max_retries
+        self.sql_max_retries = max_retries if max_retries is not None else sql_max_retries
+        self.execution_max_retries = execution_max_retries
+        self.max_retries = self.sql_max_retries
         self.rulebook_mode = rulebook_mode
         self.cases = cases
 
@@ -121,7 +128,9 @@ class SubmissionPipeline:
         logs_dir: Path | str = DEFAULT_LOGS_DIR,
         cache_base_dir: Path | str = "/tmp",
         seeds: tuple[int, ...] = DEFAULT_CANDIDATE_SEEDS,
-        max_retries: int = DEFAULT_SQL_MAX_RETRIES,
+        sql_max_retries: int = DEFAULT_SQL_MAX_RETRIES,
+        execution_max_retries: int = DEFAULT_EXECUTION_MAX_RETRIES,
+        max_retries: int | None = None,
         rulebook_mode: str = "hybrid",
         cases: str | list[str] | set[str] | None = "abcde",
     ) -> tuple[SubmissionPipeline, Path]:
@@ -142,6 +151,8 @@ class SubmissionPipeline:
             logs_dir=logs_dir,
             cache_base_dir=cache_base_dir,
             seeds=seeds,
+            sql_max_retries=sql_max_retries,
+            execution_max_retries=execution_max_retries,
             max_retries=max_retries,
             rulebook_mode=rulebook_mode,
             cases=cases,
@@ -256,8 +267,10 @@ class SubmissionPipeline:
         cand_gen = CandidateGenerator(
             llm_engine=self.llm_engine,
             seeds=self.seeds,
-            max_retries=self.max_retries,
+            sql_max_retries=self.sql_max_retries,
+            execution_max_retries=self.execution_max_retries,
             rulebook_mode=self.rulebook_mode,
+            db_path=biz_ctx.db_path,
         )
         candidates = cand_gen.generate_all_candidates(
             question=item.question,
@@ -266,6 +279,7 @@ class SubmissionPipeline:
             processed_metadata=biz_ctx.processed_metadata,
             rulebook_text=self._rulebook_text,
             vector_indexer=biz_ctx.vector_indexer,
+            db_path=biz_ctx.db_path,
         )
 
         # 3. Candidate Execution & Majority Voting

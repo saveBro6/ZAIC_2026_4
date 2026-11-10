@@ -77,6 +77,7 @@ def test_constants_count_and_all() -> None:
         "FEW_SHOT_SQL_EXAMPLES",
         # Submission
         "DEFAULT_CANDIDATE_SEEDS",
+        "DEFAULT_EXECUTION_MAX_RETRIES",
         "DEFAULT_LOGS_DIR",
         "DEFAULT_NUM_CANDIDATES",
         "DEFAULT_SQL_MAX_RETRIES",
@@ -84,7 +85,7 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_SUBMISSION_PATH",
     }
     assert set(constants.__all__) == expected_constants
-    assert len(constants.__all__) == 51
+    assert len(constants.__all__) == 52
 
     for name in expected_constants:
         assert hasattr(constants, name), f"constants module missing {name}"
@@ -137,7 +138,8 @@ def test_constant_types_and_values() -> None:
     # Submission
     assert constants.DEFAULT_CANDIDATE_SEEDS == (42, 100, 2026)
     assert constants.DEFAULT_NUM_CANDIDATES == 3
-    assert constants.DEFAULT_SQL_MAX_RETRIES == 3
+    assert constants.DEFAULT_SQL_MAX_RETRIES == 2
+    assert constants.DEFAULT_EXECUTION_MAX_RETRIES == 2
     assert constants.DEFAULT_SQL_TIMEOUT_SECONDS == 10.0
     assert isinstance(constants.DEFAULT_SUBMISSION_PATH, Path)
     assert isinstance(constants.DEFAULT_LOGS_DIR, Path)
