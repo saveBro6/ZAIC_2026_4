@@ -148,12 +148,40 @@ def test_candidate_generator_all_candidates() -> None:
 
 
 def test_few_shot_sql_examples_structure() -> None:
-    """Verify that FEW_SHOT_SQL_EXAMPLES_VI contains 2 complete examples."""
+    """Verify that FEW_SHOT_SQL_EXAMPLES_VI contains 2 complete examples with proper formatting."""
     assert '<example id="1">' in FEW_SHOT_SQL_EXAMPLES_VI
     assert '<example id="2">' in FEW_SHOT_SQL_EXAMPLES_VI
     assert '<example id="3">' not in FEW_SHOT_SQL_EXAMPLES_VI
     assert "Sữa tươi" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "IS NOT NULL" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "BETWEEN" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "substr" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "REPLACE" in FEW_SHOT_SQL_EXAMPLES_VI
+
+
+def test_format_permuted_schema_xml_with_hint() -> None:
+    """Verify format_permuted_schema_xml includes llm_hint when present."""
+    from zaic_2026_4.submission.prompt_template import format_permuted_schema_xml
+
+    metadata = {
+        "orders.price": {
+            "data_format": "CURRENCY",
+            "minimal_profile": "Cột lưu giá tiền",
+            "raw_samples": ["10,000", "20,000"],
+            "llm_hint": "Formatted VND currency. CAST(REPLACE(col, ',', '') AS REAL)",
+        },
+        "orders.date": {
+            "data_format": "SLASH_DATE",
+            "minimal_profile": "Cột ngày",
+            "llm_hint": "Vietnamese date (D/M/YYYY).",
+        },
+    }
+    xml_output = format_permuted_schema_xml(["orders.price", "orders.date"], metadata)
+    assert '<table name="orders">' in xml_output
+    assert 'type="CURRENCY"' in xml_output
+    assert "Samples: ['10,000', '20,000']" in xml_output
+    assert "Hint: Formatted VND currency." in xml_output
+    assert "Hint: Vietnamese date (D/M/YYYY)." in xml_output
 
 
 def test_build_sql_generation_prompt_vietnamese() -> None:
@@ -171,10 +199,10 @@ def test_build_sql_generation_prompt_vietnamese() -> None:
     )
 
     # Check Vietnamese system instruction presence
-    assert "Bạn là một chuyên gia kỹ thuật SQL" in prompt
-    assert "HƯỚNG DẪN SQL VÀ QUY TẮC NGHIỆP VỤ QUAN TRỌNG:" in prompt
-    assert "Neo mốc thời gian tương đối" in prompt
-    assert "Xử lý NULL khi sắp xếp" in prompt
+    assert "chuyên gia kỹ sư Text-to-SQL" in prompt
+    assert "[HƯỚNG DẪN SQL VÀ QUY TẮC CHÍNH]" in prompt
+    assert "Neo mốc thời gian" in prompt
+    assert "Xử lý NULL & Phép toán" in prompt
 
     # Check XML sections
     assert "<system>" in prompt

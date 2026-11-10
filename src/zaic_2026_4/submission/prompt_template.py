@@ -11,24 +11,38 @@ FEW_SHOT_SQL_EXAMPLES_VI: str = (
     '  <example id="1">\n'
     '    <user_question>Tổng doanh thu của mặt hàng "Sữa tươi" trong tháng này là bao nhiêu?</user_question>\n'
     '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
+    "    <selected_schema>\n"
+    '      <table name="ban_hang">\n'
+    '        <column name="Ngày bán" type="SLASH_DATE">Cột lưu trữ ngày lập hóa đơn bán hàng định dạng DD/MM/YYYY. | Samples: [\'02/05/2026\', \'15/05/2026\'] | Hint: Vietnamese date (D/M/YYYY).</column>\n'
+    '        <column name="Thành tiền" type="CURRENCY">Tổng số tiền thanh toán của dòng hàng sau giảm giá. | Samples: [\'45,000\', \'120,000\'] | Hint: Formatted VND currency. CAST(REPLACE(col, \',\', \'\') AS REAL)</column>\n'
+    '        <column name="Tên hàng" type="STRING">Tên mặt hàng bán lẻ. | Samples: [\'Sữa tươi tiệt trùng 1L\']</column>\n'
+    '        <column name="Trạng thái" type="STRING">Trạng thái đơn hàng. | Samples: [\'Hoàn thành\', \'Đã hủy\']</column>\n'
+    "      </table>\n"
+    "    </selected_schema>\n"
     "    <sql>\n"
-    'SELECT SUM(T1."Thành tiền") AS "Tổng doanh thu"\n'
+    'SELECT SUM(CAST(REPLACE(T1."Thành tiền", \',\', \'\') AS REAL)) AS "Tổng doanh thu"\n'
     'FROM "ban_hang" AS T1\n'
     'WHERE T1."Tên hàng" LIKE \'%Sữa tươi%\'\n'
     '  AND T1."Trạng thái" != \'Đã hủy\'\n'
-    '  AND T1."Ngày bán" >= \'2026-05-01\'\n'
-    '  AND T1."Ngày bán" <= \'2026-05-25\';\n'
+    '  AND (substr(T1."Ngày bán", 7, 4) || \'-\' || substr(T1."Ngày bán", 4, 2) || \'-\' || substr(T1."Ngày bán", 1, 2)) BETWEEN \'2026-05-01\' AND \'2026-05-25\';\n'
     "    </sql>\n"
     "  </example>\n\n"
     '  <example id="2">\n'
     '    <user_question>Sản phẩm nào có đơn giá thấp nhất còn tồn kho?</user_question>\n'
     '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
+    "    <selected_schema>\n"
+    '      <table name="san_pham">\n'
+    '        <column name="Tên sản phẩm" type="STRING">Tên sản phẩm trong kho. | Samples: [\'Bánh mì bơ tỏi\']</column>\n'
+    '        <column name="Đơn giá" type="CURRENCY">Giá niêm yết bán lẻ của sản phẩm. | Samples: [\'15,000\', \'30,000\'] | Hint: Formatted VND currency. CAST(REPLACE(col, \',\', \'\') AS REAL)</column>\n'
+    '        <column name="Số lượng tồn" type="NUMERIC">Số lượng sản phẩm còn tồn trong kho. | Samples: [10, 50]</column>\n'
+    "      </table>\n"
+    "    </selected_schema>\n"
     "    <sql>\n"
     'SELECT T1."Tên sản phẩm", T1."Đơn giá"\n'
     'FROM "san_pham" AS T1\n'
     'WHERE T1."Đơn giá" IS NOT NULL\n'
     '  AND T1."Số lượng tồn" > 0\n'
-    'ORDER BY T1."Đơn giá" ASC\n'
+    'ORDER BY CAST(REPLACE(T1."Đơn giá", \',\', \'\') AS REAL) ASC\n'
     "LIMIT 1;\n"
     "    </sql>\n"
     "  </example>\n"
@@ -94,11 +108,13 @@ def format_permuted_schema_xml(
         )
         samples = col_meta.get("raw_samples", [])
         sample_str = f" | Samples: {samples[:3]}" if samples else ""
+        llm_hint = col_meta.get("llm_hint")
+        hint_str = f" | Hint: {llm_hint}" if llm_hint else ""
 
         table_groups.setdefault(tbl, []).append({
             "col_name": col_clean,
             "data_format": data_format,
-            "desc": f"{desc}{sample_str}",
+            "desc": f"{desc}{sample_str}{hint_str}",
         })
 
     lines = ["<selected_schema>"]
@@ -140,7 +156,7 @@ def format_rulebook_context(
             txt = r.get("text", "").strip()
             if txt:
                 retrieved_chunks.append(txt)
-    except Exception:
+    except Exception:  # noqa: BLE001
         retrieved_chunks = []
 
     retrieved_text = "\n---\n".join(retrieved_chunks)
@@ -186,20 +202,29 @@ def build_sql_generation_prompt(
 
     prompt_parts = [
         "<system>",
-        "Bạn là một chuyên gia kỹ thuật SQL chuyên sâu về cơ sở dữ liệu SQLite cho các doanh nghiệp vừa và nhỏ (SMB) tại Việt Nam.",
-        "Nhiệm vụ của bạn là viết một câu truy vấn SQLite duy nhất, chuẩn xác và hợp lệ để trả lời chính xác câu hỏi của người dùng.",
+        "Bạn là chuyên gia kỹ sư Text-to-SQL chuyên sâu về SQLite cho hệ thống dữ liệu doanh nghiệp (SMB) tại Việt Nam.",
+        "Nhiệm vụ: Phân tích ngữ cảnh và xuất DUY NHẤT một câu truy vấn SQLite chuẩn xác, hợp lệ để trả lời câu hỏi.",
         "",
-        "HƯỚNG DẪN SQL VÀ QUY TẮC NGHIỆP VỤ QUAN TRỌNG:",
+        "[HƯỚNG DẪN SQL VÀ QUY TẮC CHÍNH]",
         "1. Chỉ xuất DUY NHẤT câu lệnh SQLite SQL thô có thể thực thi được. Tuyệt đối không thêm lời giải thích, chào hỏi hoặc văn bản mở đầu/kết thúc.",
         '2. Bọc tên bảng và tên cột trong dấu ngoặc kép (double quotes) nếu chứa dấu tiếng Việt, khoảng trắng hoặc ký tự đặc biệt (ví dụ: SELECT T1."Tên hàng" FROM "ban_hang" AS T1).',
-        "3. Neo mốc thời gian tương đối: Mọi biểu thức thời gian tương đối (ví dụ: 'tháng này', 'hôm nay', 'tuần này', 'cùng kỳ năm ngoái') BẮT BUỘC phải được tính toán dựa trên ngày mốc được cung cấp trong <temporal_anchor> (as_of_date).",
-        "   - 'tháng này' nghĩa là từ ngày mùng 1 của tháng thuộc as_of_date đến hết ngày as_of_date.",
-        "4. Xử lý NULL khi sắp xếp và tính hàm tổng hợp:",
-        "   - Trong SQLite, giá trị NULL được coi là nhỏ hơn mọi giá trị khác. Khi sắp xếp tăng dần (ASC), bạn BẮT BUỘC phải thêm điều kiện kiểm tra NOT NULL (ví dụ: WHERE \"field\" IS NOT NULL).",
-        "   - Khi sử dụng hàm MIN(f), phải đảm bảo điều kiện 'f IS NOT NULL'.",
-        "5. Ưu tiên sắp xếp thay vì truy vấn con (subquery): Tránh dùng subquery lồng nhau để tìm min/max. Sử dụng 'ORDER BY ... LIMIT 1' để thay thế.",
-        "6. Không thực hiện nối chuỗi ('||' hoặc CONCAT) các trường trong SELECT; hãy trả về các cột riêng biệt.",
-        "7. Tuân thủ nghiêm ngặt các quy tắc nghiệp vụ trong <split_rulebook> (định nghĩa doanh thu, xử lý chiết khấu, loại trừ đơn hàng bị hủy/hoàn).",
+        "3. Luôn ưu tiên dùng LEFT JOIN khi nối từ bảng giao dịch/bán hàng sang bảng danh mục để bảo toàn dữ liệu khi khóa ngoại chứa NULL hoặc bị thiếu.",
+        "",
+        "[XỬ LÝ DỮ LIỆU & BẪY KỸ THUẬT SQLITE THEO PROFILING]",
+        "1. Neo mốc thời gian (<temporal_anchor>):",
+        "   - Mọi mốc thời gian tương đối ('tháng này', 'tuần này', 'hôm nay') BẮT BUỘC phải được tính toán dựa trên ngày mốc as_of_date được cung cấp.",
+        "2. Xử lý NULL & Phép toán:",
+        "   - Trong SQLite, NULL đứng đầu khi xếp tăng dần (ASC). Khi dùng ORDER BY <col> ASC hoặc MIN(<col>), BẮT BUỘC thêm điều kiện WHERE <col> IS NOT NULL (trừ khi Profile cột khẳng định 0% NULL).",
+        "   - Khi chia tỷ lệ/phần trăm, luôn nhân tử số với 1.0 và bọc mẫu số bằng NULLIF(..., 0) để chống chia số nguyên và lỗi chia cho 0.",
+        "3. Quy tắc Truy vấn & Tie-Breaking:",
+        "   - TUYỆT ĐỐI KHÔNG dùng subquery lồng nhau để tìm min/max; ưu tiên cấu trúc phẳng: ORDER BY <metric> DESC/ASC LIMIT 1.",
+        "   - Khi xếp hạng (ranking/top-k), BẮT BUỘC thêm khóa chính hoặc mã định danh vào mệnh đề sắp xếp để phá vỡ đồng hạng: ORDER BY <metric> DESC, <primary_key_or_code> ASC.",
+        "   - Trả về các cột riêng biệt; KHÔNG dùng toán tử nối chuỗi '||' trong mệnh đề SELECT trừ khi có yêu cầu cụ thể.",
+        "4. Ép kiểu & Khớp chuỗi theo <selected_schema> tham khảo Hint được cung cấp.",
+        "   - Tìm kiếm chuỗi tiếng Việt có dấu: luôn dùng LOWER(\"col\") LIKE LOWER('%...%') để đảm bảo không phân biệt hoa/thường.",
+        "",
+        "[QUAN HỆ BẢNG & NGHIỆP VỤ]",
+        "Tuân thủ nghiêm ngặt các quy tắc nghiệp vụ về trạng thái đơn hàng (loại trừ hủy, hoàn) và định nghĩa doanh thu trong <split_rulebook>.",
         "</system>",
         "",
     ]
