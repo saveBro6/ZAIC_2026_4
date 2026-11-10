@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
 from typing import Any
 
 from zaic_2026_4.profiling.profile_summarizer import MockLLMEngine
@@ -122,7 +124,9 @@ def test_candidate_generator_with_retry() -> None:
     # Final SQL was corrected
     assert "WHERE price IS NOT NULL" in cand.final_sql
     assert cand.is_valid_syntax
-    assert cand.retry_count == 1
+    assert cand.sql_retry_count == 1
+    assert cand.execution_retry_count == 0
+    assert cand.total_retry_count == {"sql": 1, "execution": 0}
 
 
 def test_candidate_generator_all_candidates() -> None:
@@ -230,4 +234,172 @@ def test_build_sql_correction_prompt_vietnamese() -> None:
     assert "<previous_sql>\nSELECT name FROM users ORDER BY price ASC;\n</previous_sql>" in prompt
     assert "<validation_errors>\n- Null values not handled in ASC ordering.\n</validation_errors>" in prompt
     assert "<corrected_sql>" in prompt
+
+
+def test_candidate_generator_dry_run_success(tmp_path: Path) -> None:
+    """Verify that a valid SQL query executed against SQLite database completes dry-run without retries."""
+    db_file = tmp_path / "test_biz.db"
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT, price REAL);")
+    cursor.execute("INSERT INTO products VALUES (1, 'Bánh mì', 15000), (2, 'Sữa tươi', 12000);")
+    conn.commit()
+    conn.close()
+
+    class SingleValidEngine:
+        def generate(self, prompts: Any, **kwargs: Any) -> str:
+            return "SELECT SUM(price) FROM products;"
+
+    generator = CandidateGenerator(
+        llm_engine=SingleValidEngine(),
+        seeds=(42,),
+        db_path=db_file,
+    )
+
+    cand = generator.generate_candidate(
+        candidate_id=0,
+        seed=42,
+        question="Tổng tiền?",
+        as_of_date="2026-05-25",
+        reduced_schema={"products.price"},
+        processed_metadata={},
+    )
+
+    assert cand.is_valid_syntax is True
+    assert cand.execution_success is True
+    assert cand.sql_retry_count == 0
+    assert cand.execution_retry_count == 0
+    assert cand.total_retry_count == {"sql": 0, "execution": 0}
+    assert cand.raw_result == [(27000.0,)]
+    assert cand.result_set == {(27000.0,)}
+
+
+def test_candidate_generator_dry_run_runtime_error_retry(tmp_path: Path) -> None:
+    """Verify that runtime execution errors (e.g. no such column) trigger execution retries with feedback."""
+    db_file = tmp_path / "test_biz_err.db"
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, sku TEXT, cost REAL);")
+    cursor.execute("INSERT INTO items VALUES (1, 'SP01', 50000);")
+    conn.commit()
+    conn.close()
+
+    class RuntimeFixEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, prompts: Any, **kwargs: Any) -> str:
+            self.calls += 1
+            prompt_str = prompts if isinstance(prompts, str) else prompts[0]
+            if "no such column" in prompt_str or "Runtime Error" in prompt_str:
+                return "SELECT cost FROM items;"
+            # First attempt: column 'price' does not exist in 'items'
+            return "SELECT price FROM items;"
+
+    generator = CandidateGenerator(
+        llm_engine=RuntimeFixEngine(),
+        seeds=(42,),
+        db_path=db_file,
+    )
+
+    cand = generator.generate_candidate(
+        candidate_id=0,
+        seed=42,
+        question="Giá vốn?",
+        as_of_date="2026-05-25",
+        reduced_schema={"items.cost"},
+        processed_metadata={},
+    )
+
+    assert cand.is_valid_syntax is True
+    assert cand.execution_success is True
+    assert cand.sql_retry_count == 0
+    assert cand.execution_retry_count == 1
+    assert cand.total_retry_count == {"sql": 0, "execution": 1}
+    assert "SELECT price FROM items" in cand.initial_sql
+    assert "SELECT cost FROM items" in cand.final_sql
+    assert cand.raw_result == [(50000.0,)]
+
+
+def test_candidate_generator_dry_run_suspicious_zero_retry(tmp_path: Path) -> None:
+    """Verify that empty or zero results trigger suspicious result retry and resolve to positive results."""
+    db_file = tmp_path / "test_biz_zero.db"
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, order_date TEXT, status TEXT);")
+    cursor.execute("INSERT INTO orders VALUES (1, '2026-05-01', 'hoan_thanh'), (2, '2026-05-02', 'hoan_thanh');")
+    conn.commit()
+    conn.close()
+
+    class ZeroFixEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, prompts: Any, **kwargs: Any) -> str:
+            self.calls += 1
+            prompt_str = prompts if isinstance(prompts, str) else prompts[0]
+            if "trả về 0 dòng khớp" in prompt_str:
+                return "SELECT COUNT(*) FROM orders WHERE order_date >= '2026-05-01';"
+            # First attempt: date filter matches 0 rows
+            return "SELECT COUNT(*) FROM orders WHERE order_date = '1999-01-01';"
+
+    generator = CandidateGenerator(
+        llm_engine=ZeroFixEngine(),
+        seeds=(42,),
+        db_path=db_file,
+    )
+
+    cand = generator.generate_candidate(
+        candidate_id=0,
+        seed=42,
+        question="Số đơn?",
+        as_of_date="2026-05-25",
+        reduced_schema={"orders.order_date"},
+        processed_metadata={},
+    )
+
+    assert cand.is_valid_syntax is True
+    assert cand.execution_success is True
+    assert cand.sql_retry_count == 0
+    assert cand.execution_retry_count == 1
+    assert cand.total_retry_count == {"sql": 0, "execution": 1}
+    assert cand.raw_result == [(2,)]
+
+
+def test_candidate_generator_dry_run_legitimate_zero_fallback(tmp_path: Path) -> None:
+    """Verify that when a question legitimately has 0 results, retries exhaust gracefully and accept 0."""
+    db_file = tmp_path / "test_biz_legit_zero.db"
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE inventory (id INTEGER PRIMARY KEY, sku TEXT, stock INTEGER);")
+    cursor.execute("INSERT INTO inventory VALUES (1, 'SP01', 10), (2, 'SP02', 20);")
+    conn.commit()
+    conn.close()
+
+    class AlwaysZeroEngine:
+        def generate(self, prompts: Any, **kwargs: Any) -> str:
+            return "SELECT COUNT(*) FROM inventory WHERE stock = 0;"
+
+    generator = CandidateGenerator(
+        llm_engine=AlwaysZeroEngine(),
+        seeds=(42,),
+        db_path=db_file,
+        execution_max_retries=2,
+    )
+
+    cand = generator.generate_candidate(
+        candidate_id=0,
+        seed=42,
+        question="Có bao nhiêu mặt hàng hết hàng?",
+        as_of_date="2026-05-25",
+        reduced_schema={"inventory.stock"},
+        processed_metadata={},
+    )
+
+    # Exhausted retries but execution was successful and accepted 0
+    assert cand.is_valid_syntax is True
+    assert cand.execution_success is True
+    assert cand.execution_retry_count == 2
+    assert cand.total_retry_count == {"sql": 0, "execution": 2}
+    assert cand.raw_result == [(0,)]
 

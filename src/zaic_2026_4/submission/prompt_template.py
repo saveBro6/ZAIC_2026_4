@@ -260,22 +260,36 @@ def build_sql_correction_prompt(
     as_of_date: str,
     faulty_sql: str,
     validation_issues: list[str],
+    schema_xml: str | None = None,
 ) -> str:
-    """Build prompt asking LLM to correct bad SQL constructions or syntax errors."""
+    """Build prompt asking LLM to correct bad SQL constructions, runtime execution errors, or empty results."""
     issues_str = "\n".join(f"- {issue}" for issue in validation_issues)
 
-    return (
-        "<system>\n"
-        "Bạn là một chuyên gia kỹ thuật SQL. Câu truy vấn SQLite bạn đã sinh trước đó có lỗi kiểm tra tính hợp lệ hoặc vi phạm quy tắc nghiệp vụ/kỹ thuật.\n"
-        "Vui lòng sửa lại câu truy vấn dựa trên các phản hồi bên dưới.\n"
-        "Chỉ xuất DUY NHẤT câu lệnh SQLite SQL đã sửa và có thể thực thi được.\n"
-        "</system>\n\n"
-        f"<user_question>\n{question}\n</user_question>\n\n"
-        f"<temporal_anchor>\nas_of_date: {as_of_date}\n</temporal_anchor>\n\n"
-        f"<previous_sql>\n{faulty_sql}\n</previous_sql>\n\n"
-        f"<validation_errors>\n{issues_str}\n</validation_errors>\n\n"
-        "<corrected_sql>\n"
-    )
+    prompt_parts = [
+        "<system>",
+        "Bạn là một chuyên gia kỹ thuật SQL. Câu truy vấn SQLite trước đó gặp lỗi thực thi hoặc kết quả không phù hợp.",
+        "Vui lòng sửa lại câu truy vấn dựa trên các phản hồi bên dưới.",
+        "Chỉ xuất DUY NHẤT câu lệnh SQLite SQL đã sửa và có thể thực thi được.",
+        "</system>",
+        "",
+        f"<user_question>\n{question}\n</user_question>",
+        "",
+        f"<temporal_anchor>\nas_of_date: {as_of_date}\n</temporal_anchor>",
+    ]
+
+    if schema_xml:
+        prompt_parts.extend(["", schema_xml])
+
+    prompt_parts.extend([
+        "",
+        f"<previous_sql>\n{faulty_sql}\n</previous_sql>",
+        "",
+        f"<validation_errors>\n{issues_str}\n</validation_errors>",
+        "",
+        "<corrected_sql>",
+    ])
+
+    return "\n".join(prompt_parts)
 
 
 __all__ = [

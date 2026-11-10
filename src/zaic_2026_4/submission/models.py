@@ -45,11 +45,26 @@ class CandidateQuery:
     final_sql: str = ""
     is_valid_syntax: bool = True
     construction_issues: list[str] = field(default_factory=list)
-    retry_count: int = 0
+    sql_retry_count: int = 0
+    execution_retry_count: int = 0
+    total_retry_count: dict[str, int] = field(default_factory=dict)
     execution_success: bool = False
     execution_error: str | None = None
     raw_result: list[Any] | None = None
     result_set: set[tuple[Any, ...]] | None = None
+
+    def __post_init__(self) -> None:
+        """Ensure total_retry_count dictionary is synchronized with granular retry counts."""
+        if not self.total_retry_count:
+            self.total_retry_count = {
+                "sql": self.sql_retry_count,
+                "execution": self.execution_retry_count,
+            }
+        else:
+            if "sql" in self.total_retry_count and self.sql_retry_count == 0:
+                self.sql_retry_count = self.total_retry_count["sql"]
+            if "execution" in self.total_retry_count and self.execution_retry_count == 0:
+                self.execution_retry_count = self.total_retry_count["execution"]
 
     def to_dict(self) -> dict[str, Any]:
         """Convert candidate trace to serializable dictionary."""
@@ -62,7 +77,10 @@ class CandidateQuery:
             "seed": self.seed,
             "initial_sql": self.initial_sql,
             "final_sql": self.final_sql,
-            "retry_count": self.retry_count,
+            "total_retry_count": {
+                "sql": self.sql_retry_count,
+                "execution": self.execution_retry_count,
+            },
             "syntax_valid": self.is_valid_syntax,
             "construction_issues": list(self.construction_issues),
             "execution_success": self.execution_success,
