@@ -84,6 +84,10 @@ Every code modification task must strictly adhere to the sequential lifecycle be
 ### Non-Negotiable Directives
 - **Zero-Bypass Policy:** Never invoke test runners, generate summary artifacts, or declare task completion without an explicit `[PASSED]` verdict from the `code-reviewer` agent.
 - **Context Preservation:** When handing off to `code-reviewer`, pass the exact verbatim user prompt along with relevant issue/ticket context to serve as the ground truth.
+- **No Data Leakage / Zero Hardcoding Policy:**
+  - Strictly prohibit hardcoding rules, string literals, column mappings, or conditional logic (`if-else`) tailored to specific datasets, shops, or ground truth files (e.g. from `train` split).
+  - All query generation, schema linking, and error correction must remain 100% data-agnostic and generalize to unseen private evaluation sets.
+  - Rely exclusively on runtime database engine feedback (SQLite errors), dynamically extracted schema metadata, and in-context learning—never hardcoded heuristic patches or code suggestions in prompt templates.
 
 ---
 
