@@ -430,28 +430,26 @@ def main() -> None:
         description="Profile a business directory, generate LLM metadata, and construct LSH/FAISS indexes."
     )
     parser.add_argument(
-        "--business-dir",
-        type=str,
-        default=None,
-        help="Path to business directory containing data files and README.md.",
-    )
-    parser.add_argument(
+        "--split",
         "--split-dir",
+        dest="split",
         type=str,
-        default=None,
-        help="Path to full split directory (e.g. dataset/public_test). Profiles calendar and all businesses in split.",
+        default="dataset/train",
+        help="Name or path of dataset split (e.g. 'train', 'public_test', 'private_test'). Default: 'dataset/train'.",
     )
     parser.add_argument(
-        "--rulebook",
+        "--base-dir",
         type=str,
-        default=None,
-        help="Path to rulebook.md for the dataset split.",
+        default="dataset",
+        help="Base directory containing dataset splits (default: 'dataset').",
     )
     parser.add_argument(
-        "--calendar",
+        "--biz-id",
+        "--biz_id",
+        dest="biz_id",
         type=str,
         default=None,
-        help="Path to split-level calendar.csv.",
+        help="Identifier of a single business to profile (e.g. 'biz_101', 'dev_001'). If omitted, profiles all businesses in split.",
     )
     parser.add_argument(
         "--calendar-cache",
@@ -501,125 +499,87 @@ def main() -> None:
         engine = create_engine(local=args.local, model=args.model)
         embedder = None
 
-    # Handle full split profiling mode
-    if args.split_dir:
-        split_p = Path(args.split_dir).resolve()
-        if not split_p.is_dir():
-            parser.error(f"Provided --split-dir is not a valid directory: {split_p}")
+    from zaic_2026_4.submission.pipeline import resolve_split_paths
 
-        cal_path = Path(args.calendar).resolve() if args.calendar else (split_p / "calendar.csv")
-        rb_path = Path(args.rulebook).resolve() if args.rulebook else (split_p / "rulebook.md")
+    paths = resolve_split_paths(args.split, base_dir=args.base_dir, require_questions=False)
+    split_p = paths["split_dir"]
+    data_p = paths["data_dir"]
+    rb_path = paths["rulebook_path"]
+    cal_path = paths["calendar_path"]
 
-        if not rb_path.is_file():
-            parser.error(f"Rulebook not found in split: {rb_path}")
-
-        # Locate businesses
-        data_p = split_p / "data" if (split_p / "data").is_dir() else split_p
+    # Locate businesses to profile
+    if args.biz_id:
+        single_biz_dir = (data_p / args.biz_id).resolve()
+        if not single_biz_dir.is_dir():
+            parser.error(f"Business directory not found in split data: {single_biz_dir}")
+        biz_dirs = [single_biz_dir]
+    else:
         biz_dirs = sorted([d for d in data_p.iterdir() if d.is_dir()])
         if not biz_dirs:
             parser.error(f"No business directories found in {data_p}")
 
-        print(f"Initializing split profiling for {split_p.name} ({len(biz_dirs)} businesses)...")
+    print(f"Initializing profiling for {split_p.name} ({len(biz_dirs)} business(es))...")
 
-        cal_target = None
-        if args.calendar_cache:
-            cal_target = Path(args.calendar_cache).resolve()
-        elif args.output_dir:
-            cal_target = Path(args.output_dir).resolve() / "calendar_profile.json"
+    cal_target = None
+    if args.calendar_cache:
+        cal_target = Path(args.calendar_cache).resolve()
+    elif args.output_dir:
+        cal_target = Path(args.output_dir).resolve() / "calendar_profile.json"
 
-        if cal_target and cal_path.is_file():
-            cal_target.parent.mkdir(parents=True, exist_ok=True)
-            cal_res = profile_split_calendar(
-                calendar_path=cal_path,
-                llm_engine=engine,
-                embedder=embedder,
-                vector_model_path=args.vector_model_path,
-                cache_path=cal_target,
-                force_rebuild=True,
-            )
-            if embedder is None and "vector_indexer" in cal_res and cal_res["vector_indexer"] is not None:
-                embedder = cal_res["vector_indexer"].embedder
+    if cal_target and cal_path and cal_path.is_file():
+        cal_target.parent.mkdir(parents=True, exist_ok=True)
+        cal_res = profile_split_calendar(
+            calendar_path=cal_path,
+            llm_engine=engine,
+            embedder=embedder,
+            vector_model_path=args.vector_model_path,
+            cache_path=cal_target,
+            force_rebuild=True,
+        )
+        if embedder is None and "vector_indexer" in cal_res and cal_res["vector_indexer"] is not None:
+            embedder = cal_res["vector_indexer"].embedder
 
-        total_meta = 0
-        total_lsh = 0
-        total_vector = 0
+    total_meta = 0
+    total_lsh = 0
+    total_vector = 0
 
-        for idx, b_dir in enumerate(biz_dirs, 1):
-            t_b0 = time.time()
-            b_cache = (
-                Path(args.output_dir).resolve() / f"cache_{b_dir.name}"
-                if args.output_dir
-                else Path(f"/tmp/cache_{b_dir.name}")
-            )
-            print(f"[{idx}/{len(biz_dirs)}] Processing {b_dir.name}...")
+    for idx, b_dir in enumerate(biz_dirs, 1):
+        t_b0 = time.time()
+        b_cache = (
+            Path(args.output_dir).resolve() / f"cache_{b_dir.name}"
+            if args.output_dir
+            else Path(f"/tmp/cache_{b_dir.name}")
+        )
+        print(f"[{idx}/{len(biz_dirs)}] Processing {b_dir.name}...")
 
-            orchestrator = ProfilingOrchestrator(
-                business_dir=b_dir,
-                rulebook_path=rb_path,
-                llm_engine=engine,
-                embedder=embedder,
-                vector_model_path=args.vector_model_path,
-                cache_dir=b_cache,
-                calendar_path=cal_path if cal_path.is_file() else None,
-            )
-            pipe = orchestrator.run_pipeline(force_rebuild=True)
-            if embedder is None and "vector_indexer" in pipe and pipe["vector_indexer"] is not None:
-                embedder = pipe["vector_indexer"].embedder
+        orchestrator = ProfilingOrchestrator(
+            business_dir=b_dir,
+            rulebook_path=rb_path,
+            llm_engine=engine,
+            embedder=embedder,
+            vector_model_path=args.vector_model_path,
+            cache_dir=b_cache,
+            calendar_path=cal_path if (cal_path and cal_path.is_file()) else None,
+        )
+        pipe = orchestrator.run_pipeline(force_rebuild=True)
+        if embedder is None and "vector_indexer" in pipe and pipe["vector_indexer"] is not None:
+            embedder = pipe["vector_indexer"].embedder
 
-            m_cnt = len(pipe["metadata"])
-            l_cnt = len(pipe["lsh_indexer"].value_to_col_map)
-            v_cnt = len(pipe["vector_indexer"].doc_map)
+        m_cnt = len(pipe["metadata"])
+        l_cnt = len(pipe["lsh_indexer"].value_to_col_map)
+        v_cnt = len(pipe["vector_indexer"].doc_map)
 
-            total_meta += m_cnt
-            total_lsh += l_cnt
-            total_vector += v_cnt
-            print(f"     Done in {time.time() - t_b0:.2f}s ({m_cnt} columns, {l_cnt} LSH items, {v_cnt} docs).")
+        total_meta += m_cnt
+        total_lsh += l_cnt
+        total_vector += v_cnt
+        print(f"     Done in {time.time() - t_b0:.2f}s ({m_cnt} columns, {l_cnt} LSH items, {v_cnt} docs).")
 
-        elapsed_total = time.time() - start_time
-        print(f"Split profiling completed successfully for {len(biz_dirs)} businesses in {elapsed_total:.2f}s:")
-        print(f"  - Total metadata columns: {total_meta}")
-        print(f"  - Total LSH items:        {total_lsh}")
-        print(f"  - Total FAISS documents:  {total_vector}")
-        print(f"  - Average per business:   {elapsed_total / len(biz_dirs):.2f}s")
-        return
-
-    if not args.business_dir or not args.rulebook:
-        parser.error("Either --split-dir or both --business-dir and --rulebook must be provided.")
-
-    print(f"Initializing ProfilingOrchestrator for {args.business_dir}...")
-
-    if args.output_dir:
-        out_p = Path(args.output_dir).resolve()
-        biz_name = Path(args.business_dir).name
-        if out_p.name == f"cache_{biz_name}" or out_p.name == biz_name:
-            single_cache_dir = out_p
-        else:
-            single_cache_dir = out_p / f"cache_{biz_name}"
-    else:
-        single_cache_dir = None
-
-    orchestrator = ProfilingOrchestrator(
-        business_dir=args.business_dir,
-        rulebook_path=args.rulebook,
-        llm_engine=engine,
-        embedder=embedder,
-        vector_model_path=args.vector_model_path,
-        cache_dir=single_cache_dir,
-        calendar_path=args.calendar,
-    )
-
-    pipeline = orchestrator.run_pipeline(force_rebuild=True)
-    elapsed = time.time() - start_time
-
-    meta_count = len(pipeline["metadata"])
-    lsh_items = len(pipeline["lsh_indexer"].value_to_col_map)
-    vector_docs = len(pipeline["vector_indexer"].doc_map)
-
-    print(f"Pipeline completed successfully in {elapsed:.2f}s:")
-    print(f"  - Cached metadata columns: {meta_count}")
-    print(f"  - LSH indexed literals:    {lsh_items}")
-    print(f"  - FAISS indexed documents: {vector_docs}")
-    print(f"  - Cache directory:         {orchestrator.cache_dir}")
+    elapsed_total = time.time() - start_time
+    print(f"Split profiling completed successfully for {len(biz_dirs)} business(es) in {elapsed_total:.2f}s:")
+    print(f"  - Total metadata columns: {total_meta}")
+    print(f"  - Total LSH items:        {total_lsh}")
+    print(f"  - Total FAISS documents:  {total_vector}")
+    print(f"  - Average per business:   {elapsed_total / len(biz_dirs):.2f}s")
 
 
 if __name__ == "__main__":

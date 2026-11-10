@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Profile SQLite databases and detect undocumented FK-PK joins."
     )
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument(
         "--db",
         type=str,
@@ -44,9 +44,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory containing SQLite database files (*.db).",
     )
     group.add_argument(
-        "--calendar",
+        "--split",
         type=str,
-        help="Path to split-level calendar.csv for profiling.",
+        default="dataset/train",
+        help="Name or path of dataset split (e.g. 'train', 'public_test', 'private_test'). Default: 'dataset/train'.",
+    )
+    parser.add_argument(
+        "--base-dir",
+        type=str,
+        default="dataset",
+        help="Base directory containing dataset splits (default: 'dataset').",
+    )
+    parser.add_argument(
+        "--biz-id",
+        "--biz_id",
+        dest="biz_id",
+        type=str,
+        default=None,
+        help="Identifier of a single business to profile within the split (e.g. 'biz_101', 'dev_001').",
     )
 
     parser.add_argument(
@@ -121,12 +136,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use deterministic offline MockLLMEngine without loading GPU weights.",
     )
-    parser.add_argument(
-        "--readme",
-        type=str,
-        default=None,
-        help="Path to business README.md or directory containing README.md.",
-    )
 
     # Module 3 Vietnamese LSH Indexer arguments
     parser.add_argument(
@@ -193,12 +202,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use deterministic offline MockEmbedder without loading GPU/CPU model weights.",
     )
-    parser.add_argument(
-        "--rulebook",
-        type=str,
-        default=None,
-        help="Path to rulebook.md for vector indexing.",
-    )
     return parser
 
 
@@ -216,11 +219,18 @@ def _find_readme_text(db_path: Path, explicit_readme: str | None) -> str:
     if parent_readme.is_file():
         return parent_readme.read_text(encoding="utf-8")
 
-    # Check standard dataset layout dataset/train/data/<biz_stem>/README.md
-    for root in (Path("dataset/train/data"), Path("dataset/public_test/data")):
-        candidate = root / db_path.stem / "README.md"
+    # Walk upwards to find README in ancestors or matching stem folder
+    curr = db_path.parent
+    for _ in range(4):
+        if curr is None or curr == curr.parent:
+            break
+        candidate = curr / "data" / db_path.stem / "README.md"
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8")
+        candidate = curr / db_path.stem / "README.md"
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+        curr = curr.parent
 
     return ""
 
@@ -235,16 +245,14 @@ def _find_rulebook_text(db_path: Path, explicit_rulebook: str | None) -> str:
             return p.read_text(encoding="utf-8")
 
     # Check database parent folder and ancestors
-    for parent in (db_path.parent, db_path.parent.parent, db_path.parent.parent.parent):
-        candidate = parent / "rulebook.md"
+    curr = db_path.parent
+    for _ in range(5):
+        if curr is None or curr == curr.parent:
+            break
+        candidate = curr / "rulebook.md"
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8")
-
-    # Check standard dataset layout
-    for root in (Path("dataset/train"), Path("dataset/public_test"), Path("dataset")):
-        candidate = root / "rulebook.md"
-        if candidate.is_file():
-            return candidate.read_text(encoding="utf-8")
+        curr = curr.parent
 
     return ""
 
@@ -282,7 +290,7 @@ def profile_single_db(
             )
             summarizer = ProfileLLMSummarizer(engine)
 
-        readme_text = _find_readme_text(db_path, args.readme)
+        readme_text = _find_readme_text(db_path, getattr(args, "readme", None))
 
         summarized = summarizer.generate_profiles(
             db_profile=raw_profile,
@@ -332,8 +340,8 @@ def profile_single_db(
             max_length=args.vector_max_len,
         )
         meta_source = result.get("metadata_profile") or raw_profile
-        rulebook_text = _find_rulebook_text(db_path, args.rulebook)
-        readme_text = _find_readme_text(db_path, args.readme)
+        rulebook_text = _find_rulebook_text(db_path, getattr(args, "rulebook", None))
+        readme_text = _find_readme_text(db_path, getattr(args, "readme", None))
 
         indexed_docs = vector_indexer.build_index(
             processed_metadata=meta_source,
@@ -455,36 +463,98 @@ def main() -> None:
         )
         print(f"Profiles written to: {out_dir}")
 
-    elif args.calendar:
-        cal_file = Path(args.calendar)
-        if not cal_file.is_file():
-            print(f"Error: Calendar file does not exist: {cal_file}", file=sys.stderr)
-            sys.exit(1)
+    else:
+        # Default behavior: run split profiling via resolve_split_paths
+        from zaic_2026_4.profiling.profile_manager import (
+            profile_split_calendar,
+            ProfilingOrchestrator,
+        )
+        from zaic_2026_4.submission.pipeline import resolve_split_paths
 
-        t0 = time.perf_counter()
-        raw_profile = RawDatabaseProfiler.profile_calendar(cal_file, num_perm=args.num_perm)
-        result: dict[str, Any] = {"raw_profile": raw_profile}
+        t_start = time.perf_counter()
+        engine = create_engine(
+            local=args.local,
+            model=args.model,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            mock=args.mock_llm,
+        )
+        embedder = MockEmbedder() if args.mock_embedder else None
 
-        if args.summarize:
-            engine = create_engine(
-                local=args.local,
-                model=args.model,
-                gpu_memory_utilization=args.gpu_memory_utilization,
-                mock=args.mock_llm,
+        paths = resolve_split_paths(args.split, base_dir=args.base_dir, require_questions=False)
+        split_p = paths["split_dir"]
+        data_p = paths["data_dir"]
+        rb_path = paths["rulebook_path"]
+        cal_path = paths["calendar_path"]
+
+        if args.biz_id:
+            single_biz_dir = (data_p / args.biz_id).resolve()
+            if not single_biz_dir.is_dir():
+                print(f"Error: Business directory not found: {single_biz_dir}", file=sys.stderr)
+                sys.exit(1)
+            biz_dirs = [single_biz_dir]
+        else:
+            biz_dirs = sorted([d for d in data_p.iterdir() if d.is_dir()])
+            if not biz_dirs:
+                print(f"Error: No business directories found in {data_p}", file=sys.stderr)
+                sys.exit(1)
+
+        print(f"Initializing profiling for {split_p.name} ({len(biz_dirs)} business(es))...")
+
+        if args.output_dir and cal_path and cal_path.is_file():
+            cal_target = Path(args.output_dir).resolve() / "calendar_profile.json"
+            cal_target.parent.mkdir(parents=True, exist_ok=True)
+            cal_res = profile_split_calendar(
+                calendar_path=cal_path,
+                llm_engine=engine,
+                embedder=embedder,
+                vector_model_path=args.vector_model,
+                cache_path=cal_target,
+                force_rebuild=True,
             )
-            summarizer = ProfileLLMSummarizer(engine)
-            metadata = summarizer.summarize_calendar(raw_profile)
-            result["metadata_profile"] = metadata
+            if embedder is None and "vector_indexer" in cal_res and cal_res["vector_indexer"] is not None:
+                embedder = cal_res["vector_indexer"].embedder
 
-        out_file = Path(args.output) if args.output else None
-        if out_file is not None:
-            out_file.parent.mkdir(parents=True, exist_ok=True)
-            content_to_save = result if args.summarize else raw_profile
-            with open(out_file, "w", encoding="utf-8") as f:
-                json.dump(content_to_save, f, ensure_ascii=False, indent=2)
-            print(f"Calendar profile saved to: {out_file}")
+        total_meta = 0
+        total_lsh = 0
+        total_vector = 0
 
-        print(f"Successfully processed calendar in {time.perf_counter() - t0:.3f}s.")
+        for idx, b_dir in enumerate(biz_dirs, 1):
+            t_b0 = time.time()
+            b_cache = (
+                Path(args.output_dir).resolve() / f"cache_{b_dir.name}"
+                if args.output_dir
+                else Path(f"/tmp/cache_{b_dir.name}")
+            )
+            print(f"[{idx}/{len(biz_dirs)}] Processing {b_dir.name}...")
+
+            orchestrator = ProfilingOrchestrator(
+                business_dir=b_dir,
+                rulebook_path=rb_path,
+                llm_engine=engine,
+                embedder=embedder,
+                vector_model_path=args.vector_model,
+                cache_dir=b_cache,
+                calendar_path=cal_path if (cal_path and cal_path.is_file()) else None,
+            )
+            pipe = orchestrator.run_pipeline(force_rebuild=True)
+            if embedder is None and "vector_indexer" in pipe and pipe["vector_indexer"] is not None:
+                embedder = pipe["vector_indexer"].embedder
+
+            m_cnt = len(pipe["metadata"])
+            l_cnt = len(pipe["lsh_indexer"].value_to_col_map)
+            v_cnt = len(pipe["vector_indexer"].doc_map)
+
+            total_meta += m_cnt
+            total_lsh += l_cnt
+            total_vector += v_cnt
+            print(f"     Done in {time.time() - t_b0:.2f}s ({m_cnt} columns, {l_cnt} LSH items, {v_cnt} docs).")
+
+        elapsed_total = time.perf_counter() - t_start
+        print(f"Split profiling completed successfully for {len(biz_dirs)} business(es) in {elapsed_total:.2f}s:")
+        print(f"  - Total metadata columns: {total_meta}")
+        print(f"  - Total LSH items:        {total_lsh}")
+        print(f"  - Total FAISS documents:  {total_vector}")
+        print(f"  - Average per business:   {elapsed_total / len(biz_dirs):.2f}s")
 
 
 if __name__ == "__main__":

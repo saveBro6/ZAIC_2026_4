@@ -323,7 +323,6 @@ def test_cli_parsing_and_execution(tmp_path: Path) -> None:
         "--db", str(db_file),
         "--summarize",
         "--mock-llm",
-        "--readme", str(readme_file),
     ])
 
     result = profile_single_db(db_file, args, output_path=out_json)

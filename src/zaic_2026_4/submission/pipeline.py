@@ -366,17 +366,19 @@ class SubmissionPipeline:
 def resolve_split_paths(
     split_name_or_path: str | Path,
     base_dir: Path | str = "dataset",
+    require_questions: bool = True,
 ) -> dict[str, Any]:
     """Resolve standard dataset paths within a split folder.
 
     Args:
         split_name_or_path: Split name ('train', 'public_test', 'private_test') or direct path.
         base_dir: Base directory containing splits (default: 'dataset').
+        require_questions: Whether questions.jsonl is mandatory (True for submission, False for profiling/linking).
 
     Returns:
         Dict containing:
             - split_dir: Path to split root directory.
-            - questions_path: Path to questions.jsonl.
+            - questions_path: Path to questions.jsonl (or None if not required and absent).
             - data_dir: Path to data/ directory.
             - rulebook_path: Path to rulebook.md.
             - calendar_path: Path to calendar.csv (or None if not present).
@@ -395,9 +397,10 @@ def resolve_split_paths(
                 f"(checked '{raw_path}' and '{candidate}')."
             )
 
-    questions_path = split_dir / "questions.jsonl"
-    if not questions_path.is_file():
-        raise FileNotFoundError(f"Questions file not found: {questions_path}")
+    questions_candidate = split_dir / "questions.jsonl"
+    if require_questions and not questions_candidate.is_file():
+        raise FileNotFoundError(f"Questions file not found: {questions_candidate}")
+    questions_path = questions_candidate if questions_candidate.is_file() else None
 
     data_dir = split_dir / "data"
     if not data_dir.is_dir():

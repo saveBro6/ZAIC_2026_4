@@ -14,6 +14,7 @@ from zaic_2026_4.profiling.profile_summarizer import (
 )
 from zaic_2026_4.profiling.vector_indexer import MockEmbedder
 from zaic_2026_4.schema_linking.task_aligned_linker import TaskAlignedSchemaLinker
+from zaic_2026_4.submission.pipeline import resolve_split_paths
 
 
 def main() -> None:
@@ -22,28 +23,30 @@ def main() -> None:
         description="Run Task-Aligned Schema Linking on natural-language questions."
     )
     parser.add_argument(
-        "--business-dir",
+        "--split",
         type=str,
-        required=True,
-        help="Path to business directory containing data files and README.md.",
+        default="dataset/train",
+        help="Name or path of dataset split (e.g. 'train', 'public_test', 'private_test'). Default: 'dataset/train'.",
     )
     parser.add_argument(
-        "--rulebook",
+        "--base-dir",
         type=str,
-        default="dataset/train/rulebook.md",
-        help="Path to dataset split rulebook.md.",
+        default="dataset",
+        help="Base directory containing dataset splits (default: 'dataset').",
+    )
+    parser.add_argument(
+        "--biz-id",
+        "--biz_id",
+        dest="biz_id",
+        type=str,
+        required=True,
+        help="Identifier of the business to link (e.g. 'biz_101', 'dev_001').",
     )
     parser.add_argument(
         "--question",
         type=str,
         required=True,
         help="Natural language Vietnamese business question.",
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=str,
-        default=None,
-        help="Cache directory for profiling artifacts (defaults to /tmp/cache_<biz_id>).",
     )
     parser.add_argument(
         "--local",
@@ -84,11 +87,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    biz_dir = Path(args.business_dir).resolve()
-    rulebook_path = Path(args.rulebook).resolve()
+    split_paths = resolve_split_paths(args.split, base_dir=args.base_dir, require_questions=False)
+    rulebook_path = split_paths["rulebook_path"]
+    data_dir = split_paths["data_dir"]
 
+    biz_dir = (data_dir / args.biz_id).resolve()
     if not biz_dir.is_dir():
-        print(f"Error: Business directory not found: {biz_dir}", file=sys.stderr)
+        print(f"Error: Business directory not found in split data: {biz_dir}", file=sys.stderr)
         sys.exit(1)
 
     # 1. Initialize LLM engine
@@ -108,7 +113,7 @@ def main() -> None:
         llm_engine=llm,
         embedder=embedder,
         vector_model_path=vector_model_path,
-        cache_dir=args.cache_dir,
+        calendar_path=split_paths["calendar_path"],
     )
     pipeline_res = orchestrator.run_pipeline()
     processed_metadata = pipeline_res["metadata"]
@@ -117,8 +122,7 @@ def main() -> None:
 
     # Load raw profile if cached
     raw_profile = None
-    cache_dir = Path(args.cache_dir) if args.cache_dir else orchestrator.cache_dir
-    raw_profile_path = cache_dir / "raw_profile.json"
+    raw_profile_path = orchestrator.cache_dir / "raw_profile.json"
     if raw_profile_path.is_file():
         try:
             with open(raw_profile_path, "r", encoding="utf-8") as f:
