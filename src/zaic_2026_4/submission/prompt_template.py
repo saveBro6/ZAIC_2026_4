@@ -9,40 +9,41 @@ from typing import Any
 FEW_SHOT_SQL_EXAMPLES_VI: str = (
     "<few_shot_examples>\n"
     '  <example id="1">\n'
-    '    <user_question>Tổng doanh thu của mặt hàng "Sữa tươi" trong tháng này là bao nhiêu?</user_question>\n'
+    '    <user_question>Tổng học phí thực thu của khóa học "Lập trình Python" trong tháng này là bao nhiêu?</user_question>\n'
     '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
     "    <selected_schema>\n"
-    '      <table name="ban_hang">\n'
-    '        <column name="Ngày bán" type="SLASH_DATE">Cột lưu trữ ngày lập hóa đơn bán hàng định dạng DD/MM/YYYY. | Samples: [\'02/05/2026\', \'15/05/2026\'] | Hint: Vietnamese date (D/M/YYYY).</column>\n'
-    '        <column name="Thành tiền" type="CURRENCY">Tổng số tiền thanh toán của dòng hàng sau giảm giá. | Samples: [\'45,000\', \'120,000\'] | Hint: Formatted VND currency. CAST(REPLACE(col, \',\', \'\') AS REAL)</column>\n'
-    '        <column name="Tên hàng" type="STRING">Tên mặt hàng bán lẻ. | Samples: [\'Sữa tươi tiệt trùng 1L\']</column>\n'
-    '        <column name="Trạng thái" type="STRING">Trạng thái đơn hàng. | Samples: [\'Hoàn thành\', \'Đã hủy\']</column>\n'
+    '      <table name="dang_ky_khoa_hoc">\n'
+    '        <column name="Ngày ghi danh" type="SLASH_DATE">Cột lưu trữ ngày ghi danh học viên định dạng DD/MM/YYYY. | Samples: [\'02/05/2026\', \'15/05/2026\'] | Hint: Vietnamese date (D/M/YYYY).</column>\n'
+    '        <column name="Học phí thực thu" type="CURRENCY">Tổng số tiền học phí thực tế sau miễn giảm. | Samples: [\'1,200,000\', \'3,500,000\'] | Hint: Formatted VND currency. CAST(REPLACE(col, \',\', \'\') AS REAL)</column>\n'
+    '        <column name="Tên khóa học" type="STRING">Tên học phần hoặc chuyên đề đào tạo. | Samples: [\'Lập trình Python chuyên sâu\']</column>\n'
+    '        <column name="Trạng thái học vụ" type="STRING">Trạng thái hồ sơ học vụ. | Samples: [\'Đã ghi danh\', \'Bảo lưu\']</column>\n'
     "      </table>\n"
     "    </selected_schema>\n"
     "    <sql>\n"
-    'SELECT SUM(CAST(REPLACE(T1."Thành tiền", \',\', \'\') AS REAL)) AS "Tổng doanh thu"\n'
-    'FROM "ban_hang" AS T1\n'
-    'WHERE T1."Tên hàng" LIKE \'%Sữa tươi%\'\n'
-    '  AND T1."Trạng thái" != \'Đã hủy\'\n'
-    '  AND (substr(T1."Ngày bán", 7, 4) || \'-\' || substr(T1."Ngày bán", 4, 2) || \'-\' || substr(T1."Ngày bán", 1, 2)) BETWEEN \'2026-05-01\' AND \'2026-05-25\';\n'
+    'SELECT SUM(CAST(REPLACE(T1."Học phí thực thu", \',\', \'\') AS REAL)) AS "Tổng học phí"\n'
+    'FROM "dang_ky_khoa_hoc" AS T1\n'
+    'WHERE LOWER(T1."Tên khóa học") LIKE LOWER(\'%Lập trình Python%\')\n'
+    '  AND T1."Trạng thái học vụ" != \'Bảo lưu\'\n'
+    '  AND (substr(T1."Ngày ghi danh", 7, 4) || \'-\' || substr(T1."Ngày ghi danh", 4, 2) || \'-\' || substr(T1."Ngày ghi danh", 1, 2)) BETWEEN \'2026-05-01\' AND \'2026-05-25\';\n'
     "    </sql>\n"
     "  </example>\n\n"
     '  <example id="2">\n'
-    '    <user_question>Sản phẩm nào có đơn giá thấp nhất còn tồn kho?</user_question>\n'
+    '    <user_question>Thiết bị nào có kinh phí duy trì thấp nhất còn số lượng khả dụng?</user_question>\n'
     '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
     "    <selected_schema>\n"
-    '      <table name="san_pham">\n'
-    '        <column name="Tên sản phẩm" type="STRING">Tên sản phẩm trong kho. | Samples: [\'Bánh mì bơ tỏi\']</column>\n'
-    '        <column name="Đơn giá" type="CURRENCY">Giá niêm yết bán lẻ của sản phẩm. | Samples: [\'15,000\', \'30,000\'] | Hint: Formatted VND currency. CAST(REPLACE(col, \',\', \'\') AS REAL)</column>\n'
-    '        <column name="Số lượng tồn" type="NUMERIC">Số lượng sản phẩm còn tồn trong kho. | Samples: [10, 50]</column>\n'
+    '      <table name="thiet_bi_phong_lab">\n'
+    '        <column name="Mã thiết bị" type="STRING">Mã định danh duy nhất của thiết bị nghiên cứu. | Samples: [\'TB-001\', \'TB-015\']</column>\n'
+    '        <column name="Tên thiết bị" type="STRING">Tên trang thiết bị phòng thí nghiệm. | Samples: [\'Kính hiển vi quang học\']</column>\n'
+    '        <column name="Kinh phí duy trì" type="CURRENCY">Định mức chi phí bảo dưỡng định kỳ. | Samples: [\'350,000\', \'1,200,000\'] | Hint: Formatted VND currency. CAST(REPLACE(col, \',\', \'\') AS REAL)</column>\n'
+    '        <column name="Số lượng khả dụng" type="NUMERIC">Số lượng thiết bị sẵn sàng vận hành. | Samples: [2, 10]</column>\n'
     "      </table>\n"
     "    </selected_schema>\n"
     "    <sql>\n"
-    'SELECT T1."Tên sản phẩm", T1."Đơn giá"\n'
-    'FROM "san_pham" AS T1\n'
-    'WHERE T1."Đơn giá" IS NOT NULL\n'
-    '  AND T1."Số lượng tồn" > 0\n'
-    'ORDER BY CAST(REPLACE(T1."Đơn giá", \',\', \'\') AS REAL) ASC\n'
+    'SELECT T1."Tên thiết bị", T1."Kinh phí duy trì"\n'
+    'FROM "thiet_bi_phong_lab" AS T1\n'
+    'WHERE T1."Kinh phí duy trì" IS NOT NULL\n'
+    '  AND T1."Số lượng khả dụng" > 0\n'
+    'ORDER BY CAST(REPLACE(T1."Kinh phí duy trì", \',\', \'\') AS REAL) ASC, T1."Mã thiết bị" ASC\n'
     "LIMIT 1;\n"
     "    </sql>\n"
     "  </example>\n"
