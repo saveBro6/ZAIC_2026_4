@@ -17,6 +17,7 @@ from typing import Any, Protocol, runtime_checkable
 import faiss
 import numpy as np
 
+from zaic_2026_4 import constants
 from zaic_2026_4.constants import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_EMBED_GPU_UTIL,
@@ -372,7 +373,7 @@ class SemanticVectorIndexer:
             else float(
                 os.environ.get(
                     "VLLM_EMBEDDING_GPU_MEMORY_UTILIZATION",
-                    DEFAULT_EMBED_GPU_UTIL,
+                    constants.DEFAULT_EMBED_GPU_UTIL,
                 )
             )
         )

@@ -274,5 +274,50 @@ def test_submission_pipeline_auto_saves_schema_linking_result(mock_dataset_env: 
     assert per_q_file.is_file()
 
 
+def test_cli_quantize_and_gpu_embed_flags(
+    mock_dataset_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify zaic-submit CLI parses --quantize and --gpu-embed-memory-utilization correctly."""
+    from zaic_2026_4 import constants
+    from zaic_2026_4.submission.cli import build_parser, main
+
+    original_util = constants.DEFAULT_EMBED_GPU_UTIL
+    try:
+        parser = build_parser()
+        args = parser.parse_args([
+            "--split", "train",
+            "--quantize", "fp8",
+            "--gpu-embed-memory-utilization", "0.35",
+            "--mock",
+        ])
+        assert args.quantize == "fp8"
+        assert args.gpu_embed_memory_utilization == 0.35
+
+        monkeypatch.setattr(
+            "zaic_2026_4.submission.cli.resolve_split_paths",
+            lambda *a, **kw: {
+                "questions_path": mock_dataset_env["questions_path"],
+                "data_dir": mock_dataset_env["data_dir"],
+                "rulebook_path": mock_dataset_env["rulebook_path"],
+                "calendar_path": mock_dataset_env["calendar_path"],
+            },
+        )
+        main([
+            "--split", "train",
+            "--quantize", "fp8",
+            "--gpu-embed-memory-utilization", "0.35",
+            "--mock",
+            "--output", str(mock_dataset_env["output_path"]),
+            "--log-dir", str(mock_dataset_env["logs_dir"]),
+            "--cache-dir", str(mock_dataset_env["cache_dir"]),
+            "--limit", "1",
+        ])
+        assert constants.DEFAULT_EMBED_GPU_UTIL == 0.35
+    finally:
+        constants.DEFAULT_EMBED_GPU_UTIL = original_util
+
+
+
 
 

@@ -25,6 +25,7 @@ DEFAULT_LOCAL_MODEL: str = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_PROD_GPU_UTIL: float = 0.70
 DEFAULT_LOCAL_GPU_UTIL: float = 0.60
 DEFAULT_LLM_MAX_LENGTH: int = 16384
+DEFAULT_QUANTIZATION: str | None = None
 
 MINIMAL_PROFILE_PROMPT: str = """<system>
 Bạn là chuyên gia phân tích dữ liệu cho các cơ sở dữ liệu doanh nghiệp vừa và nhỏ (SMB) tại Việt Nam.
@@ -292,6 +293,7 @@ __all__ = [
     "DEFAULT_PROD_GPU_UTIL",
     # Profile summarizer
     "DEFAULT_PROD_MODEL",
+    "DEFAULT_QUANTIZATION",
     "DEFAULT_SHINGLE_K",
     "DEFAULT_SQL_MAX_RETRIES",
     "DEFAULT_SQL_TIMEOUT_SECONDS",

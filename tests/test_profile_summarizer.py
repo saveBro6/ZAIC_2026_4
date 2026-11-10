@@ -330,3 +330,33 @@ def test_cli_parsing_and_execution(tmp_path: Path) -> None:
     assert "metadata_profile" in result
     assert "Test.name" in result["metadata_profile"]
     assert out_json.is_file()
+
+
+def test_engine_factory_quantization(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify create_engine accepts quantize parameter and forwards to VLLMEngine."""
+    from unittest.mock import MagicMock
+    import vllm
+    from zaic_2026_4.profiling.profile_summarizer import VLLMEngine
+
+    fake_llm = MagicMock()
+    monkeypatch.setattr(vllm, "LLM", fake_llm)
+
+    # 1. Default quantization is None
+    engine_default = create_engine(mock=False)
+    assert isinstance(engine_default, VLLMEngine)
+    assert engine_default.quantization is None
+    fake_llm.assert_called_with(
+        model=engine_default.model_name,
+        gpu_memory_utilization=engine_default.gpu_memory_utilization,
+        max_model_len=engine_default.max_model_len,
+        tensor_parallel_size=engine_default.tensor_parallel_size,
+        trust_remote_code=True,
+        dtype="auto",
+        quantization=None,
+    )
+
+    # 2. Explicit quantization e.g. fp8
+    engine_fp8 = create_engine(mock=False, quantize="fp8")
+    assert isinstance(engine_fp8, VLLMEngine)
+    assert engine_fp8.quantization == "fp8"
+

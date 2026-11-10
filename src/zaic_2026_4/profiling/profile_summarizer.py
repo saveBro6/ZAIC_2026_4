@@ -16,6 +16,7 @@ from zaic_2026_4.constants import (
     DEFAULT_LOCAL_MODEL,
     DEFAULT_PROD_GPU_UTIL,
     DEFAULT_PROD_MODEL,
+    DEFAULT_QUANTIZATION,
     MAXIMAL_PROFILE_PROMPT,
     MINIMAL_PROFILE_PROMPT,
 )
@@ -50,6 +51,7 @@ class VLLMEngine:
         tensor_parallel_size: int = 1,
         trust_remote_code: bool = True,
         dtype: str = "auto",
+        quantization: str | None = DEFAULT_QUANTIZATION,
         **kwargs: Any,
     ) -> None:
         """Initialize vLLM engine instance."""
@@ -59,6 +61,7 @@ class VLLMEngine:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len
         self.tensor_parallel_size = tensor_parallel_size
+        self.quantization = quantization
 
         self.llm = LLM(
             model=model,
@@ -67,6 +70,7 @@ class VLLMEngine:
             tensor_parallel_size=tensor_parallel_size,
             trust_remote_code=trust_remote_code,
             dtype=dtype,
+            quantization=quantization,
             **kwargs,
         )
 
@@ -275,6 +279,8 @@ def create_engine(
     model: str | None = None,
     gpu_memory_utilization: float | None = None,
     mock: bool = False,
+    quantize: str | None = None,
+    quantization: str | None = None,
     **kwargs: Any,
 ) -> LLMEngineProtocol:
     """Factory creating the appropriate LLM engine based on target environment.
@@ -285,6 +291,8 @@ def create_engine(
         Model: Qwen/Qwen2.5-1.5B-Instruct, gpu_memory_utilization: 0.60
     - Mock mode (mock=True):
         Deterministic rule-based MockLLMEngine (instant execution without GPU/network).
+    - Quantization (--quantize):
+        Optional quantization format (e.g. 'fp8', 'awq', 'gptq'). Default: None.
     """
     if mock:
         return MockLLMEngine(**kwargs)
@@ -295,10 +303,12 @@ def create_engine(
         if gpu_memory_utilization is not None
         else (DEFAULT_LOCAL_GPU_UTIL if local else DEFAULT_PROD_GPU_UTIL)
     )
+    resolved_quantization = quantize if quantize is not None else (quantization or DEFAULT_QUANTIZATION)
 
     return VLLMEngine(
         model=resolved_model,
         gpu_memory_utilization=resolved_gpu_util,
+        quantization=resolved_quantization,
         **kwargs,
     )
 

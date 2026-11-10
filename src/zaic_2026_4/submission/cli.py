@@ -6,6 +6,7 @@ import argparse
 import sys
 import time
 
+from zaic_2026_4 import constants
 from zaic_2026_4.constants import (
     DEFAULT_CANDIDATE_SEEDS,
     DEFAULT_LOGS_DIR,
@@ -90,6 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit GPU memory utilization fraction override (e.g. 0.70 or 0.60).",
     )
     parser.add_argument(
+        "--gpu-embed-memory-utilization",
+        type=float,
+        default=None,
+        help="Explicit GPU memory utilization fraction for embedding model BGE-M3 (default: 0.20).",
+    )
+    parser.add_argument(
+        "--quantize",
+        type=str,
+        default=None,
+        help="Model quantization format for Generative LLM Engine (e.g. 'fp8', 'awq', 'gptq'). Default: None.",
+    )
+    parser.add_argument(
         "--seeds",
         type=int,
         nargs="+",
@@ -128,11 +141,15 @@ def main(argv: list[str] | None = None) -> None:
     calendar_path = paths["calendar_path"]
 
     # 1. Initialize LLM engine and embedder
+    if args.gpu_embed_memory_utilization is not None:
+        constants.DEFAULT_EMBED_GPU_UTIL = args.gpu_embed_memory_utilization
+
     llm = create_engine(
         local=args.local,
         model=args.model,
         mock=args.mock,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        quantize=args.quantize,
     )
     embedder = MockEmbedder() if args.mock else None
     vector_model_path = "mock" if args.mock else "BAAI/bge-m3"

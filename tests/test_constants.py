@@ -37,6 +37,7 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_PROD_GPU_UTIL",
         "DEFAULT_LOCAL_GPU_UTIL",
         "DEFAULT_LLM_MAX_LENGTH",
+        "DEFAULT_QUANTIZATION",
         "MINIMAL_PROFILE_PROMPT",
         "MAXIMAL_PROFILE_PROMPT",
         # Raw Profiler
@@ -85,7 +86,7 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_SUBMISSION_PATH",
     }
     assert set(constants.__all__) == expected_constants
-    assert len(constants.__all__) == 52
+    assert len(constants.__all__) == 53
 
     for name in expected_constants:
         assert hasattr(constants, name), f"constants module missing {name}"
