@@ -8,15 +8,20 @@ and undocumented join keys.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from zaic_2026_4.schema_linking.ast_parser import SQLASTExtractor
 from zaic_2026_4.schema_linking.context_builder import (
     SchemaContextBuilder,
 )
-from zaic_2026_4.schema_linking.post_processor import SchemaPostProcessor
+from zaic_2026_4.schema_linking.post_processor import (
+    SchemaPostProcessor,
+    normalize_identifier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,36 @@ class SchemaLinkingResult:
         """Format quoted schema into clean XML context for downstream Phase 04 SQL Generation."""
         return SchemaPostProcessor.format_for_sql_generation(self.final_linked_schema, processed_metadata)
 
+    def to_dict(
+        self,
+        question: str | None = None,
+        question_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Convert linking result into serializable JSON dictionary."""
+        data: dict[str, Any] = {
+            "final_linked_schema": sorted(self.final_linked_schema),
+            "canonical_schema": sorted(self.canonical_schema),
+            "preserved_keys": sorted(self.preserved_keys),
+            "total_retries": self.total_retries,
+            "variant_traces": [
+                {
+                    "case_name": t.case_name,
+                    "profile_type": t.profile_type,
+                    "retry_count": t.retry_count,
+                    "fields": sorted(t.fields_harvested),
+                    "literals": sorted(t.literals_extracted),
+                    "mismatches": t.mismatches_detected,
+                    "final_sql": t.final_sql,
+                }
+                for t in self.variant_traces
+            ],
+        }
+        if question is not None:
+            data["question"] = question
+        if question_id is not None:
+            data["question_id"] = question_id
+        return data
+
 
 class TaskAlignedSchemaLinker:
     """Orchestrates Task-Aligned Schema Linking across 5 context variants."""
@@ -73,6 +108,50 @@ class TaskAlignedSchemaLinker:
         self.ast_parser = ast_parser or SQLASTExtractor()
         self.context_builder = context_builder or SchemaContextBuilder()
         self.max_retries = max_retries
+
+    @staticmethod
+    def is_candidate_key_column(col_name: str, table_name: str = "") -> bool:
+        """Check if column is a primary key, foreign key, or entity identification code.
+
+        Handles both English conventions (id, order_id, code, CDSCode) and Vietnamese
+        business conventions (Mã hóa đơn, Mã KH, Mã SP, Số HĐ, Số phiếu, etc.).
+        """
+        c_clean = col_name.strip().lstrip("\ufeff")
+        c_lower = c_clean.lower()
+        c_norm = normalize_identifier(c_clean)
+        tbl_norm = normalize_identifier(table_name) if table_name else ""
+        tbl_base = tbl_norm.rstrip("s") if tbl_norm else ""
+
+        # 1. Vietnamese explicit code prefix ('Mã...', 'Ma...', 'ma_...')
+        # Note: 'mã ' or 'ma_' distinguishes entity codes from words like 'mẫu...'
+        if c_lower.startswith(("mã ", "mã_", "ma_", "ma ", "mã-", "ma-")):
+            return True
+
+        # 2. Direct key keywords and table-specific id/code patterns
+        if c_norm in (
+            "id",
+            "code",
+            f"{tbl_norm}id",
+            f"id{tbl_norm}",
+            f"ma{tbl_norm}",
+            f"code{tbl_norm}",
+            f"{tbl_base}id",
+            f"{tbl_base}code",
+        ):
+            return True
+
+        # 3. Delimited or CamelCase id/code prefix or suffix (e.g. order_id, CDSCode, CustomerID, ID_SP, Product_Code)
+        if (
+            c_lower.endswith(("_id", "_code", "-id", "-code", " id", " code", " mã"))
+            or c_lower.startswith(("id_", "code_", "id-", "code-", "id ", "code "))
+            or c_clean.endswith(("ID", "Id", "Code", "CODE"))
+            or c_clean.startswith(("ID", "Id", "Code", "CODE"))
+        ):
+            return True
+
+        # 4. Vietnamese invoice, bill, receipt serial / document numbers
+        # Explicitly excludes measures / metrics like 'soluong' or 'sodienthoai'
+        return c_norm in ("sohd", "sohoadon", "soct", "sophieu", "sokh", "sochungtu")
 
     def preserve_linking_keys(
         self,
@@ -132,11 +211,7 @@ class TaskAlignedSchemaLinker:
                 ]
 
             for c in candidate_cols:
-                c_lower = c.lower()
-                # Common primary key conventions
-                if c_lower in ("id", f"{tbl.lower()}_id", "code", f"ma_{tbl.lower()}") or (
-                    c_lower.startswith("ma_") and ("bill" in c_lower or "don" in c_lower or "hd" in c_lower)
-                ):
+                if self.is_candidate_key_column(c, tbl):
                     final_schema.add(f"{tbl}.{c}")
 
         return final_schema
@@ -150,8 +225,11 @@ class TaskAlignedSchemaLinker:
         raw_profile: dict[str, Any] | None = None,
         max_retries: int | None = None,
         batch_generate: bool = True,
+        cases: str | list[str] | set[str] | None = None,
+        cache_dir: Path | str | None = None,
+        question_id: str | None = None,
     ) -> SchemaLinkingResult:
-        """Execute Task-Aligned Schema Linking across 5 context variants.
+        """Execute Task-Aligned Schema Linking across specified context variants.
 
         Args:
             question: User natural language query in Vietnamese or English.
@@ -161,6 +239,9 @@ class TaskAlignedSchemaLinker:
             raw_profile: Optional raw database profile containing undocumented_joins.
             max_retries: Maximum re-prompting retries on literal mismatch (default: self.max_retries).
             batch_generate: Whether to execute initial prompts using batched LLM generation.
+            cases: Specific context variants to run, e.g. "abcde", "abce", "abe", or None (defaults to all).
+            cache_dir: Optional business cache directory to automatically persist schema_linking_result.json.
+            question_id: Optional question ID for logging per-question schema linking results.
 
         Returns:
             SchemaLinkingResult with final linked schema, execution traces, and diagnostics.
@@ -168,12 +249,13 @@ class TaskAlignedSchemaLinker:
         retries_limit = max_retries if max_retries is not None else self.max_retries
         all_columns = self.context_builder.get_all_tables_and_columns(processed_metadata)
 
-        # Step 1: Construct 5 context variants (Cases a to e)
+        # Step 1: Construct context variants (Cases a to e as specified)
         variants = self.context_builder.build_5_variants(
             question=question,
             processed_metadata=processed_metadata,
             lsh_indexer=lsh_indexer,
             vector_indexer=vector_indexer,
+            cases=cases,
         )
 
         # Step 2: Generate initial trial SQL queries
@@ -314,7 +396,7 @@ class TaskAlignedSchemaLinker:
 
         preserved = canonical_schema - linked_fields
 
-        return SchemaLinkingResult(
+        result = SchemaLinkingResult(
             final_linked_schema=quoted_schema,
             canonical_schema=canonical_schema,
             variant_traces=traces,
@@ -322,6 +404,25 @@ class TaskAlignedSchemaLinker:
             all_harvested_fields=linked_fields,
             preserved_keys=preserved,
         )
+
+        # Automatically persist schema_linking_result.json to cache_dir if provided
+        if cache_dir is not None:
+            c_dir = Path(cache_dir)
+            try:
+                c_dir.mkdir(parents=True, exist_ok=True)
+                out_dict = result.to_dict(question=question, question_id=question_id)
+                res_file = c_dir / "schema_linking_result.json"
+                with open(res_file, "w", encoding="utf-8") as f:
+                    json.dump(out_dict, f, ensure_ascii=False, indent=2)
+
+                if question_id:
+                    q_file = c_dir / f"schema_linking_result_{question_id}.json"
+                    with open(q_file, "w", encoding="utf-8") as f:
+                        json.dump(out_dict, f, ensure_ascii=False, indent=2)
+            except (OSError, TypeError, ValueError) as exc:
+                logger.warning("Failed to save schema_linking_result.json in %s: %s", c_dir, exc)
+
+        return result
 
 
 def task_aligned_schema_linking(
@@ -332,6 +433,9 @@ def task_aligned_schema_linking(
     llm_engine: Any | None = None,
     raw_profile: dict[str, Any] | None = None,
     max_retries: int = 2,
+    cases: str | list[str] | set[str] | None = None,
+    cache_dir: Path | str | None = None,
+    question_id: str | None = None,
 ) -> set[str]:
     """Functional interface for Task-Aligned Schema Linking matching the original paper's pseudo-code.
 
@@ -343,6 +447,9 @@ def task_aligned_schema_linking(
         - llm_engine: LLM inference engine supporting text generation.
         - raw_profile: Raw database statistics and undocumented join paths.
         - max_retries: Maximum number of re-prompting retries on literal mismatch.
+        - cases: Specific context variants to run, e.g. "abcde", "abce", or None.
+        - cache_dir: Optional directory to persist schema_linking_result.json.
+        - question_id: Optional question ID for per-question result files.
 
     Output:
         - final_linked_schema: Set of selected columns formatted as 'TableName.ColumnName'.
@@ -361,5 +468,8 @@ def task_aligned_schema_linking(
         vector_indexer=vector_indexer,
         raw_profile=raw_profile,
         max_retries=max_retries,
+        cases=cases,
+        cache_dir=cache_dir,
+        question_id=question_id,
     )
     return result.final_linked_schema

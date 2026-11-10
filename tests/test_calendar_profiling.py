@@ -238,3 +238,41 @@ def test_split_caching_and_orchestrator_merging(tmp_path: Path) -> None:
 
     cal_matches = orchestrator.query_literals("Tết")
     assert any(col == "calendar.holiday" for col, _ in cal_matches)
+
+
+def test_raw_profiler_calendar_jaccard_join(tmp_path: Path) -> None:
+    """Verify RawDatabaseProfiler computes Jaccard PK/FK join between table dates and calendar.date."""
+    # Create SQLite database with an orders table containing date strings
+    import sqlite3
+    db_file = tmp_path / "test_biz.db"
+    conn = sqlite3.connect(db_file)
+    cur = conn.cursor()
+    cur.execute('CREATE TABLE "don_hang" ("id" INTEGER, "ngay_dat" TEXT, "tong_tien" INTEGER);')
+    # Insert dates that match 2024 dates in calendar.csv
+    order_data = [
+        (1, "2024-01-01", 100000),
+        (2, "2024-01-02", 200000),
+        (3, "03/01/2024", 150000),  # Slash date with time/format
+        (4, "04/01/2024 14:30:00", 300000),  # Slash date with time component
+    ]
+    cur.executemany('INSERT INTO "don_hang" VALUES (?, ?, ?);', order_data)
+    conn.commit()
+    conn.close()
+
+    profiler = RawDatabaseProfiler(
+        db_path=db_file,
+        calendar_path=TRAIN_CALENDAR_PATH,
+        calendar_jaccard_threshold=0.001,
+    )
+    db_profile = profiler.profile_database()
+
+    assert "calendar" in db_profile["tables"]
+    assert "don_hang" in db_profile["tables"]
+
+    joins = db_profile.get("undocumented_joins", [])
+    date_joins = [
+        j for j in joins
+        if ("calendar.date" in (j["col1"], j["col2"]) and "don_hang.ngay_dat" in (j["col1"], j["col2"]))
+    ]
+    assert len(date_joins) == 1
+    assert date_joins[0]["resemblance"] > 0.0

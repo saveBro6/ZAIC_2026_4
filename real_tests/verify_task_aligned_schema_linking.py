@@ -105,6 +105,8 @@ def verify_schema_linking(
         "question": question,
         "elapsed_seconds": elapsed,
         "total_retries": result.total_retries,
+        "all_harvested_fields": sorted(result.all_harvested_fields),
+        "preserved_keys": sorted(result.preserved_keys),
         "final_linked_schema": sorted(result.final_linked_schema),
         "canonical_schema": sorted(result.canonical_schema),
         "variant_traces": [
@@ -113,6 +115,7 @@ def verify_schema_linking(
                 "profile_type": t.profile_type,
                 "retry_count": t.retry_count,
                 "fields": sorted(t.fields_harvested),
+                "literals": sorted(t.literals_extracted),
                 "mismatches": t.mismatches_detected,
                 "final_sql": t.final_sql,
             }

@@ -1,8 +1,8 @@
 """Unit and integration tests for RawDatabaseProfiler, Shape & Pattern, and MinHash joins."""
 
 import json
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -51,7 +51,6 @@ def test_empty_table_profiling(tmp_path: Path) -> None:
     tbl = profile["tables"]["empty_table"]
     assert tbl["row_count"] == 0
     assert tbl["columns"]["id"]["null_count"] == 0
-    assert tbl["columns"]["id"]["null_ratio"] == 0.0
     assert tbl["columns"]["id"]["distinct_count"] == 0
     assert tbl["columns"]["id"]["sample_values"] == []
 
@@ -74,7 +73,6 @@ def test_null_column_profiling(tmp_path: Path) -> None:
     tbl = profile["tables"]["test_nulls"]
     assert tbl["row_count"] == 3
     assert tbl["columns"]["all_null"]["null_count"] == 3
-    assert tbl["columns"]["all_null"]["null_ratio"] == 1.0
     assert tbl["columns"]["all_null"]["distinct_count"] == 0
     assert tbl["columns"]["all_null"]["data_format"] == "EMPTY"
 
@@ -229,7 +227,6 @@ def test_downstream_contract_compatibility(tmp_path: Path) -> None:
     required_keys = [
         "null_count",
         "distinct_count",
-        "null_ratio",
         "min_val",
         "max_val",
         "min_str_len",
@@ -279,6 +276,50 @@ def test_numeric_range_not_inverted(tmp_path: Path) -> None:
     col = profile["tables"]["tbl"]["columns"]["num"]
     assert float(col["min_val"]) == 2.0
     assert float(col["max_val"]) == 100.0
+
+
+def test_currency_and_formatted_min_max_numeric_order(tmp_path: Path) -> None:
+    """Verify that formatted currency, thousand-separated numbers, and custom dates have numerically correct min_val and max_val."""
+    db_path = tmp_path / "currency_min_max.db"
+    df = pl.DataFrame(
+        {
+            "currency_thousand": ["1,056,000", "90,000", "4,000", "1,200,000"],
+            "currency_vnd": ["50,000 VNĐ", "15,000 VNĐ", "1,500,000 VNĐ", "200,000 VNĐ"],
+            "currency_accounting": ["(5,000)", "2,000", "10,000", "(100)"],
+            "currency_dash": ["-", "5,000", "100,000", "20,000"],
+            "date_vn": ["1 thg 1 2026", "9 thg 9 2025", "15 thg 6 2025", "20 thg 11 2025"],
+            "date_slash": ["25/09/2025", "01/10/2025", "15/01/2024", "10/05/2024"],
+        }
+    )
+    create_sqlite_db_from_dfs(db_path, {"tbl": df})
+
+    profiler = RawDatabaseProfiler(db_path)
+    profile = profiler.profile_database()
+    cols = profile["tables"]["tbl"]["columns"]
+
+    # Thousand separator: 4,000 is min, 1,200,000 is max (not lexicographical 1,056,000 and 90,000)
+    assert cols["currency_thousand"]["min_val"] == "4,000"
+    assert cols["currency_thousand"]["max_val"] == "1,200,000"
+
+    # VND text: 15,000 VNĐ is min, 1,500,000 VNĐ is max
+    assert cols["currency_vnd"]["min_val"] == "15,000 VNĐ"
+    assert cols["currency_vnd"]["max_val"] == "1,500,000 VNĐ"
+
+    # Accounting parentheses: (5,000) is min (-5000), 10,000 is max
+    assert cols["currency_accounting"]["min_val"] == "(5,000)"
+    assert cols["currency_accounting"]["max_val"] == "10,000"
+
+    # Accounting dash zero: - is min (0), 100,000 is max
+    assert cols["currency_dash"]["min_val"] == "-"
+    assert cols["currency_dash"]["max_val"] == "100,000"
+
+    # Vietnamese date: 15 thg 6 2025 is min, 1 thg 1 2026 is max
+    assert cols["date_vn"]["min_val"] == "15 thg 6 2025"
+    assert cols["date_vn"]["max_val"] == "1 thg 1 2026"
+
+    # Slash date: 15/01/2024 is min, 01/10/2025 is max (not lexicographical 01/10/2025)
+    assert cols["date_slash"]["min_val"] == "15/01/2024"
+    assert cols["date_slash"]["max_val"] == "01/10/2025"
 
 
 def test_fixed_length_and_free_text(tmp_path: Path) -> None:
@@ -361,9 +402,9 @@ def test_excel_custom_currency_formats(tmp_path: Path) -> None:
     df = pl.DataFrame(
         {
             "vnd_text": ["1,500,000 VNĐ", "-50,000 VNĐ", "0 VNĐ"],
-            "vnd_symbol": ["1,500,000 ₫", "-50,000 ₫", "0 ₫"],
-            "accounting_paren": ["1,500,000 ₫", "(50,000 ₫)", "0 ₫"],
-            "accounting_dash": ["1,500,000 ₫", "- ₫", "200,000 ₫"],
+            "vnd_symbol": ["1,500,000 đ", "-50,000 đ", "0 đ"],
+            "accounting_paren": ["1,500,000 đ", "(50,000 đ)", "0 đ"],
+            "accounting_dash": ["1,500,000 đ", "- đ", "200,000 đ"],
             "scaled_k": ["1,500 k VNĐ", "500 k VNĐ", "0 k VNĐ"],
             "scaled_tr": ["1.5 tr VNĐ", "2.0 tr VNĐ", "0.5 tr VNĐ"],
             "scaled_ty": ["1.50 tỷ", "2.30 tỷ", "0.00 tỷ"],
@@ -415,3 +456,76 @@ def test_real_db_biz_101() -> None:
     # Ngày tháng in biz_101 has values like "1 thg 6 2025"
     date_col = tbl["columns"]["Ngày tháng"]
     assert date_col["date_subtype"] == "VN_DATE_ABBR"
+
+
+def test_excel_serial_date_hint_and_no_false_positive_on_prices(tmp_path: Path) -> None:
+    """Verify Excel serial date conversion formula and avoid false positives on price columns."""
+    db_path = tmp_path / "serial_and_prices.db"
+    df = pl.DataFrame(
+        {
+            "date_col": ["45717", "45718", "45719"],
+            "gia_san_pham": ["42000", "51000", "45000"],
+            "ngay_giao_dich": ["45689", "01/02/2025", "45700"],
+        }
+    )
+    create_sqlite_db_from_dfs(db_path, {"tbl": df})
+
+    profiler = RawDatabaseProfiler(db_path)
+    profile = profiler.profile_database()
+    cols = profile["tables"]["tbl"]["columns"]
+
+    # 1. Pure serial date column
+    assert cols["date_col"]["data_format"] == "EXCEL_SERIAL"
+    assert "date(julianday('1899-12-30') + CAST(col AS REAL))" in cols["date_col"]["llm_hint"]
+
+    # 2. Metric/price column should NOT be recognized as date
+    assert cols["gia_san_pham"]["data_format"] in ("NUMERIC", "NUMERIC_STRING", "CURRENCY")
+    assert "date" not in cols["gia_san_pham"]["data_format"].lower()
+    assert cols["gia_san_pham"]["date_subtype"] is None
+
+    # 3. Mixed date column
+    assert cols["ngay_giao_dich"]["data_format"] == "DATE_MIXED"
+    assert "date(julianday('1899-12-30') + CAST(col AS REAL))" in cols["ngay_giao_dich"]["llm_hint"]
+
+
+def test_vietnamese_dong_currency_parsing_and_hints(tmp_path: Path) -> None:
+    """Verify currency with Vietnamese Latin 'đ' symbol, dot separators, and clean SQLite hint."""
+    db_path = tmp_path / "vnd_dot.db"
+    df = pl.DataFrame(
+        {
+            "gia_ban": ["25.000đ", "500đ", "19.440.000đ", "-30.500đ"],
+        }
+    )
+    create_sqlite_db_from_dfs(db_path, {"tbl": df})
+
+    profiler = RawDatabaseProfiler(db_path)
+    profile = profiler.profile_database()
+    col = profile["tables"]["tbl"]["columns"]["gia_ban"]
+
+    assert col["data_format"] == "CURRENCY"
+    assert col["currency_subtype"] == "VND_SYMBOL"
+    assert col["min_val"] == "-30.500đ"
+    assert col["max_val"] == "19.440.000đ"
+    assert "CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS INTEGER)" in col["llm_hint"]
+
+
+def test_excel_serial_float_representation(tmp_path: Path) -> None:
+    """Verify recognition of Excel serial dates stored as floats (e.g. '45717.0' in biz_107)."""
+    db_path = tmp_path / "float_serials.db"
+    df = pl.DataFrame(
+        {
+            "ngay_ban": ["45717.0", "46021.0", "46105.0", "46225.5"],
+        }
+    )
+    create_sqlite_db_from_dfs(db_path, {"SoBanHang": df})
+
+    profiler = RawDatabaseProfiler(db_path)
+    profile = profiler.profile_database()
+    col = profile["tables"]["SoBanHang"]["columns"]["ngay_ban"]
+
+    assert col["data_format"] == "EXCEL_SERIAL"
+    assert col["date_subtype"] == "EXCEL_SERIAL"
+    assert "date(julianday('1899-12-30') + CAST(col AS REAL))" in col["llm_hint"]
+
+
+

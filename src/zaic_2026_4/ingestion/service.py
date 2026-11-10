@@ -1,13 +1,11 @@
 """Orchestration service for business-level and split-level ingestion pipelines."""
 
-import os
-from pathlib import Path
 import time
+from pathlib import Path
 
-from zaic_2026_4.ingestion.extractors import discover_and_extract_business
+from zaic_2026_4.constants import DEFAULT_BASE_OUTPUT_DIR
+from zaic_2026_4.ingestion.extractors import discover_and_extract_business, extract_csv
 from zaic_2026_4.ingestion.sqlite_sink import write_tables_to_sqlite
-
-DEFAULT_BASE_OUTPUT_DIR = Path(os.environ.get("ZAIC_OUTPUT_DIR", "/tmp/zaic_db"))
 
 
 def infer_split_name(path: Path) -> str | None:
@@ -22,6 +20,7 @@ def ingest_business(
     business_dir: Path | str,
     output_dir: Path | str | None = None,
     create_views: bool = True,
+    calendar_path: Path | str | None = None,
 ) -> Path:
     """Ingest all tabular data for a single business into an isolated SQLite database.
 
@@ -29,6 +28,7 @@ def ingest_business(
         business_dir: Path to the business directory (e.g. dataset/train/data/biz_101).
         output_dir: Target output directory. Defaults to /tmp/zaic_db/<split>.
         create_views: Whether to generate unified VIEWs for identical schemas.
+        calendar_path: Optional path to calendar.csv to ingest into business database.
 
     Returns:
         Path to the created SQLite database file.
@@ -51,6 +51,15 @@ def ingest_business(
     # Extract all tabular data preserving raw types and schemas
     tables = discover_and_extract_business(biz_path)
 
+    # Ingest split calendar table if provided
+    if calendar_path:
+        cal_p = Path(calendar_path).resolve()
+        if cal_p.is_file() and "calendar" not in tables:
+            cal_tables = extract_csv(cal_p)
+            for df in cal_tables.values():
+                tables["calendar"] = df
+                break
+
     # Persist tables to SQLite with view generation
     write_tables_to_sqlite(tables, output_path, create_views=create_views)
 
@@ -62,6 +71,7 @@ def ingest_split(
     base_dir: Path | str = "dataset",
     output_dir: Path | str | None = None,
     create_views: bool = True,
+    calendar_path: Path | str | None = None,
 ) -> dict[str, Path]:
     """Ingest all businesses within a dataset split into SQLite databases.
 
@@ -70,6 +80,7 @@ def ingest_split(
         base_dir: Base directory containing splits (default: 'dataset').
         output_dir: Target output directory. Defaults to /tmp/zaic_db/<split>.
         create_views: Whether to generate unified VIEWs for identical schemas.
+        calendar_path: Optional path to calendar.csv file. Auto-discovered if omitted.
 
     Returns:
         Dictionary mapping business_id -> Path to created SQLite database.
@@ -88,6 +99,12 @@ def ingest_split(
         target_output_dir = base_out / split_name
     else:
         target_output_dir = base_out
+
+    resolved_cal = Path(calendar_path).resolve() if calendar_path else None
+    if resolved_cal is None and raw_path.is_dir():
+        cand = raw_path / "calendar.csv"
+        if cand.is_file():
+            resolved_cal = cand
 
     if raw_path.is_dir() and (raw_path / "data").is_dir():
         data_dir = raw_path / "data"
@@ -121,6 +138,7 @@ def ingest_split(
             biz_folder,
             output_dir=target_output_dir,
             create_views=create_views,
+            calendar_path=resolved_cal,
         )
         elapsed = time.perf_counter() - t0
         results[biz_id] = db_path

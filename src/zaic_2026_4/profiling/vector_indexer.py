@@ -17,15 +17,17 @@ from typing import Any, Protocol, runtime_checkable
 import faiss
 import numpy as np
 
-DEFAULT_MODEL_PATH = "/app/models/bge-m3"
-DEFAULT_MAX_LENGTH = 4096
-DEFAULT_BATCH_SIZE = 32
-DEFAULT_TOP_K = 10
-DEFAULT_EMBEDDING_DIM = 1024
-DEFAULT_MAX_CHUNK_CHARS = 1000
-DEFAULT_MIN_CHUNK_CHARS = 150
-DEFAULT_VLLM_GPU_MEMORY_UTILIZATION = 0.20
-MIN_TABLE_ROWS_FOR_SPLIT = 3
+from zaic_2026_4.constants import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_EMBED_GPU_UTIL,
+    DEFAULT_EMBED_MAX_LENGTH,
+    DEFAULT_EMBED_MODEL_PATH,
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_MAX_CHUNK_CHARS,
+    DEFAULT_MIN_CHUNK_CHARS,
+    DEFAULT_TOP_K,
+    MIN_TABLE_ROWS_FOR_SPLIT,
+)
 
 # Module-level in-memory cache to ensure BGE-M3 is loaded only once per process lifecycle
 _EMBEDDER_CACHE: dict[tuple[str, float, int, bool], Any] = {}
@@ -339,11 +341,11 @@ class SemanticVectorIndexer:
 
     def __init__(
         self,
-        model_path: str = DEFAULT_MODEL_PATH,
+        model_path: str = DEFAULT_EMBED_MODEL_PATH,
         embedder: Any | None = None,
         use_fp16: bool | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
-        max_length: int = DEFAULT_MAX_LENGTH,
+        max_length: int = DEFAULT_EMBED_MAX_LENGTH,
         normalize_embeddings: bool = True,
         gpu_memory_utilization: float | None = None,
         enforce_eager: bool = True,
@@ -370,7 +372,7 @@ class SemanticVectorIndexer:
             else float(
                 os.environ.get(
                     "VLLM_EMBEDDING_GPU_MEMORY_UTILIZATION",
-                    DEFAULT_VLLM_GPU_MEMORY_UTILIZATION,
+                    DEFAULT_EMBED_GPU_UTIL,
                 )
             )
         )
@@ -755,7 +757,7 @@ class SemanticVectorIndexer:
     def load(
         cls,
         target_dir: str | Path,
-        model_path: str = DEFAULT_MODEL_PATH,
+        model_path: str = DEFAULT_EMBED_MODEL_PATH,
         embedder: Any | None = None,
     ) -> SemanticVectorIndexer:
         """Load a persisted FAISS index and doc_map metadata from disk.
@@ -778,11 +780,11 @@ class SemanticVectorIndexer:
         if not doc_map_file.is_file():
             raise FileNotFoundError(f"Doc map file not found: {doc_map_file}")
 
-        max_length = DEFAULT_MAX_LENGTH
+        max_length = DEFAULT_EMBED_MAX_LENGTH
         if meta_file.is_file():
             with open(meta_file, "r", encoding="utf-8") as f:
                 meta = json.load(f)
-                max_length = meta.get("max_length", DEFAULT_MAX_LENGTH)
+                max_length = meta.get("max_length", DEFAULT_EMBED_MAX_LENGTH)
 
         indexer = cls(
             model_path=model_path,

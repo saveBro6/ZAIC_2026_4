@@ -1,13 +1,38 @@
 """Raw database profiling, Shape & Pattern recognition, and MinHash undocumented join discovery."""
 
 import json
-from pathlib import Path
-import re
 import sqlite3
+from pathlib import Path
 from typing import Any, TypedDict
 
-from datasketch import MinHash
 import polars as pl
+from datasketch import MinHash
+
+from zaic_2026_4.constants import (
+    ACCOUNTING_DASH_ZERO_REGEX,
+    ACCOUNTING_PARENTHESES_REGEX,
+    EN_DATE_ABBR_REGEX,
+    EN_DATE_FULL_REGEX,
+    EN_DATE_WEEKDAY_REGEX,
+    EXCEL_SERIAL_REGEX,
+    ISO_DATE_REGEX,
+    ISO_DATETIME_REGEX,
+    KEY_TOKENS,
+    NON_KEY_METRIC_TOKENS,
+    PLAIN_NUMBER_REGEX,
+    SCALED_BILLION_TY_REGEX,
+    SCALED_MILLION_TR_REGEX,
+    SCALED_THOUSAND_K_REGEX,
+    SLASH_DATE_REGEX,
+    SLASH_DATE_SHORT_REGEX,
+    STANDARD_THOUSAND_SEPARATOR_REGEX,
+    VIEW_FROM_REGEX,
+    VN_DATE_ABBR_REGEX,
+    VN_DATE_FULL_REGEX,
+    VN_DATE_WEEKDAY_REGEX,
+    VND_SYMBOL_REGEX,
+    VND_TEXT_REGEX,
+)
 
 
 class ColumnProfile(TypedDict):
@@ -16,7 +41,6 @@ class ColumnProfile(TypedDict):
     # Core data contract keys
     null_count: int
     distinct_count: int
-    null_ratio: float
     min_val: str | None
     max_val: str | None
     min_str_len: int | None
@@ -61,81 +85,6 @@ class DatabaseProfile(TypedDict):
     undocumented_joins: list[UndocumentedJoin]
 
 
-# Regex patterns for Excel Custom Date Taxonomy
-ISO_DATE_REGEX = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
-ISO_DATETIME_REGEX = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}[ T]\d{1,2}:\d{2}(?::\d{2})?$")
-SLASH_DATE_REGEX = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
-SLASH_DATE_SHORT_REGEX = re.compile(r"^\d{1,2}/\d{1,2}/\d{2}$")
-VN_DATE_ABBR_REGEX = re.compile(r"^\d{1,2}\s+thg\s+\d{1,2}(?:\s+\d{4})?$", re.IGNORECASE)
-EN_DATE_ABBR_REGEX = re.compile(
-    r"^\d{1,2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2,4}$",
-    re.IGNORECASE,
-)
-VN_DATE_FULL_REGEX = re.compile(
-    r"^(?:ngày\s+)?\d{1,2}\s+tháng\s+\d{1,2}(?:\s+năm\s+\d{4})?$",
-    re.IGNORECASE,
-)
-EN_DATE_FULL_REGEX = re.compile(
-    r"^(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,\s*|\s+)\d{4}$",
-    re.IGNORECASE,
-)
-VN_DATE_WEEKDAY_REGEX = re.compile(
-    r"^(?:thứ\s+(?:hai|ba|tư|bốn|năm|sáu|bảy|[2-7])|chủ\s+nhật|cn)[,\s]+\d{1,2}/\d{1,2}/\d{4}$",
-    re.IGNORECASE,
-)
-EN_DATE_WEEKDAY_REGEX = re.compile(
-    r"^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,\s]+\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}$",
-    re.IGNORECASE,
-)
-EXCEL_SERIAL_REGEX = re.compile(r"^\d{5}$")
-
-# Regex patterns for Excel Custom VNĐ Currency Taxonomy
-VND_TEXT_REGEX = re.compile(
-    r"^-?\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:vnđ|vnd)$",
-    re.IGNORECASE,
-)
-VND_SYMBOL_REGEX = re.compile(
-    r"^-?\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:₫|đ)$",
-    re.IGNORECASE,
-)
-ACCOUNTING_PARENTHESES_REGEX = re.compile(
-    r"^\(\s*\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:₫|đ|vnđ|vnd)?\s*\)$",
-    re.IGNORECASE,
-)
-ACCOUNTING_DASH_ZERO_REGEX = re.compile(
-    r"^-\s*(?:₫|đ|vnđ|vnd)?$",
-    re.IGNORECASE,
-)
-SCALED_THOUSAND_K_REGEX = re.compile(
-    r"^-?\d{1,3}(?:[,\.]\d{3})*(?:\.\d+)?\s*(?:k\s*vnđ|k\s*vnd|k)$",
-    re.IGNORECASE,
-)
-SCALED_MILLION_TR_REGEX = re.compile(
-    r"^-?\d+(?:[,\.]\d+)?\s*(?:tr\s*vnđ|tr\s*vnd|tr|triệu)$",
-    re.IGNORECASE,
-)
-SCALED_BILLION_TY_REGEX = re.compile(
-    r"^-?\d+(?:[,\.]\d+)?\s*(?:tỷ|ty)$",
-    re.IGNORECASE,
-)
-STANDARD_THOUSAND_SEPARATOR_REGEX = re.compile(r"^-?\d{1,3}(?:[,\.]\d{3})+(?:\.\d+)?$")
-PLAIN_NUMBER_REGEX = re.compile(r"^-?\d+(?:\.\d+)?$")
-
-# SQL FROM clause parser handling quoted identifiers with spaces/Vietnamese diacritics
-VIEW_FROM_REGEX = re.compile(
-    r'FROM\s+(?:\"([^\"]+)\"|\`([^\`]+)\`|\[([^\]]+)\]|([^\s,;]+))',
-    re.IGNORECASE,
-)
-
-# Token set for non-regex MinHash continuous numeric filtering
-KEY_TOKENS = frozenset({"id", "code", "stt", "key", "sku", "ref", "ma", "mã"})
-NON_KEY_METRIC_TOKENS = frozenset({
-    "tien", "tiền", "gia", "giá", "luong", "lượng", "phi", "phí",
-    "vat", "thue", "thuế", "du", "dư", "discount", "amount", "price",
-    "revenue", "cost", "total", "qty", "quantity", "count"
-})
-
-
 def _extract_name_tokens(col_name: str) -> set[str]:
     """Tokenize column name by standard whitespace and punctuation without regex."""
     cleaned = col_name.lower()
@@ -157,7 +106,9 @@ class RawDatabaseProfiler:
         jaccard_threshold: float = 0.7,
         max_sample_values: int = 10000,
         exclude_continuous_numerics: bool = True,
-        skip_calendar_table: bool = True,
+        skip_calendar_table: bool = False,
+        calendar_path: str | Path | None = None,
+        calendar_jaccard_threshold: float = 0.1,
     ) -> None:
         """Initialize the profiler with configuration options.
 
@@ -172,8 +123,9 @@ class RawDatabaseProfiler:
             max_sample_values: Maximum number of unique values to sample for MinHash and LSH.
             exclude_continuous_numerics: Whether to exclude continuous floating-point amounts
                 from MinHash Jaccard similarity to prevent false-positive joins.
-            skip_calendar_table: Whether to skip table 'calendar' if present in the database,
-                allowing it to be loaded from the split-level shared cache.
+            skip_calendar_table: Whether to skip table 'calendar' if present in the database.
+            calendar_path: Optional path to calendar.csv for direct table and join profiling.
+            calendar_jaccard_threshold: Jaccard resemblance threshold for calendar date joins.
         """
         self.db_path = Path(db_path) if db_path else Path("")
         self.num_perm = num_perm
@@ -184,6 +136,8 @@ class RawDatabaseProfiler:
         self.max_sample_values = max_sample_values
         self.exclude_continuous_numerics = exclude_continuous_numerics
         self.skip_calendar_table = skip_calendar_table
+        self.calendar_path = Path(calendar_path).resolve() if calendar_path else None
+        self.calendar_jaccard_threshold = calendar_jaccard_threshold
 
     def profile_database(self) -> DatabaseProfile:
         """Profile all tables and candidate joins in the database.
@@ -191,14 +145,21 @@ class RawDatabaseProfiler:
         Returns:
             DatabaseProfile matching downstream contract for summarizers and indexers.
         """
-        if not self.db_path.exists():
-            raise FileNotFoundError(f"Database file not found: {self.db_path}")
+        if self.db_path and self.db_path.exists():
+            conn = sqlite3.connect(self.db_path)
+            try:
+                return self._profile_with_connection(conn)
+            finally:
+                conn.close()
 
-        conn = sqlite3.connect(self.db_path)
-        try:
-            return self._profile_with_connection(conn)
-        finally:
-            conn.close()
+        if self.calendar_path and self.calendar_path.is_file():
+            cal_table, _ = self._profile_calendar_csv_file(self.calendar_path)
+            return {
+                "tables": {"calendar": cal_table},
+                "undocumented_joins": [],
+            }
+
+        raise FileNotFoundError(f"Database file not found: {self.db_path}")
 
     def _profile_with_connection(self, conn: sqlite3.Connection) -> DatabaseProfile:
         """Internal execution with an active SQLite connection."""
@@ -234,6 +195,7 @@ class RawDatabaseProfiler:
 
         # Build list of entities to profile
         targets_to_profile: list[tuple[str, str, bool, list[str]]] = []
+        has_calendar_entity = False
         for name, typ, _ in entities:
             if typ == "view":
                 if not self.include_views:
@@ -243,6 +205,8 @@ class RawDatabaseProfiler:
             elif typ == "table":
                 if self.skip_calendar_table and name.lower() == "calendar":
                     continue
+                if name.lower() == "calendar":
+                    has_calendar_entity = True
                 if name in partition_tables_to_skip:
                     continue
                 targets_to_profile.append((name, typ, False, []))
@@ -257,9 +221,48 @@ class RawDatabaseProfiler:
             db_profile["tables"][entity_name] = table_profile
             minhashes.update(table_minhashes)
 
+        # Profile calendar.csv if not in database but calendar_path is provided
+        if (
+            not has_calendar_entity
+            and not self.skip_calendar_table
+            and self.calendar_path
+            and self.calendar_path.is_file()
+        ):
+            cal_table_profile, cal_minhashes = self._profile_calendar_csv_file(self.calendar_path)
+            db_profile["tables"]["calendar"] = cal_table_profile
+            minhashes.update(cal_minhashes)
+
         # Detect undocumented joins via MinHash Jaccard similarity
         db_profile["undocumented_joins"] = self._detect_undocumented_joins(minhashes)
         return db_profile
+
+    def _profile_calendar_csv_file(
+        self, path: Path
+    ) -> tuple[TableProfile, dict[str, MinHash]]:
+        """Profile split-level calendar.csv directly using Polars lazy evaluation."""
+        q = pl.scan_csv(str(path))
+        df = q.collect()
+        row_count = df.height
+
+        table_profile: TableProfile = {
+            "row_count": row_count,
+            "is_view": False,
+            "is_unified_view": False,
+            "source_tables": [],
+            "columns": {},
+            "note": "Split-level shared Solar-Lunar calendar lookup table.",
+        }
+        cal_minhashes: dict[str, MinHash] = {}
+
+        for col in df.columns:
+            col_prof, mhash = self._profile_single_column(
+                df[col], col, row_count, "calendar"
+            )
+            table_profile["columns"][col] = col_prof
+            if mhash is not None:
+                cal_minhashes[f"calendar.{col}"] = mhash
+
+        return table_profile, cal_minhashes
 
     def _profile_single_entity(
         self,
@@ -274,7 +277,7 @@ class RawDatabaseProfiler:
             df = pl.read_database(
                 f'SELECT * FROM "{entity_name}"', conn, infer_schema_length=None
             )
-        except Exception:
+        except (sqlite3.Error, pl.exceptions.PolarsError, TypeError, ValueError):
             # Fallback to cursor fetch with string schema for heterogeneous SQLite columns
             cur = conn.cursor()
             cur.execute(f'SELECT * FROM "{entity_name}"')
@@ -326,7 +329,6 @@ class RawDatabaseProfiler:
     ) -> tuple[ColumnProfile, MinHash | None]:
         """Profile a single column's statistical properties and MinHash sketch."""
         null_count = int(series_raw.null_count())
-        null_ratio = round(null_count / total_rows, 4) if total_rows > 0 else 0.0
 
         non_null_raw = series_raw.drop_nulls()
         non_null_len = non_null_raw.len()
@@ -335,7 +337,6 @@ class RawDatabaseProfiler:
             empty_profile: ColumnProfile = {
                 "null_count": null_count,
                 "distinct_count": 0,
-                "null_ratio": null_ratio,
                 "min_val": None,
                 "max_val": None,
                 "min_str_len": None,
@@ -356,30 +357,6 @@ class RawDatabaseProfiler:
         # Cast non-null series to string for universal length and sample profiling
         series_str = non_null_raw.cast(pl.String)
         distinct_count = int(series_str.n_unique())
-
-        # Compute typed min/max to avoid lexicographical inversion for numbers/dates
-        if non_null_raw.dtype.is_numeric() or non_null_raw.dtype in (
-            pl.Date,
-            pl.Datetime,
-            pl.Time,
-            pl.Duration,
-        ):
-            min_val = str(non_null_raw.min())
-            max_val = str(non_null_raw.max())
-        else:
-            first_val = series_str[0]
-            first_val_clean = first_val.lstrip("-").strip() if first_val else ""
-            if first_val_clean and (first_val_clean.isdigit() or first_val_clean.replace(".", "", 1).isdigit()):
-                try:
-                    num_series = non_null_raw.cast(pl.Float64)
-                    min_val = str(num_series.min())
-                    max_val = str(num_series.max())
-                except Exception:
-                    min_val = str(series_str.min())
-                    max_val = str(series_str.max())
-            else:
-                min_val = str(series_str.min())
-                max_val = str(series_str.max())
 
         # String length bounds
         char_lens = series_str.str.len_chars()
@@ -403,13 +380,23 @@ class RawDatabaseProfiler:
 
         # Shape & pattern recognition on head sample
         shape_info = self._infer_format_and_pattern(
-            series_raw.dtype, series_str.head(50), is_fixed_length, is_free_text
+            series_raw.dtype,
+            series_str.head(50),
+            is_fixed_length,
+            is_free_text,
+            col_name=col_name,
+        )
+
+        # Compute typed and format-aware min/max to avoid lexicographical inversion for numbers/currency/dates
+        min_val, max_val = self._compute_column_min_max(
+            non_null_raw=non_null_raw,
+            series_str=series_str,
+            shape_info=shape_info,
         )
 
         col_profile: ColumnProfile = {
             "null_count": null_count,
             "distinct_count": distinct_count,
-            "null_ratio": null_ratio,
             "min_val": min_val,
             "max_val": max_val,
             "min_str_len": min_str_len,
@@ -432,9 +419,23 @@ class RawDatabaseProfiler:
             series_raw.dtype, col_name, shape_info["data_format"], distinct_count, total_rows
         ):
             minhash_obj = MinHash(num_perm=self.num_perm)
-            for val in unique_samples:
-                if len(val.strip()) > 0:
-                    minhash_obj.update(val.encode("utf-8"))
+            date_subtype = shape_info.get("date_subtype")
+            if (
+                date_subtype
+                or shape_info.get("data_format") in ("DATE", "ISO_DATE", "ISO_DATETIME", "EXCEL_SERIAL")
+                or any(k in col_name.lower() for k in ("ngay", "ngày", "date", "thoi_gian"))
+            ):
+                parsed_series = self._parse_date_series_to_iso(
+                    pl.Series("s", unique_samples, dtype=pl.String),
+                    date_subtype=date_subtype,
+                )
+                for val in parsed_series.to_list():
+                    if val is not None and len(str(val).strip()) > 0:
+                        minhash_obj.update(str(val).strip().encode("utf-8"))
+            else:
+                for val in unique_samples:
+                    if len(val.strip()) > 0:
+                        minhash_obj.update(val.encode("utf-8"))
 
         return col_profile, minhash_obj
 
@@ -444,6 +445,7 @@ class RawDatabaseProfiler:
         sample_head: pl.Series,
         is_fixed_length: bool,
         is_free_text: bool,
+        col_name: str = "",
     ) -> dict[str, Any]:
         """Recognize data format, date/currency subtypes, and actionable hints."""
         result: dict[str, Any] = {
@@ -491,7 +493,7 @@ class RawDatabaseProfiler:
                     if not isinstance(parsed, (dict, list)):
                         is_valid_json = False
                         break
-                except Exception:
+                except (json.JSONDecodeError, TypeError, ValueError):
                     is_valid_json = False
                     break
             if is_valid_json:
@@ -501,31 +503,33 @@ class RawDatabaseProfiler:
                 return result
 
         # 3. Excel Custom Date Engine
-        date_subtypes_found = self._check_date_patterns(samples)
+        date_subtypes_found = self._check_date_patterns(samples, col_name=col_name)
         if date_subtypes_found:
             if len(date_subtypes_found) == 1:
-                single_subtype = list(date_subtypes_found)[0]
+                single_subtype = next(iter(date_subtypes_found))
                 result["date_subtype"] = single_subtype
                 if single_subtype in ("ISO_DATE", "ISO_DATETIME"):
                     result["data_format"] = single_subtype
                     result["llm_hint"] = "Standard ISO Date string. Perform direct string comparisons: WHERE col >= 'YYYY-MM-DD'."
                 elif single_subtype == "EXCEL_SERIAL":
                     result["data_format"] = "EXCEL_SERIAL"
-                    result["llm_hint"] = "Contains Excel numeric serials (e.g. 45717 -> 2025-03-01). Convert via (julianday('1899-12-30') + CAST(col AS REAL)) or pd.to_datetime(col, unit='D', origin='1899-12-30')."
+                    result["llm_hint"] = "Excel date serials. Convert via date(julianday('1899-12-30') + CAST(col AS REAL))."
                 elif single_subtype == "VN_DATE_ABBR":
                     result["data_format"] = "VN_DATE_ABBR"
-                    result["llm_hint"] = "Vietnamese abbreviated date ('d thg m yyyy'). Normalize 'thg ' to month number before temporal queries."
+                    result["llm_hint"] = "Vietnamese date ('d thg m yyyy'). Filter via LIKE '%thg M YYYY%' or match against calendar.csv."
                 elif single_subtype == "SLASH_DATE":
                     result["data_format"] = "SLASH_DATE"
-                    result["llm_hint"] = "Vietnamese DD/MM/YYYY date. Convert to YYYY-MM-DD for standard SQLite comparisons."
+                    result["llm_hint"] = "Vietnamese date (D/M/YYYY). Filter month/year via LIKE '%/M/YYYY' (e.g. LIKE '%/9/2025') or exact date string."
                 else:
                     result["data_format"] = "DATE"
-                    result["llm_hint"] = f"Custom date format ({single_subtype}). Parse or normalize before temporal comparisons."
+                    result["llm_hint"] = f"Custom date format ({single_subtype}). Filter via LIKE or date comparisons."
             else:
                 result["data_format"] = "DATE_MIXED"
                 subtypes_str = ", ".join(sorted(date_subtypes_found))
                 result["date_subtype"] = subtypes_str
-                result["llm_hint"] = f"Mixed date representations detected ({subtypes_str}). Normalize using Excel epoch (1899-12-30) and date parser before querying."
+                result["llm_hint"] = (
+                    f"Mixed date representations ({subtypes_str}). Filter via LIKE '%/YYYY' or date(julianday('1899-12-30') + CAST(col AS REAL))."
+                )
             return result
 
         # 4. Excel Custom VNĐ Currency Engine
@@ -552,10 +556,11 @@ class RawDatabaseProfiler:
             result["llm_hint"] = "Fixed-length identifier or code. Prioritize exact equality comparisons (= 'code')."
         else:
             result["data_format"] = "STRING"
+            result["llm_hint"] = "Text column. Prioritize exact match (= 'value') or partial match (LIKE '%keyword%')."
 
         return result
 
-    def _check_date_patterns(self, samples: list[str]) -> set[str]:
+    def _check_date_patterns(self, samples: list[str], col_name: str = "") -> set[str]:
         """Check sample values against Excel Custom Date taxonomy."""
         subtypes: set[str] = set()
         match_count = 0
@@ -583,10 +588,14 @@ class RawDatabaseProfiler:
             elif EN_DATE_WEEKDAY_REGEX.match(val):
                 subtypes.add("EN_DATE_WEEKDAY")
             elif EXCEL_SERIAL_REGEX.match(val):
-                int_v = int(val)
-                # Valid Excel serial range for years 2000 to 2050 (36526 to 55153)
-                if 36526 <= int_v <= 55153:
-                    subtypes.add("EXCEL_SERIAL")
+                col_tokens = _extract_name_tokens(col_name) if col_name else set()
+                if not (col_tokens & NON_KEY_METRIC_TOKENS):
+                    int_v = int(float(val))
+                    # Valid Excel serial range for years 2000 to 2050 (36526 to 55153)
+                    if 36526 <= int_v <= 55153:
+                        subtypes.add("EXCEL_SERIAL")
+                    else:
+                        matched = False
                 else:
                     matched = False
             else:
@@ -652,40 +661,218 @@ class RawDatabaseProfiler:
             return (
                 "ACCOUNTING_PARENTHESES",
                 -1.0,
-                "Accounting negative currency format '(val)'. Must convert to negative: CASE WHEN col LIKE '(%)' THEN -CAST(REPLACE(REPLACE(REPLACE(REPLACE(col, '(', ''), ')', ''), ',', ''), ' ₫', '') AS NUMERIC) ELSE CAST(REPLACE(col, ',', '') AS NUMERIC) END.",
+                "Accounting negative currency format '(val)'. Clean and negate: CASE WHEN col LIKE '(%)' THEN -CAST(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(col, '(', ''), ')', ''), 'đ', ''), '.', ''), ',', '') AS NUMERIC) ELSE CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS NUMERIC) END.",
             )
         if selected_subtype == "ACCOUNTING_DASH_ZERO":
             return (
                 "ACCOUNTING_DASH_ZERO",
                 0.0,
-                "Accounting zero currency format '-'. Map dash entries to 0: CASE WHEN col LIKE '-%' THEN 0 ELSE CAST(col AS NUMERIC) END.",
+                "Accounting zero currency format '-'. Map dash entries to 0: CASE WHEN col LIKE '-%' THEN 0 ELSE CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS NUMERIC) END.",
             )
-        if selected_subtype == "SCALED_BILLION_TY":
+        if selected_subtype in ("SCALED_BILLION_TY", "SCALED_MILLION_TR", "SCALED_THOUSAND_K"):
+            scale_map = {
+                "SCALED_BILLION_TY": 1000000000.0,
+                "SCALED_MILLION_TR": 1000000.0,
+                "SCALED_THOUSAND_K": 1000.0,
+            }
             return (
-                "SCALED_BILLION_TY",
-                1000000000.0,
-                "Amounts scaled in Billions (tỷ). Multiply by 1,000,000,000 for actual VND amounts: CAST(REPLACE(REPLACE(col, ' tỷ', ''), ',', '.') AS REAL) * 1000000000.",
-            )
-        if selected_subtype == "SCALED_MILLION_TR":
-            return (
-                "SCALED_MILLION_TR",
-                1000000.0,
-                "Amounts scaled in Millions (tr VNĐ). Multiply by 1,000,000 for actual VND amounts: CAST(REPLACE(REPLACE(col, ' tr VNĐ', ''), ',', '.') AS REAL) * 1000000.",
-            )
-        if selected_subtype == "SCALED_THOUSAND_K":
-            return (
-                "SCALED_THOUSAND_K",
-                1000.0,
-                "Amounts scaled in Thousands (k VNĐ). Multiply by 1,000 for actual VND amounts: CAST(REPLACE(REPLACE(col, ' k VNĐ', ''), ',', '') AS NUMERIC) * 1000.",
+                selected_subtype,
+                scale_map[selected_subtype],
+                (
+                    "Scaled currency (tr/k/tỷ). Clean and scale: "
+                    "CASE WHEN col LIKE '%tr%' THEN CAST(REPLACE(REPLACE(col, 'tr', '.'), ',', '') AS REAL) * 1000000 "
+                    "WHEN col LIKE '%k%' THEN CAST(REPLACE(col, 'k', '') AS REAL) * 1000 "
+                    "ELSE CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS REAL) END."
+                ),
             )
         if selected_subtype in ("VND_TEXT", "VND_SYMBOL", "THOUSAND_SEPARATOR"):
             return (
                 selected_subtype,
                 1.0,
-                "Formatted VND currency. Clean thousand separators before aggregations: CAST(REPLACE(REPLACE(REPLACE(col, ' VNĐ', ''), ' ₫', ''), ',', '') AS INTEGER).",
+                "Formatted VND currency (e.g. '25.000đ'). Clean symbols and separators: CAST(REPLACE(REPLACE(REPLACE(col, 'đ', ''), '.', ''), ',', '') AS INTEGER).",
             )
 
         return None, None, None
+
+    def _compute_column_min_max(
+        self,
+        non_null_raw: pl.Series,
+        series_str: pl.Series,
+        shape_info: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        """Compute typed and format-aware min and max values to avoid lexicographical inversion."""
+        if len(non_null_raw) == 0:
+            return None, None
+
+        # 1. Native numeric and date/time types
+        if non_null_raw.dtype.is_numeric() or non_null_raw.dtype in (
+            pl.Date,
+            pl.Datetime,
+            pl.Time,
+            pl.Duration,
+        ):
+            return str(non_null_raw.min()), str(non_null_raw.max())
+
+        # 2. Formatted currency and scaled numbers
+        if (
+            shape_info.get("data_format") == "CURRENCY"
+            or shape_info.get("currency_subtype") is not None
+        ):
+            parsed_num = self._parse_currency_series(
+                series_str,
+                subtype=shape_info.get("currency_subtype"),
+                scale=shape_info.get("currency_scale_multiplier"),
+            )
+            if parsed_num.null_count() < len(series_str):
+                min_idx = parsed_num.arg_min()
+                max_idx = parsed_num.arg_max()
+                if min_idx is not None and max_idx is not None:
+                    return str(series_str[min_idx]), str(series_str[max_idx])
+
+        # 3. Numeric strings (plain or with thousand separators)
+        df_clean = pl.select(
+            num=pl.lit(series_str)
+            .str.replace_all(r"\s", "")
+            .str.replace_all(",", "")
+            .cast(pl.Float64, strict=False)
+        )
+        parsed_plain = df_clean["num"]
+        if parsed_plain.null_count() <= len(series_str) * 0.3:
+            min_idx = parsed_plain.arg_min()
+            max_idx = parsed_plain.arg_max()
+            if min_idx is not None and max_idx is not None:
+                return str(series_str[min_idx]), str(series_str[max_idx])
+
+        # 4. Dates formatted as strings (SLASH_DATE, VN_DATE_ABBR)
+        date_subtype = shape_info.get("date_subtype")
+        if date_subtype in ("SLASH_DATE", "SLASH_DATE_SHORT", "VN_DATE_ABBR"):
+            parsed_dates = self._parse_date_series_to_iso(series_str, date_subtype)
+            if parsed_dates.null_count() <= len(series_str) * 0.3:
+                min_idx = parsed_dates.arg_min()
+                max_idx = parsed_dates.arg_max()
+                if min_idx is not None and max_idx is not None:
+                    return str(series_str[min_idx]), str(series_str[max_idx])
+
+        # 5. Fallback: string lexicographical min/max
+        return str(series_str.min()), str(series_str.max())
+
+    @staticmethod
+    def _parse_currency_series(
+        series_str: pl.Series,
+        subtype: str | None = None,
+        scale: float | None = None,
+    ) -> pl.Series:
+        """Parse currency string series to float values using Polars expressions."""
+        if subtype == "ACCOUNTING_PARENTHESES":
+            return pl.select(
+                clean=pl.lit(series_str)
+                .str.replace_all(r"(?i)[()đvnđvnd\s]", "")
+                .str.replace_all(r"[,.]", "")
+                .cast(pl.Float64, strict=False),
+                is_paren=pl.lit(series_str).str.starts_with("(")
+                & pl.lit(series_str).str.ends_with(")"),
+            ).select(
+                num=pl.when(pl.col("is_paren"))
+                .then(-pl.col("clean"))
+                .otherwise(pl.col("clean"))
+            )["num"]
+
+        if subtype == "ACCOUNTING_DASH_ZERO":
+            return pl.select(
+                clean=pl.lit(series_str).str.replace_all(r"\s", ""),
+            ).select(
+                num=pl.when(pl.col("clean") == "-")
+                .then(0.0)
+                .otherwise(
+                    pl.col("clean")
+                    .str.replace_all(r"(?i)[đvnđvnd\s]", "")
+                    .str.replace_all(r"[,.]", "")
+                    .cast(pl.Float64, strict=False)
+                )
+            )["num"]
+
+        if subtype in ("SCALED_BILLION_TY", "SCALED_MILLION_TR", "SCALED_THOUSAND_K"):
+            multiplier = scale if scale is not None else 1.0
+            return pl.select(
+                num=pl.lit(series_str)
+                .str.replace_all(r"(?i)[tỷtytrtriệutrieuknghìnnghinngànnganđvnđvnd\s]", "")
+                .str.replace_all(",", ".")
+                .cast(pl.Float64, strict=False)
+                * multiplier
+            )["num"]
+
+        # Default currency / thousand separator (VND_TEXT, VND_SYMBOL, THOUSAND_SEPARATOR)
+        return pl.select(
+            num=pl.lit(series_str)
+            .str.replace_all(r"(?i)[đvnđvnd\s]", "")
+            .str.replace_all(r"[,.]", "")
+            .cast(pl.Float64, strict=False)
+        )["num"]
+
+    @staticmethod
+    def _parse_date_series_to_iso(
+        series_str: pl.Series,
+        date_subtype: str | None = None,
+    ) -> pl.Series:
+        """Parse formatted dates into sortable ISO YYYY-MM-DD string series, stripping any time parts."""
+        df = pl.DataFrame({"s": series_str.cast(pl.String, strict=False)})
+
+        if date_subtype == "EXCEL_SERIAL":
+            days = pl.col("s").cast(pl.Float64, strict=False).floor().cast(pl.Int64, strict=False)
+            base = pl.lit("1899-12-30").str.to_date("%Y-%m-%d")
+            return df.select(
+                iso=(base + pl.duration(days=days)).dt.to_string("%Y-%m-%d")
+            )["iso"]
+
+        slash = df.select(
+            parts=pl.col("s").str.extract_groups(
+                r"^(?P<day>\d{1,2})/(?P<month>\d{1,2})/(?P<year>\d{2,4})"
+            )
+        ).unnest("parts").select(
+            iso=pl.concat_str(
+                [
+                    pl.when(pl.col("year").str.len_chars() == 2)
+                    .then(pl.concat_str([pl.lit("20"), pl.col("year")]))
+                    .otherwise(pl.col("year")),
+                    pl.col("month").str.zfill(2),
+                    pl.col("day").str.zfill(2),
+                ],
+                separator="-",
+            )
+        )["iso"]
+
+        iso = df.select(
+            parts=pl.col("s").str.extract_groups(
+                r"^(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})"
+            )
+        ).unnest("parts").select(
+            iso=pl.concat_str(
+                [
+                    pl.col("year"),
+                    pl.col("month").str.zfill(2),
+                    pl.col("day").str.zfill(2),
+                ],
+                separator="-",
+            )
+        )["iso"]
+
+        vn = df.select(
+            parts=pl.col("s").str.extract_groups(
+                r"^(?P<day>\d{1,2})\s*thg\s*(?P<month>\d{1,2})\s*(?P<year>\d{4})"
+            )
+        ).unnest("parts").select(
+            iso=pl.concat_str(
+                [
+                    pl.col("year"),
+                    pl.col("month").str.zfill(2),
+                    pl.col("day").str.zfill(2),
+                ],
+                separator="-",
+            )
+        )["iso"]
+
+        coalesced = pl.coalesce([slash, iso, vn, pl.col("s")])
+        return df.select(res=coalesced)["res"]
 
     def _is_eligible_for_minhash(
         self,
@@ -742,7 +929,20 @@ class RawDatabaseProfiler:
                         continue
 
                 score = float(minhashes[k1].jaccard(minhashes[k2]))
-                if score >= self.jaccard_threshold:
+                is_calendar_date_join = (
+                    "calendar.date" in (k1, k2)
+                    or (
+                        (k1.startswith("calendar.") or k2.startswith("calendar."))
+                        and any("date" in k.lower() or "ngay" in k.lower() for k in (k1, k2))
+                    )
+                )
+                threshold = (
+                    self.calendar_jaccard_threshold
+                    if is_calendar_date_join
+                    else self.jaccard_threshold
+                )
+
+                if score >= threshold:
                     undocumented_joins.append(
                         {
                             "col1": k1,

@@ -10,6 +10,8 @@ Verifies:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -283,6 +285,51 @@ def test_context_builder_5_variants(
     assert "<business_readme>" in variants[4].formatted_prompt
 
 
+def test_parse_case_spec() -> None:
+    """Verify parsing and validation of case specification strings and collections."""
+    from zaic_2026_4.schema_linking.context_builder import parse_case_spec
+
+    assert parse_case_spec(None) == ["a", "b", "c", "d", "e"]
+    assert parse_case_spec("") == ["a", "b", "c", "d", "e"]
+    assert parse_case_spec("abcde") == ["a", "b", "c", "d", "e"]
+    assert parse_case_spec("abce") == ["a", "b", "c", "e"]
+    assert parse_case_spec("case_a, case_b, case_e") == ["a", "b", "e"]
+    assert parse_case_spec("a;c;e") == ["a", "c", "e"]
+    assert parse_case_spec(["a", "b", "e"]) == ["a", "b", "e"]
+    assert parse_case_spec("ABCE") == ["a", "b", "c", "e"]
+
+    # Deduplication and order preservation
+    assert parse_case_spec("aabcee") == ["a", "b", "c", "e"]
+
+    # Invalid input
+    import pytest
+    with pytest.raises(ValueError, match="Invalid cases specification"):
+        parse_case_spec("xyz")
+
+
+def test_context_builder_subset_variants(
+    sample_metadata: dict[str, Any],
+    sample_lsh_indexer: VietnameseLSHIndexer,
+    sample_vector_indexer: SemanticVectorIndexer,
+) -> None:
+    """Verify building only a specified subset of variants (e.g. abce)."""
+    builder = SchemaContextBuilder()
+    question = "List the zip code of all charter schools in Fresno"
+
+    variants = builder.build_5_variants(
+        question=question,
+        processed_metadata=sample_metadata,
+        lsh_indexer=sample_lsh_indexer,
+        vector_indexer=sample_vector_indexer,
+        cases="abce",
+    )
+
+    assert len(variants) == 4
+    case_names = [v.case_name for v in variants]
+    assert case_names == ["case_a", "case_b", "case_c", "case_e"]
+    assert "case_d" not in case_names
+
+
 # ---------------------------------------------------------------------------
 # Test Checklist 3 & 4: Paper Benchmark & Re-prompting Loop (Fresno Example)
 # ---------------------------------------------------------------------------
@@ -353,6 +400,87 @@ def test_preserve_linking_keys(
     # Undocumented join (frpm.CDSCode <-> schools.CDSCode) must be preserved
     assert "frpm.CDSCode" in extended
     assert "schools.CDSCode" in extended
+
+
+def test_is_candidate_key_column() -> None:
+    """Verify detection of various English and Vietnamese primary/foreign key conventions."""
+    is_key = TaskAlignedSchemaLinker.is_candidate_key_column
+
+    # English key formats
+    assert is_key("id", "orders") is True
+    assert is_key("order_id", "orders") is True
+    assert is_key("CustomerID", "customers") is True
+    assert is_key("CDSCode", "schools") is True
+    assert is_key("code", "products") is True
+
+    # Vietnamese key formats (with accents, mixed cases, spaces, abbreviations)
+    assert is_key("Mã hóa đơn", "ban_hang") is True
+    assert is_key("Mã KH", "khach_hang") is True
+    assert is_key("Mã SP", "san_pham") is True
+    assert is_key("Mã phiếu thu", "thu_chi") is True
+    assert is_key("Mã barcode", "san_pham") is True
+    assert is_key("Ma don", "don_hang") is True
+    assert is_key("Số HĐ", "hoa_don") is True
+    assert is_key("Số CT", "chung_tu") is True
+    assert is_key("Số phiếu", "phieu_xuat") is True
+    assert is_key("Số KH", "khach_hang") is True
+
+    # Non-key fields (measures, phone numbers, descriptive text, notes, boolean flags ending in 'id')
+    assert is_key("is_paid", "invoices") is False
+    assert is_key("paid", "orders") is False
+    assert is_key("valid", "tokens") is False
+    assert is_key("is_valid", "users") is False
+    assert is_key("grid", "layout") is False
+    assert is_key("mid", "audio") is False
+    assert is_key("solid", "geometry") is False
+    assert is_key("idea", "notes") is False
+    assert is_key("idle", "status") is False
+    assert is_key("Số lượng lẻ", "ban_hang") is False
+    assert is_key("Số lượng", "ban_hang") is False
+    assert is_key("Số điện thoại", "khach_hang") is False
+    assert is_key("Mẫu ghi chú", "ban_hang") is False
+    assert is_key("Thanh tien", "ban_hang") is False
+    assert is_key("Giá bán", "ban_hang") is False
+    assert is_key("Đối tác", "ban_hang") is False
+
+
+def test_preserve_vietnamese_primary_keys() -> None:
+    """Verify automatic preservation of Vietnamese primary keys for referenced tables."""
+    linker = TaskAlignedSchemaLinker(llm_engine=MockLLMEngine())
+    raw_profile = {
+        "tables": {
+            "ban_hang": {
+                "columns": {
+                    "Mã hóa đơn": {},
+                    "Ngày tháng": {},
+                    "Số lượng lẻ": {},
+                    "Thanh tien": {},
+                    "Mẫu ghi chú": {},
+                }
+            }
+        }
+    }
+    metadata = {
+        "ban_hang.Mã hóa đơn": {"data_format": "STRING"},
+        "ban_hang.Ngày tháng": {"data_format": "DATE"},
+        "ban_hang.Số lượng lẻ": {"data_format": "INTEGER"},
+        "ban_hang.Thanh tien": {"data_format": "INTEGER"},
+        "ban_hang.Mẫu ghi chú": {"data_format": "STRING"},
+    }
+
+    # Only 'Thanh tien' harvested initially
+    harvested = {"ban_hang.Thanh tien"}
+    extended = linker.preserve_linking_keys(
+        linked_fields=harvested,
+        raw_profile=raw_profile,
+        processed_metadata=metadata,
+    )
+
+    # 'Mã hóa đơn' must be preserved as table PK
+    assert "ban_hang.Mã hóa đơn" in extended
+    # Non-key metrics and text should NOT be preserved
+    assert "ban_hang.Số lượng lẻ" not in extended
+    assert "ban_hang.Mẫu ghi chú" not in extended
 
 
 def test_functional_task_aligned_schema_linking(
@@ -491,3 +619,45 @@ def test_schema_post_processor_multi_table_resolution() -> None:
     assert '<table name="ban_hang">' in xml_output
     assert '<table name="khach_hang">' in xml_output
     assert '<column name="Tên khách"' in xml_output
+
+
+def test_schema_linking_auto_save_cache(
+    sample_metadata: dict[str, Any],
+    sample_lsh_indexer: Any,
+    sample_vector_indexer: Any,
+    sample_raw_profile: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    from zaic_2026_4.schema_linking.task_aligned_linker import TaskAlignedSchemaLinker
+
+    linker = TaskAlignedSchemaLinker(
+        llm_engine=MockLLMEngine(),
+        max_retries=1,
+    )
+
+    question = "List the zip code of all charter schools in Fresno"
+    cache_dir = tmp_path / "cache_test"
+
+    result = linker.link_schema(
+        question=question,
+        processed_metadata=sample_metadata,
+        lsh_indexer=sample_lsh_indexer,
+        vector_indexer=sample_vector_indexer,
+        raw_profile=sample_raw_profile,
+        cache_dir=cache_dir,
+        question_id="q_123",
+    )
+    assert result.final_linked_schema is not None
+
+    res_file = cache_dir / "schema_linking_result.json"
+    assert res_file.is_file()
+
+    data = json.loads(res_file.read_text(encoding="utf-8"))
+    assert "final_linked_schema" in data
+    assert "variant_traces" in data
+    assert data["question"] == question
+    assert data["question_id"] == "q_123"
+
+    per_q_file = cache_dir / "schema_linking_result_q_123.json"
+    assert per_q_file.is_file()
+

@@ -1,18 +1,20 @@
 """Vietnamese-aware Locality Sensitive Hashing (LSH) value indexer for fast literal matching."""
 
-from collections.abc import Iterable
-from pathlib import Path
 import pickle
 import unicodedata
+from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from datasketch import MinHash, MinHashLSH
 from unidecode import unidecode
 
-DEFAULT_NUM_PERM = 128
-DEFAULT_THRESHOLD = 0.4
-DEFAULT_SHINGLE_K = 3
-DEFAULT_MAX_SAMPLE_VALUES = 10000
+from zaic_2026_4.constants import (
+    DEFAULT_MAX_SAMPLE_VALUES,
+    DEFAULT_NUM_PERM,
+    DEFAULT_SHINGLE_K,
+    DEFAULT_THRESHOLD,
+)
 
 
 def compute_minhash(

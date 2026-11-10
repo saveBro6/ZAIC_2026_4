@@ -23,9 +23,7 @@ from zaic_2026_4.profiling.profile_summarizer import (
 )
 from zaic_2026_4.profiling.raw_profiler import RawDatabaseProfiler
 from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_MODEL_PATH as DEFAULT_VECTOR_MODEL_PATH,
-)
-from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_EMBED_MODEL_PATH,
     MockEmbedder,
     SemanticVectorIndexer,
 )
@@ -42,10 +40,10 @@ class ProfilingOrchestrator:
         rulebook_path: str | Path,
         llm_engine: LLMEngineProtocol | Any,
         embedder: Any | None = None,
-        vector_model_path: str = DEFAULT_VECTOR_MODEL_PATH,
+        vector_model_path: str = DEFAULT_EMBED_MODEL_PATH,
         cache_dir: str | Path | None = None,
         calendar_path: str | Path | None = None,
-        calendar_cache_path: str | Path = "/tmp/calendar_profile.json",
+        calendar_cache_path: str | Path | None = None,
     ) -> None:
         """Initialize ProfilingOrchestrator.
 
@@ -57,7 +55,7 @@ class ProfilingOrchestrator:
             vector_model_path: Path to embedding model (defaults to /app/models/bge-m3).
             cache_dir: Cache directory for metadata and indexes (defaults to /tmp/cache_<biz_id>).
             calendar_path: Optional path to calendar.csv file. Auto-discovered if omitted.
-            calendar_cache_path: Path to shared split-level calendar cache JSON (default: /tmp/calendar_profile.json).
+            calendar_cache_path: Optional calendar cache path retained for backward compatibility.
         """
         self.business_dir = Path(business_dir).resolve()
         self.rulebook_path = Path(rulebook_path).resolve()
@@ -65,7 +63,11 @@ class ProfilingOrchestrator:
         self.embedder = embedder
         self.vector_model_path = vector_model_path
         self.calendar_path = Path(calendar_path).resolve() if calendar_path else None
-        self.calendar_cache_path = Path(calendar_cache_path).resolve()
+        self.calendar_cache_path = (
+            Path(calendar_cache_path).resolve()
+            if calendar_cache_path
+            else None
+        )
 
         if cache_dir is not None:
             self.cache_dir = Path(cache_dir).resolve()
@@ -134,13 +136,18 @@ class ProfilingOrchestrator:
         cached_db_path = self.cache_dir / f"{biz_name}.db"
 
         # 1. Reuse existing converted DB in cache if present
+        resolved_cal = self._resolve_calendar_path()
         if cached_db_path.is_file():
             self.db_path = cached_db_path
+            if resolved_cal and resolved_cal.is_file():
+                self._ensure_calendar_table_in_db(cached_db_path, resolved_cal)
             return str(cached_db_path)
 
         cached_split_dbs = list(self.cache_dir.rglob(f"{biz_name}.db"))
         if cached_split_dbs and cached_split_dbs[0].is_file():
             self.db_path = cached_split_dbs[0]
+            if resolved_cal and resolved_cal.is_file():
+                self._ensure_calendar_table_in_db(self.db_path, resolved_cal)
             return str(self.db_path)
 
         # 2. Check if business_dir contains pre-existing .sqlite or .db file
@@ -157,6 +164,8 @@ class ProfilingOrchestrator:
             if sqlite_files and not tabular_files:
                 # Standalone SQLite database (e.g. biz_123/pos.sqlite)
                 self.db_path = sqlite_files[0]
+                if resolved_cal and resolved_cal.is_file():
+                    self._ensure_calendar_table_in_db(self.db_path, resolved_cal)
                 return str(self.db_path)
 
         # 3. Convert CSV/XLSX (or mixed data) into temporary SQLite database in cache_dir
@@ -164,18 +173,39 @@ class ProfilingOrchestrator:
             business_dir=self.business_dir,
             output_dir=self.cache_dir,
             create_views=True,
+            calendar_path=resolved_cal,
         )
         self.db_path = Path(created_db_path)
         return str(self.db_path)
 
-    def run_pipeline(self, force_rebuild: bool = False) -> dict[str, Any]:
-        """Execute the profiling and indexing pipeline with multi-tier caching.
+    def _ensure_calendar_table_in_db(self, db_file: Path, cal_file: Path) -> None:
+        """Ensure calendar table exists in SQLite database file."""
+        import sqlite3
+        conn = sqlite3.connect(db_file)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='calendar' LIMIT 1;")
+            if cur.fetchone() is None:
+                from zaic_2026_4.ingestion.extractors import extract_csv
+                from zaic_2026_4.ingestion.sqlite_sink import polars_type_to_sqlite
+                cal_df = extract_csv(cal_file).get("calendar")
+                if cal_df is not None and cal_df.height > 0:
+                    col_defs = [f'"{c}" {polars_type_to_sqlite(dt)}' for c, dt in zip(cal_df.columns, cal_df.dtypes, strict=False)]
+                    cur.execute(f'CREATE TABLE IF NOT EXISTS "calendar" ({", ".join(col_defs)});')
+                    placeholders = ", ".join(["?"] * len(cal_df.columns))
+                    cur.executemany(f'INSERT INTO "calendar" VALUES ({placeholders})', cal_df.iter_rows())
+                    conn.commit()
+        finally:
+            conn.close()
+
+    def run_pipeline(self, force_rebuild: bool = False, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Execute the profiling and indexing pipeline freshly for this business.
 
         Args:
-            force_rebuild: If True, ignore existing cached artifacts and re-run all steps.
+            force_rebuild: If True, regenerates all artifacts even if cached on disk.
 
         Returns:
-            Dictionary with keys 'metadata', 'lsh_indexer', 'vector_indexer'.
+            Dictionary with keys 'metadata', 'raw_profile', 'lsh_indexer', 'vector_indexer'.
         """
         if not force_rebuild and self._pipeline_result is not None:
             return self._pipeline_result
@@ -184,94 +214,90 @@ class ProfilingOrchestrator:
         lsh_cache_path = self.cache_dir / "lsh_index.pkl"
         faiss_cache_dir = self.cache_dir / "faiss_index"
 
-        # Step 1 & 2: Metadata Profiling (Cache check or execute Raw Profiler + LLM Summarizer)
-        if not force_rebuild and profile_json_path.is_file():
+        # Step 1 & 2: Metadata Profiling (Disk cache reload when available)
+        if (
+            not force_rebuild
+            and profile_json_path.is_file()
+            and lsh_cache_path.is_file()
+            and faiss_cache_dir.is_dir()
+        ):
             with open(profile_json_path, "r", encoding="utf-8") as f:
                 processed_metadata = json.load(f)
-        else:
-            db_path = self._get_db_path()
 
-            # Step 1: Raw Profiling
-            raw_profiler = RawDatabaseProfiler(db_path)
-            raw_profile = raw_profiler.profile_database()
-
-            # Save raw profile to cache for diagnostics
+            raw_profile = None
             raw_profile_path = self.cache_dir / "raw_profile.json"
-            with open(raw_profile_path, "w", encoding="utf-8") as f:
-                json.dump(raw_profile, f, ensure_ascii=False, indent=2)
+            if raw_profile_path.is_file():
+                try:
+                    with open(raw_profile_path, "r", encoding="utf-8") as f:
+                        raw_profile = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    raw_profile = None
+            self.raw_profile = raw_profile
 
-            # Step 2: LLM Summarization
-            readme_text = self._read_file(self.business_dir / "README.md")
-            summarizer = ProfileLLMSummarizer(self.llm_engine)
-            processed_metadata = summarizer.generate_profiles(raw_profile, readme_text)
+            lsh_indexer = VietnameseLSHIndexer.load(lsh_cache_path)
+            vector_indexer = SemanticVectorIndexer.load(
+                faiss_cache_dir,
+                model_path=self.vector_model_path,
+                embedder=self.embedder,
+            )
+            if self.embedder is None and vector_indexer is not None:
+                self.embedder = vector_indexer.embedder
 
-        # Merge split-level calendar metadata from cache
-        calendar_meta = None
-        if not force_rebuild and self.calendar_cache_path.is_file():
-            try:
-                with open(self.calendar_cache_path, "r", encoding="utf-8") as f:
-                    calendar_meta = json.load(f)
-            except Exception:
-                calendar_meta = None
+            result = {
+                "metadata": processed_metadata,
+                "raw_profile": raw_profile,
+                "lsh_indexer": lsh_indexer,
+                "vector_indexer": vector_indexer,
+            }
+            self._pipeline_result = result
+            return result
 
-        if calendar_meta is None:
-            resolved_cal = self._resolve_calendar_path()
-            if resolved_cal and resolved_cal.is_file():
-                cal_res = profile_split_calendar(
-                    calendar_path=resolved_cal,
-                    llm_engine=self.llm_engine,
-                    embedder=self.embedder,
-                    vector_model_path=self.vector_model_path,
-                    cache_path=self.calendar_cache_path,
-                    force_rebuild=force_rebuild,
-                )
-                calendar_meta = cal_res.get("metadata", {})
+        db_path = self._get_db_path()
+        resolved_cal = self._resolve_calendar_path()
 
-        if calendar_meta:
-            for k, v in calendar_meta.items():
-                if k not in processed_metadata:
-                    processed_metadata[k] = v
+        # Step 1: Raw Profiling on business tables and calendar
+        raw_profiler = RawDatabaseProfiler(db_path, calendar_path=resolved_cal)
+        raw_profile = raw_profiler.profile_database()
+        self.raw_profile = raw_profile
+
+        # Save raw profile to cache for diagnostics
+        raw_profile_path = self.cache_dir / "raw_profile.json"
+        with open(raw_profile_path, "w", encoding="utf-8") as f:
+            json.dump(raw_profile, f, ensure_ascii=False, indent=2)
+
+        # Step 2: LLM Summarization across all tables (including calendar)
+        readme_text = self._read_file(self.business_dir / "README.md")
+        summarizer = ProfileLLMSummarizer(self.llm_engine)
+        processed_metadata = summarizer.generate_profiles(raw_profile, readme_text)
 
         # Persist updated metadata JSON
         with open(profile_json_path, "w", encoding="utf-8") as f:
             json.dump(processed_metadata, f, ensure_ascii=False, indent=2)
 
         # Step 3: Vietnamese LSH Indexing
-        if not force_rebuild and lsh_cache_path.is_file():
-            lsh_indexer = VietnameseLSHIndexer.load(lsh_cache_path)
-        else:
-            lsh_indexer = VietnameseLSHIndexer()
-            lsh_indexer.build_index(processed_metadata)
-            lsh_indexer.save(lsh_cache_path)
+        lsh_indexer = VietnameseLSHIndexer()
+        lsh_indexer.build_index(processed_metadata)
+        lsh_indexer.save(lsh_cache_path)
 
         # Step 4: FAISS Semantic Vector Indexing
-        faiss_index_file = faiss_cache_dir / "index.faiss"
-        faiss_doc_map = faiss_cache_dir / "doc_map.json"
-        if not force_rebuild and faiss_index_file.is_file() and faiss_doc_map.is_file():
-            vector_indexer = SemanticVectorIndexer.load(
-                faiss_cache_dir,
-                model_path=self.vector_model_path,
-                embedder=self.embedder,
-            )
-        else:
-            rulebook_text = self._read_file(self.rulebook_path)
-            readme_text = self._read_file(self.business_dir / "README.md")
-            vector_indexer = SemanticVectorIndexer(
-                model_path=self.vector_model_path,
-                embedder=self.embedder,
-            )
-            vector_indexer.build_index(
-                processed_metadata=processed_metadata,
-                rulebook_text=rulebook_text,
-                readme_text=readme_text,
-            )
-            vector_indexer.save(faiss_cache_dir)
+        rulebook_text = self._read_file(self.rulebook_path)
+        vector_indexer = SemanticVectorIndexer(
+            model_path=self.vector_model_path,
+            embedder=self.embedder,
+        )
+        vector_indexer.build_index(
+            processed_metadata=processed_metadata,
+            rulebook_text=rulebook_text,
+            readme_text=readme_text,
+        )
+        vector_indexer.save(faiss_cache_dir)
 
         if self.embedder is None and vector_indexer is not None:
             self.embedder = vector_indexer.embedder
 
         result = {
             "metadata": processed_metadata,
+            "raw_profile": raw_profile,
             "lsh_indexer": lsh_indexer,
             "vector_indexer": vector_indexer,
         }
@@ -322,7 +348,7 @@ def profile_split_calendar(
     calendar_path: str | Path,
     llm_engine: LLMEngineProtocol | Any,
     embedder: Any | None = None,
-    vector_model_path: str = DEFAULT_VECTOR_MODEL_PATH,
+    vector_model_path: str = DEFAULT_EMBED_MODEL_PATH,
     cache_path: str | Path = "/tmp/calendar_profile.json",
     force_rebuild: bool = False,
 ) -> dict[str, Any]:
@@ -430,13 +456,8 @@ def main() -> None:
     parser.add_argument(
         "--calendar-cache",
         type=str,
-        default="/tmp/calendar_profile.json",
-        help="Path to shared calendar profile cache JSON (default: /tmp/calendar_profile.json).",
-    )
-    parser.add_argument(
-        "--profile-calendar-only",
-        action="store_true",
-        help="Profile only calendar.csv and exit.",
+        default=None,
+        help="Optional calendar cache path retained for backward compatibility.",
     )
     parser.add_argument(
         "--output-dir",
@@ -465,13 +486,8 @@ def main() -> None:
     parser.add_argument(
         "--vector-model-path",
         type=str,
-        default=DEFAULT_VECTOR_MODEL_PATH,
+        default=DEFAULT_EMBED_MODEL_PATH,
         help="Embedding model path for FAISS indexer.",
-    )
-    parser.add_argument(
-        "--force-rebuild",
-        action="store_true",
-        help="Ignore cached files and regenerate all profiles and indexes.",
     )
 
     args = parser.parse_args()
@@ -484,29 +500,6 @@ def main() -> None:
     else:
         engine = create_engine(local=args.local, model=args.model)
         embedder = None
-
-    # Redirect calendar cache if output_dir is specified and calendar_cache was left at default
-    resolved_calendar_cache = (
-        Path(args.output_dir).resolve() / "calendar_profile.json"
-        if args.output_dir and args.calendar_cache == "/tmp/calendar_profile.json"
-        else Path(args.calendar_cache).resolve()
-    )
-
-    if args.profile_calendar_only:
-        if not args.calendar:
-            parser.error("--profile-calendar-only requires --calendar path.")
-        cal_res = profile_split_calendar(
-            calendar_path=args.calendar,
-            llm_engine=engine,
-            embedder=embedder,
-            vector_model_path=args.vector_model_path,
-            cache_path=resolved_calendar_cache,
-            force_rebuild=args.force_rebuild,
-        )
-        print(f"Calendar split profiling completed in {time.time() - start_time:.2f}s:")
-        print(f"  - Cached metadata columns: {len(cal_res['metadata'])}")
-        print(f"  - Cache path:              {cal_res['cache_path']}")
-        return
 
     # Handle full split profiling mode
     if args.split_dir:
@@ -528,21 +521,25 @@ def main() -> None:
 
         print(f"Initializing split profiling for {split_p.name} ({len(biz_dirs)} businesses)...")
 
-        # Step 1: Profile calendar.csv once for split if present
-        if cal_path.is_file():
-            print(f"Profiling split calendar: {cal_path}...")
+        cal_target = None
+        if args.calendar_cache:
+            cal_target = Path(args.calendar_cache).resolve()
+        elif args.output_dir:
+            cal_target = Path(args.output_dir).resolve() / "calendar_profile.json"
+
+        if cal_target and cal_path.is_file():
+            cal_target.parent.mkdir(parents=True, exist_ok=True)
             cal_res = profile_split_calendar(
                 calendar_path=cal_path,
                 llm_engine=engine,
                 embedder=embedder,
                 vector_model_path=args.vector_model_path,
-                cache_path=resolved_calendar_cache,
-                force_rebuild=args.force_rebuild,
+                cache_path=cal_target,
+                force_rebuild=True,
             )
             if embedder is None and "vector_indexer" in cal_res and cal_res["vector_indexer"] is not None:
                 embedder = cal_res["vector_indexer"].embedder
 
-        # Step 2: Iterate and profile all businesses
         total_meta = 0
         total_lsh = 0
         total_vector = 0
@@ -564,9 +561,8 @@ def main() -> None:
                 vector_model_path=args.vector_model_path,
                 cache_dir=b_cache,
                 calendar_path=cal_path if cal_path.is_file() else None,
-                calendar_cache_path=resolved_calendar_cache,
             )
-            pipe = orchestrator.run_pipeline(force_rebuild=args.force_rebuild)
+            pipe = orchestrator.run_pipeline(force_rebuild=True)
             if embedder is None and "vector_indexer" in pipe and pipe["vector_indexer"] is not None:
                 embedder = pipe["vector_indexer"].embedder
 
@@ -588,7 +584,7 @@ def main() -> None:
         return
 
     if not args.business_dir or not args.rulebook:
-        parser.error("Either --split-dir, --profile-calendar-only, or both --business-dir and --rulebook must be provided.")
+        parser.error("Either --split-dir or both --business-dir and --rulebook must be provided.")
 
     print(f"Initializing ProfilingOrchestrator for {args.business_dir}...")
 
@@ -610,10 +606,9 @@ def main() -> None:
         vector_model_path=args.vector_model_path,
         cache_dir=single_cache_dir,
         calendar_path=args.calendar,
-        calendar_cache_path=resolved_calendar_cache,
     )
 
-    pipeline = orchestrator.run_pipeline(force_rebuild=args.force_rebuild)
+    pipeline = orchestrator.run_pipeline(force_rebuild=True)
     elapsed = time.time() - start_time
 
     meta_count = len(pipeline["metadata"])

@@ -62,10 +62,24 @@ def main() -> None:
         help="Custom LLM model name/path.",
     )
     parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="Explicit GPU memory utilization fraction override (e.g. 0.70 or 0.60).",
+    )
+    parser.add_argument(
         "--max-retries",
         type=int,
         default=2,
         help="Maximum re-prompting retries on literal mismatch (default: 2).",
+    )
+    parser.add_argument(
+        "--cases",
+        "--case",
+        type=str,
+        default="abcde",
+        dest="cases",
+        help="Context variant cases to run (e.g. 'abcde', 'abce', 'abe'). Default: 'abcde'.",
     )
 
     args = parser.parse_args()
@@ -82,6 +96,7 @@ def main() -> None:
         local=args.local,
         model=args.model,
         mock=args.mock,
+        gpu_memory_utilization=args.gpu_memory_utilization,
     )
     embedder = MockEmbedder() if args.mock else None
     vector_model_path = "mock" if args.mock else "BAAI/bge-m3"
@@ -95,7 +110,7 @@ def main() -> None:
         vector_model_path=vector_model_path,
         cache_dir=args.cache_dir,
     )
-    pipeline_res = orchestrator.run_pipeline(force_rebuild=False)
+    pipeline_res = orchestrator.run_pipeline()
     processed_metadata = pipeline_res["metadata"]
     lsh_indexer = pipeline_res["lsh_indexer"]
     vector_indexer = pipeline_res["vector_indexer"]
@@ -124,28 +139,14 @@ def main() -> None:
         lsh_indexer=lsh_indexer,
         vector_indexer=vector_indexer,
         raw_profile=raw_profile,
+        cases=args.cases,
+        cache_dir=orchestrator.cache_dir,
     )
     elapsed = time.perf_counter() - t0
 
-    print(json.dumps({
-        "question": args.question,
-        "elapsed_seconds": round(elapsed, 3),
-        "total_retries": result.total_retries,
-        "final_linked_schema": sorted(result.final_linked_schema),
-        "canonical_schema": sorted(result.canonical_schema),
-        "preserved_keys": sorted(result.preserved_keys),
-        "variant_traces": [
-            {
-                "case_name": t.case_name,
-                "profile_type": t.profile_type,
-                "retry_count": t.retry_count,
-                "fields": sorted(t.fields_harvested),
-                "mismatches": t.mismatches_detected,
-                "final_sql": t.final_sql,
-            }
-            for t in result.variant_traces
-        ],
-    }, ensure_ascii=False, indent=2))
+    out_data = result.to_dict(question=args.question)
+    out_data["elapsed_seconds"] = round(elapsed, 3)
+    print(json.dumps(out_data, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
