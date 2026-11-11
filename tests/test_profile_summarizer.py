@@ -1,8 +1,7 @@
 """Unit tests for Module 2: ProfileLLMSummarizer, prompt templates, and engine factory."""
 
-import json
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -295,18 +294,33 @@ def test_summarizer_e2e_with_raw_profiler(tmp_path: Path) -> None:
 
 
 def test_cli_parsing_and_execution(tmp_path: Path) -> None:
-    """Verify CLI argument parser and profile_single_db execution with summarization."""
-    from zaic_2026_4.profiling.cli import build_parser, profile_single_db
+    """Verify CLI argument parser and execution for zaic-profile."""
+    from zaic_2026_4.profiling.cli import (
+        _resolve_biz_dir,
+        build_parser,
+        profile_single_db,
+    )
 
     parser = build_parser()
     args = parser.parse_args([
-        "--db", "fake.db",
-        "--summarize",
-        "--mock-llm",
+        "--split", "dataset/train",
+        "--biz-id", "101",
+        "--output-dir", str(tmp_path / "out"),
+        "--mock",
     ])
-    assert args.summarize is True
-    assert args.mock_llm is True
+    assert args.split == "dataset/train"
+    assert args.biz_id == "101"
+    assert args.output_dir == str(tmp_path / "out")
+    assert args.mock is True
     assert args.local is False
+
+    # Verify biz-id resolution supporting both numeric ID (101) and prefixed name (biz_101)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "biz_101").mkdir()
+
+    assert _resolve_biz_dir(data_dir, "101") == (data_dir / "biz_101").resolve()
+    assert _resolve_biz_dir(data_dir, "biz_101") == (data_dir / "biz_101").resolve()
 
     db_file = tmp_path / "cli_test.db"
     conn = sqlite3.connect(db_file)
@@ -319,12 +333,6 @@ def test_cli_parsing_and_execution(tmp_path: Path) -> None:
     readme_file.write_text("Test Store README", encoding="utf-8")
 
     out_json = tmp_path / "cli_out.json"
-    args = parser.parse_args([
-        "--db", str(db_file),
-        "--summarize",
-        "--mock-llm",
-    ])
-
     result = profile_single_db(db_file, args, output_path=out_json)
     assert "raw_profile" in result
     assert "metadata_profile" in result
@@ -335,7 +343,9 @@ def test_cli_parsing_and_execution(tmp_path: Path) -> None:
 def test_engine_factory_quantization(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify create_engine accepts quantize parameter and forwards to VLLMEngine."""
     from unittest.mock import MagicMock
+
     import vllm
+
     from zaic_2026_4.profiling.profile_summarizer import VLLMEngine
 
     fake_llm = MagicMock()
