@@ -12,6 +12,7 @@ from zaic_2026_4.submission.prompt_template import (
     FEW_SHOT_SQL_EXAMPLES_VI,
     build_sql_correction_prompt,
     build_sql_generation_prompt,
+    format_grounded_entities_xml,
     format_rulebook_context,
     permute_schema,
 )
@@ -467,4 +468,74 @@ def test_candidate_generator_invalid_type_retry_and_fallback() -> None:
     assert cand.sql_retry_count == 2
     # Final type falls back safely to 'abstain' to protect penalty points
     assert cand.predicted_type == "abstain"
+
+
+def test_format_grounded_entities_xml() -> None:
+    """Verify formatting grounded entities into XML blocks."""
+    assert format_grounded_entities_xml([]) == ""
+    assert format_grounded_entities_xml(None) == ""
+
+    items = [
+        {
+            "mention": "bia tiger bac lon",
+            "canonical_value": "Bia Tiger Bạc lon",
+            "column": "DanhSachSanPham.Tên hàng",
+            "score": 0.836,
+        },
+        {
+            "mention": "coca",
+            "canonical_value": "Coca-Cola lon",
+            "column": "san_pham.ten_sp",
+            "score": 0.9,
+        },
+    ]
+
+    xml = format_grounded_entities_xml(items)
+    assert "<grounded_entities>" in xml
+    assert "</grounded_entities>" in xml
+    assert '"bia tiger bac lon" -> Cột: DanhSachSanPham."Tên hàng" | Giá trị chuẩn trong DB: "Bia Tiger Bạc lon"' in xml
+    assert '"coca" -> Cột: san_pham."ten_sp" | Giá trị chuẩn trong DB: "Coca-Cola lon"' in xml
+    assert "LƯU Ý BẮT BUỘC" in xml
+
+
+def test_candidate_generator_with_grounded_entities() -> None:
+    """Verify CandidateGenerator passes grounded_literals to SQL generation prompts."""
+    captured_prompts: list[str] = []
+
+    class PromptCaptureEngine:
+        def generate(self, prompts: Any, **kwargs: Any) -> str:
+            p_str = prompts if isinstance(prompts, str) else prompts[0]
+            captured_prompts.append(p_str)
+            return '{"sql": "SELECT 1;", "type": "number"}'
+
+    generator = CandidateGenerator(
+        llm_engine=PromptCaptureEngine(),
+        seeds=(42,),
+    )
+
+    grounded = [
+        {
+            "mention": "bia tiger bac lon",
+            "canonical_value": "Bia Tiger Bạc lon",
+            "column": "san_pham.ten",
+            "score": 0.85,
+        }
+    ]
+
+    cand = generator.generate_candidate(
+        candidate_id=0,
+        seed=42,
+        question="Giá bia tiger bac lon?",
+        as_of_date="2026-05-25",
+        reduced_schema={"san_pham.ten", "san_pham.gia"},
+        processed_metadata={},
+        grounded_literals=grounded,
+    )
+
+    assert cand.candidate_id == 0
+    assert len(captured_prompts) == 1
+    assert "<grounded_entities>" in captured_prompts[0]
+    assert "Bia Tiger Bạc lon" in captured_prompts[0]
+    assert 'san_pham."ten"' in captured_prompts[0]
+
 

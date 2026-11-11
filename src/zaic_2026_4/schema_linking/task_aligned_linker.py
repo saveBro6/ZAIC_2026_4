@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,7 @@ class SchemaLinkingResult:
     total_retries: int = 0
     all_harvested_fields: set[str] = field(default_factory=set)
     preserved_keys: set[str] = field(default_factory=set)
+    grounded_literals: list[dict[str, Any]] = field(default_factory=list)
 
     def format_for_sql_generation(self, processed_metadata: dict[str, Any]) -> str:
         """Format quoted schema into clean XML context for downstream Phase 04 SQL Generation."""
@@ -65,6 +67,7 @@ class SchemaLinkingResult:
             "final_linked_schema": sorted(self.final_linked_schema),
             "canonical_schema": sorted(self.canonical_schema),
             "preserved_keys": sorted(self.preserved_keys),
+            "grounded_literals": self.grounded_literals,
             "total_retries": self.total_retries,
             "variant_traces": [
                 {
@@ -152,6 +155,72 @@ class TaskAlignedSchemaLinker:
         # 4. Vietnamese invoice, bill, receipt serial / document numbers
         # Explicitly excludes measures / metrics like 'soluong' or 'sodienthoai'
         return c_norm in ("sohd", "sohoadon", "soct", "sophieu", "sokh", "sochungtu")
+
+    @staticmethod
+    def extract_grounded_literals_from_question(
+        question: str,
+        lsh_indexer: Any,
+        candidate_columns: set[str] | None = None,
+        threshold: float = 0.55,
+    ) -> list[dict[str, Any]]:
+        """Extract entity mentions from question and ground them to canonical values in DB."""
+        if not lsh_indexer or not question or not question.strip():
+            return []
+
+        clean_q = question.strip()
+        mentions: set[str] = set()
+
+        # 1. Quoted phrases ('...' or "...")
+        for phrase in re.findall(r"['\"]([^'\"]+)['\"]", clean_q):
+            p_strip = phrase.strip()
+            if len(p_strip) >= 2 and not p_strip.isnumeric():
+                mentions.add(p_strip)
+
+        # 2. Extract n-grams (4, 3, 2 words)
+        words = [w for w in re.split(r"\s+", clean_q) if len(w) > 1]
+        n = len(words)
+        for size in (4, 3, 2):
+            for i in range(max(0, n - size + 1)):
+                ngram = " ".join(words[i : i + size]).strip()
+                if len(ngram) >= 2 and not ngram.isnumeric():
+                    mentions.add(ngram)
+
+        # 3. Query LSH for each mention
+        results: list[dict[str, Any]] = []
+        for m in mentions:
+            scored = lsh_indexer.query_literal_with_scores(m, top_k=3)
+            for col_key, real_val, score in scored:
+                if score < threshold:
+                    continue
+                # If candidate_columns is given, prioritize columns in schema or allow very high score
+                if candidate_columns and col_key not in candidate_columns and score < 0.75:
+                    continue
+                results.append({
+                    "mention": m,
+                    "canonical_value": real_val,
+                    "column": col_key,
+                    "score": round(float(score), 4),
+                })
+
+        return results
+
+    @staticmethod
+    def deduplicate_grounded_literals(
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Deduplicate grounded literals by (mention, column, canonical_value), preserving highest score."""
+        best: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for item in candidates:
+            key = (
+                item["mention"].strip().lower(),
+                item["column"].strip(),
+                item["canonical_value"].strip(),
+            )
+            if key not in best or item["score"] > best[key]["score"]:
+                best[key] = item
+
+        # Sort by score descending
+        return sorted(best.values(), key=lambda x: x["score"], reverse=True)
 
     def preserve_linking_keys(
         self,
@@ -288,6 +357,7 @@ class TaskAlignedSchemaLinker:
         linked_fields: set[str] = set()
         traces: list[VariantExecutionTrace] = []
         total_retries = 0
+        grounded_candidates: list[dict[str, Any]] = []
 
         # Step 3: Process each variant with AST extraction & LSH re-prompting loop
         for idx, variant in enumerate(variants):
@@ -316,7 +386,17 @@ class TaskAlignedSchemaLinker:
                             continue
 
                         # Look up columns matching literal in LSH index
-                        fields_l = lsh_indexer.lookup_value(literal, threshold=0.4)
+                        scored_matches = lsh_indexer.query_literal_with_scores(literal, top_k=3)
+                        fields_l = {col for col, _, sc in scored_matches if sc >= 0.4}
+
+                        for col, real_val, sc in scored_matches:
+                            if sc >= 0.4:
+                                grounded_candidates.append({
+                                    "mention": literal,
+                                    "canonical_value": real_val,
+                                    "column": col,
+                                    "score": round(float(sc), 4),
+                                })
 
                         # If literal exists in database, but NONE of its columns are in fields_q
                         if fields_l and not (fields_l & fields_q):
@@ -396,6 +476,18 @@ class TaskAlignedSchemaLinker:
 
         preserved = canonical_schema - linked_fields
 
+        # Step 6: Proactive Literal Grounding from question & trial queries
+        if lsh_indexer is not None:
+            q_grounded = self.extract_grounded_literals_from_question(
+                question=question,
+                lsh_indexer=lsh_indexer,
+                candidate_columns=canonical_schema or linked_fields,
+                threshold=0.55,
+            )
+            grounded_candidates.extend(q_grounded)
+
+        final_grounded = self.deduplicate_grounded_literals(grounded_candidates)
+
         result = SchemaLinkingResult(
             final_linked_schema=quoted_schema,
             canonical_schema=canonical_schema,
@@ -403,6 +495,7 @@ class TaskAlignedSchemaLinker:
             total_retries=total_retries,
             all_harvested_fields=linked_fields,
             preserved_keys=preserved,
+            grounded_literals=final_grounded,
         )
 
         # Automatically persist schema_linking_result.json to cache_dir if provided

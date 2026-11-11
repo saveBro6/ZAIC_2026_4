@@ -134,6 +134,7 @@ class CandidateGenerator:
         rulebook_text: str = "",
         vector_indexer: Any | None = None,
         db_path: Path | str | None = None,
+        grounded_literals: list[dict[str, Any]] | None = None,
     ) -> CandidateQuery:
         """Generate a single candidate SQL query with schema permutation, static validation, and dry-run execution."""
         target_db = Path(db_path).resolve() if db_path else self.db_path
@@ -151,6 +152,7 @@ class CandidateGenerator:
             rulebook_text=rulebook_text,
             vector_indexer=vector_indexer,
             rulebook_mode=self.rulebook_mode,
+            grounded_entities=grounded_literals,
         )
 
         # 3. Initial generation
@@ -192,6 +194,7 @@ class CandidateGenerator:
                 validation_issues=all_issues,
                 schema_xml=schema_xml,
                 previous_type=current_type,
+                grounded_entities=grounded_literals,
             )
             corr_kwargs: dict[str, Any] = {
                 "temperature": 0.2,
@@ -250,6 +253,7 @@ class CandidateGenerator:
                     validation_issues=issues,
                     schema_xml=schema_xml,
                     previous_type=current_type,
+                    grounded_entities=grounded_literals,
                 )
                 exec_retry_kwargs: dict[str, Any] = {
                     "temperature": 0.2,
@@ -322,6 +326,7 @@ class CandidateGenerator:
         rulebook_text: str = "",
         vector_indexer: Any | None = None,
         db_path: Path | str | None = None,
+        grounded_literals: list[dict[str, Any]] | None = None,
     ) -> list[CandidateQuery]:
         """Generate all candidate queries across configured seeds."""
         candidates: list[CandidateQuery] = []
@@ -336,6 +341,7 @@ class CandidateGenerator:
                 rulebook_text=rulebook_text,
                 vector_indexer=vector_indexer,
                 db_path=db_path,
+                grounded_literals=grounded_literals,
             )
             candidates.append(cand)
         return candidates

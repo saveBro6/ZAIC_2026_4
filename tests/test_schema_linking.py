@@ -688,3 +688,39 @@ def test_zaic_schema_link_cli_parser_and_matching() -> None:
     assert _matches_biz_id("101", "biz_102") is False
 
 
+def test_schema_linking_literal_grounding_preservation(
+    sample_metadata: dict[str, Any],
+    sample_lsh_indexer: VietnameseLSHIndexer,
+    sample_vector_indexer: SemanticVectorIndexer,
+    sample_raw_profile: dict[str, Any],
+) -> None:
+    """Verify that SchemaLinkingResult preserves grounded literals with canonical DB values."""
+    mock_llm = MockLLMEngine()
+    linker = TaskAlignedSchemaLinker(llm_engine=mock_llm, max_retries=2)
+
+    question = "List the zip code of all charter schools in Fresno County Office of Education"
+
+    result = linker.link_schema(
+        question=question,
+        processed_metadata=sample_metadata,
+        lsh_indexer=sample_lsh_indexer,
+        vector_indexer=sample_vector_indexer,
+        raw_profile=sample_raw_profile,
+    )
+
+    assert hasattr(result, "grounded_literals")
+    assert len(result.grounded_literals) > 0
+
+    # Look for Fresno County Office of Education grounding
+    grounded_canonical = [item["canonical_value"] for item in result.grounded_literals]
+    assert any("Fresno" in val for val in grounded_canonical)
+
+    # Check to_dict() serialization
+    as_dict = result.to_dict()
+    assert "grounded_literals" in as_dict
+    assert len(as_dict["grounded_literals"]) > 0
+    assert "canonical_value" in as_dict["grounded_literals"][0]
+    assert "column" in as_dict["grounded_literals"][0]
+
+
+

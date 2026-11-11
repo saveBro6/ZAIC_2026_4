@@ -173,6 +173,39 @@ def format_rulebook_context(
     return "\n\n".join(sections)
 
 
+def format_grounded_entities_xml(
+    grounded_entities: list[dict[str, Any]] | None,
+) -> str:
+    """Format grounded literal mappings into clean XML context for SQL generation."""
+    if not grounded_entities:
+        return ""
+
+    lines = [
+        "<grounded_entities>",
+        "Các thực thể sau trong câu hỏi đã được đối soát chính xác với giá trị thực tế trong cơ sở dữ liệu:",
+    ]
+    for item in grounded_entities:
+        mention = item.get("mention", "").strip()
+        col = item.get("column", "").strip()
+        can_val = item.get("canonical_value", "").strip()
+        if mention and can_val:
+            if "." in col:
+                tbl, cname = col.split(".", 1)
+                col_fmt = f'{tbl}."{cname}"'
+            else:
+                col_fmt = f'"{col}"'
+            lines.append(
+                f'- Từ trong câu hỏi: "{mention}" -> Cột: {col_fmt} | Giá trị chuẩn trong DB: "{can_val}"'
+            )
+
+    lines.extend([
+        "LƯU Ý BẮT BUỘC: Khi viết mệnh đề WHERE/HAVING, BẮT BUỘC sử dụng đúng 'Giá trị chuẩn trong DB' và tên cột tương ứng ở trên.",
+        "TUYỆT ĐỐI KHÔNG dùng từ ngữ viết tắt hoặc không dấu từ câu hỏi để so sánh chuỗi.",
+        "</grounded_entities>",
+    ])
+    return "\n".join(lines)
+
+
 def build_sql_generation_prompt(
     question: str,
     as_of_date: str,
@@ -182,6 +215,7 @@ def build_sql_generation_prompt(
     vector_indexer: Any | None = None,
     rulebook_mode: str = "hybrid",
     include_few_shot: bool = True,
+    grounded_entities: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build complete prompt for LLM SQLite generation with permuted schema, Vietnamese guidelines, and few-shot examples."""
     schema_xml = format_permuted_schema_xml(schema_keys, processed_metadata)
@@ -225,7 +259,8 @@ def build_sql_generation_prompt(
         "   - Khi xếp hạng (ranking/top-k), BẮT BUỘC thêm khóa chính hoặc mã định danh vào mệnh đề sắp xếp để phá vỡ đồng hạng: ORDER BY <metric> DESC, <primary_key_or_code> ASC.",
         "   - Trả về các cột riêng biệt; KHÔNG dùng toán tử nối chuỗi '||' trong mệnh đề SELECT trừ khi có yêu cầu cụ thể.",
         "4. Ép kiểu & Khớp chuỗi theo <selected_schema> tham khảo Hint được cung cấp.",
-        "   - Tìm kiếm chuỗi tiếng Việt có dấu: luôn dùng LOWER(\"col\") LIKE LOWER('%...%') để đảm bảo không phân biệt hoa/thường.",
+        "   - Khi câu hỏi đề cập đến thực thể có trong <grounded_entities>, BẮT BUỘC sử dụng đúng 'Giá trị chuẩn trong DB' và tên cột tương ứng; tuyệt đối không dùng chuỗi không dấu hoặc viết tắt từ câu hỏi.",
+        "   - Tìm kiếm chuỗi tiếng Việt có dấu khác: luôn dùng LOWER(\"col\") LIKE LOWER('%...%') để đảm bảo không phân biệt hoa/thường.",
         "",
         "[QUAN HỆ BẢNG & NGHIỆP VỤ]",
         "Tuân thủ nghiêm ngặt các quy tắc nghiệp vụ về trạng thái đơn hàng (loại trừ hủy, hoàn) và định nghĩa doanh thu trong <split_rulebook>.",
@@ -235,6 +270,11 @@ def build_sql_generation_prompt(
 
     if rulebook_xml:
         prompt_parts.append(rulebook_xml)
+        prompt_parts.append("")
+
+    grounded_xml = format_grounded_entities_xml(grounded_entities)
+    if grounded_xml:
+        prompt_parts.append(grounded_xml)
         prompt_parts.append("")
 
     prompt_parts.extend([
@@ -266,6 +306,7 @@ def build_sql_correction_prompt(
     validation_issues: list[str],
     schema_xml: str | None = None,
     previous_type: str = "number",
+    grounded_entities: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build prompt asking LLM to correct bad SQL constructions, runtime execution errors, or empty results."""
     issues_str = "\n".join(f"- {issue}" for issue in validation_issues)
@@ -284,6 +325,10 @@ def build_sql_correction_prompt(
         "",
         f"<temporal_anchor>\nas_of_date: {as_of_date}\n</temporal_anchor>",
     ]
+
+    grounded_xml = format_grounded_entities_xml(grounded_entities)
+    if grounded_xml:
+        prompt_parts.extend(["", grounded_xml])
 
     if schema_xml:
         prompt_parts.extend(["", schema_xml])
@@ -304,6 +349,7 @@ __all__ = [
     "FEW_SHOT_SQL_EXAMPLES_VI",
     "build_sql_correction_prompt",
     "build_sql_generation_prompt",
+    "format_grounded_entities_xml",
     "format_permuted_schema_xml",
     "format_rulebook_context",
     "permute_schema",

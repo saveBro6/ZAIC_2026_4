@@ -255,9 +255,11 @@ class SubmissionPipeline:
                 question_id=item.id,
             )
             reduced_schema = linking_res.final_linked_schema
+            grounded_literals = linking_res.grounded_literals
         except Exception as exc:  # noqa: BLE001
             logger.warning("Schema linking error on %s: %s", item.id, exc)
             reduced_schema = set()
+            grounded_literals = []
 
         # Fallback if reduced schema is empty: collect all columns from metadata
         if not reduced_schema:
@@ -281,6 +283,7 @@ class SubmissionPipeline:
             rulebook_text=self._rulebook_text,
             vector_indexer=biz_ctx.vector_indexer,
             db_path=biz_ctx.db_path,
+            grounded_literals=grounded_literals,
         )
 
         # 3. Candidate Execution & Majority Voting
