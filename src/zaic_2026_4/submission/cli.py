@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 
 from zaic_2026_4 import constants
 from zaic_2026_4.constants import (
@@ -31,12 +32,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Name or path of dataset split (e.g. 'train', 'public_test', 'private_test').",
     )
     parser.add_argument(
-        "--base-dir",
-        type=str,
-        default="dataset",
-        help="Base directory containing dataset splits (default: 'dataset').",
-    )
-    parser.add_argument(
         "--rulebook-mode",
         type=str,
         choices=["hybrid", "full", "retrieval"],
@@ -52,22 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Context variant cases to run for schema linking (e.g. 'abcde', 'abce', 'abe'). Default: 'abcde'.",
     )
     parser.add_argument(
-        "--output",
+        "--result-dir",
         type=str,
-        default=str(DEFAULT_SUBMISSION_PATH),
-        help="Output path for submission.jsonl.",
-    )
-    parser.add_argument(
-        "--log-dir",
-        type=str,
-        default=str(DEFAULT_LOGS_DIR),
-        help="Directory to write per-question diagnostic trace logs.",
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=str,
-        default="/tmp",
-        help="Base directory for temporary profiling and database caches.",
+        default=None,
+        help="Target directory for submission output and diagnostic logs (default: /result or ./result).",
     )
     parser.add_argument(
         "--local",
@@ -104,13 +87,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Model quantization format for Generative LLM Engine (e.g. 'fp8', 'awq', 'gptq'). Default: None.",
     )
     parser.add_argument(
-        "--seeds",
-        type=int,
-        nargs="+",
-        default=list(DEFAULT_CANDIDATE_SEEDS),
-        help="Randomization seeds for candidate diversity (default: 42 100 2026).",
-    )
-    parser.add_argument(
         "--max-retries",
         type=int,
         default=DEFAULT_SQL_MAX_RETRIES,
@@ -131,7 +107,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     try:
-        paths = resolve_split_paths(args.split, base_dir=args.base_dir)
+        paths = resolve_split_paths(args.split)
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -155,6 +131,15 @@ def main(argv: list[str] | None = None) -> None:
     embedder = MockEmbedder() if args.mock else None
     vector_model_path = "mock" if args.mock else "BAAI/bge-m3"
 
+    # Determine submission output and log directories
+    if args.result_dir:
+        res_dir = Path(args.result_dir).resolve()
+        output_path = res_dir / "submission.jsonl"
+        logs_dir = res_dir / "logs"
+    else:
+        output_path = DEFAULT_SUBMISSION_PATH
+        logs_dir = DEFAULT_LOGS_DIR
+
     # 2. Initialize and run Submission Pipeline
     pipeline = SubmissionPipeline(
         data_dir=data_dir,
@@ -163,10 +148,10 @@ def main(argv: list[str] | None = None) -> None:
         embedder=embedder,
         vector_model_path=vector_model_path,
         calendar_path=calendar_path,
-        output_path=args.output,
-        logs_dir=args.log_dir,
-        cache_base_dir=args.cache_dir,
-        seeds=tuple(args.seeds),
+        output_path=output_path,
+        logs_dir=logs_dir,
+        cache_base_dir="/tmp",
+        seeds=DEFAULT_CANDIDATE_SEEDS,
         max_retries=args.max_retries,
         rulebook_mode=args.rulebook_mode,
         cases=args.cases,

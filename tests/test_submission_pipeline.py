@@ -164,48 +164,43 @@ def test_submission_pipeline_from_split(mock_dataset_env: dict[str, Path]) -> No
     assert pipeline.calendar_path == split_dir / "calendar.csv"
 
 
-def test_submission_cli_with_split(mock_dataset_env: dict[str, Path]) -> None:
+def test_submission_cli_with_split(mock_dataset_env: dict[str, Path], tmp_path: Path) -> None:
     from zaic_2026_4.submission.cli import main
 
     split_dir = mock_dataset_env["data_dir"].parent
-    out_file = mock_dataset_env["output_path"]
-    logs_dir = mock_dataset_env["logs_dir"]
-    cache_dir = mock_dataset_env["cache_dir"]
+    result_dir = tmp_path / "submission_results"
 
     cli_args = [
         "--split", str(split_dir),
         "--mock",
-        "--output", str(out_file),
-        "--log-dir", str(logs_dir),
-        "--cache-dir", str(cache_dir),
+        "--result-dir", str(result_dir),
         "--limit", "1",
     ]
     main(cli_args)
 
+    out_file = result_dir / "submission.jsonl"
     assert out_file.is_file()
     lines = out_file.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
+    assert (result_dir / "logs").is_dir()
 
 
-def test_submission_cli_with_cases(mock_dataset_env: dict[str, Path]) -> None:
+def test_submission_cli_with_cases(mock_dataset_env: dict[str, Path], tmp_path: Path) -> None:
     from zaic_2026_4.submission.cli import main
 
     split_dir = mock_dataset_env["data_dir"].parent
-    out_file = mock_dataset_env["output_path"]
-    logs_dir = mock_dataset_env["logs_dir"]
-    cache_dir = mock_dataset_env["cache_dir"]
+    result_dir = tmp_path / "submission_cases_results"
 
     cli_args = [
         "--split", str(split_dir),
         "--cases", "abe",
         "--mock",
-        "--output", str(out_file),
-        "--log-dir", str(logs_dir),
-        "--cache-dir", str(cache_dir),
+        "--result-dir", str(result_dir),
         "--limit", "1",
     ]
     main(cli_args)
 
+    out_file = result_dir / "submission.jsonl"
     assert out_file.is_file()
     lines = out_file.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
@@ -308,9 +303,7 @@ def test_cli_quantize_and_gpu_embed_flags(
             "--quantize", "fp8",
             "--gpu-embed-memory-utilization", "0.35",
             "--mock",
-            "--output", str(mock_dataset_env["output_path"]),
-            "--log-dir", str(mock_dataset_env["logs_dir"]),
-            "--cache-dir", str(mock_dataset_env["cache_dir"]),
+            "--result-dir", str(mock_dataset_env["output_path"].parent),
             "--limit", "1",
         ])
         assert constants.DEFAULT_EMBED_GPU_UTIL == 0.35
