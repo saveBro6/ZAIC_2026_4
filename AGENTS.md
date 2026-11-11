@@ -61,28 +61,31 @@ Every code modification task must strictly adhere to the sequential lifecycle be
    - Apply source code edits according to the user's requirements and prompt constraints.
 
 2. **Phase 2: Code Review Gate (MANDATORY)**
-   - **Trigger:** Immediately upon completing code modifications, BEFORE running test suites and BEFORE writing any walkthrough/summary.
+   - **Trigger:** Immediately upon completing code modifications, BEFORE writing any walkthrough/summary.
    - **Action:** Delegate execution to the `code-reviewer` agent (defined in `.agents/agents/code-reviewer/agent.md`).
    - **Inspection Scope:**
      * Run `git status --short` and `git diff` (including `--cached` if staged).
      * Verify 100% diff alignment against the initial prompt to detect omissions, unintended changes, or scope creep.
      * Perform deep static analysis for logic flaws, edge cases, regression risks, broken contracts, and stray debug code.
+     * Execute and verify the relevant test suites within the reviewer context.
    - **Gate Rule:**
      * If verdict is **`[BLOCKED]`**: Halt forward progress immediately. Return to Phase 1 to patch the flagged issues, then re-trigger Phase 2.
      * Proceed to Phase 3 ONLY when verdict is explicitly marked **`[PASSED]`**.
 
-3. **Phase 3: Automated Testing & Verification**
-   - Execute linters, type checkers, and relevant unit/integration test suites.
-   - If tests fail due to implementation bugs, loop back to Phase 1.
+3. **Phase 3: Fast Linter Check**
+   - Run linter verification on modified files: `uv run ruff check <modified_files>`.
+   - **Strict No-Re-run Rule**: Do NOT re-run `pytest` in this phase since `code-reviewer` has already executed and passed the full test suite.
+   - If linter errors or formatting issues occur, fix them before moving forward.
 
 4. **Phase 4: Summary & Walkthrough**
-   - **Entry Condition:** Phase 2 is **`[PASSED]`** AND Phase 3 tests pass cleanly.
+   - **Entry Condition:** Phase 2 is **`[PASSED]`** AND Phase 3 linter check passes cleanly.
    - Synthesize changes, explain implementation details, and produce the final user-facing summary walkthrough.
 
 ---
 
 ### Non-Negotiable Directives
-- **Zero-Bypass Policy:** Never invoke test runners, generate summary artifacts, or declare task completion without an explicit `[PASSED]` verdict from the `code-reviewer` agent.
+- **Zero-Bypass Policy:** Never generate summary artifacts or declare task completion without an explicit `[PASSED]` verdict from the `code-reviewer` agent.
+- **No Duplicate Test Runs:** Never re-run `pytest` after `code-reviewer` has already executed tests and returned `[PASSED]`.
 - **Context Preservation:** When handing off to `code-reviewer`, pass the exact verbatim user prompt along with relevant issue/ticket context to serve as the ground truth.
 - **No Data Leakage / Zero Hardcoding Policy:**
   - Strictly prohibit hardcoding rules, string literals, column mappings, or conditional logic (`if-else`) tailored to specific datasets, shops, or ground truth files (e.g. from `train` split).
