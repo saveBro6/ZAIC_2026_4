@@ -6,15 +6,14 @@ import argparse
 import json
 import sys
 import time
-from pathlib import Path
 
+from zaic_2026_4.ingestion import resolve_split_paths
 from zaic_2026_4.profiling.profile_manager import ProfilingOrchestrator
 from zaic_2026_4.profiling.profile_summarizer import (
     create_engine,
 )
 from zaic_2026_4.profiling.vector_indexer import MockEmbedder
 from zaic_2026_4.schema_linking.task_aligned_linker import TaskAlignedSchemaLinker
-from zaic_2026_4.submission.pipeline import resolve_split_paths
 
 
 def main() -> None:

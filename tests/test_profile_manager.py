@@ -82,7 +82,7 @@ def sample_business_sqlite(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def test_get_db_path_with_standalone_sqlite(sample_business_sqlite: tuple[Path, Path], tmp_path: Path) -> None:
-    """Verify _get_db_path directly returns pre-existing .sqlite file when no CSV/XLSX exist."""
+    """Verify _get_db_path ingests pre-existing .sqlite file into an isolated writable DB in cache_dir."""
     biz_dir, rulebook_path = sample_business_sqlite
     cache_dir = tmp_path / "cache_sqlite"
 
@@ -95,7 +95,16 @@ def test_get_db_path_with_standalone_sqlite(sample_business_sqlite: tuple[Path, 
     )
 
     db_path = orchestrator._get_db_path()
-    assert Path(db_path).resolve() == (biz_dir / "pos.sqlite").resolve()
+    assert Path(db_path).resolve() == (cache_dir / f"{biz_dir.name}.db").resolve()
+    assert Path(db_path).is_file()
+
+    # Verify tables from standalone SQLite are present in newly ingested DB
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = [r[0] for r in cur.fetchall()]
+    conn.close()
+    assert "DonHang" in tables
 
 
 def test_get_db_path_with_csv(sample_business_csv: tuple[Path, Path], tmp_path: Path) -> None:

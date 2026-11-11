@@ -18,12 +18,10 @@ from zaic_2026_4.profiling.profile_summarizer import (
 )
 from zaic_2026_4.profiling.raw_profiler import RawDatabaseProfiler
 from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_EMBED_MAX_LENGTH,
     DEFAULT_EMBED_MODEL_PATH,
     MockEmbedder,
     SemanticVectorIndexer,
-)
-from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_EMBED_MAX_LENGTH,
 )
 
 
@@ -465,11 +463,11 @@ def main() -> None:
 
     else:
         # Default behavior: run split profiling via resolve_split_paths
+        from zaic_2026_4.ingestion import resolve_split_paths
         from zaic_2026_4.profiling.profile_manager import (
-            profile_split_calendar,
             ProfilingOrchestrator,
+            profile_split_calendar,
         )
-        from zaic_2026_4.submission.pipeline import resolve_split_paths
 
         t_start = time.perf_counter()
         engine = create_engine(

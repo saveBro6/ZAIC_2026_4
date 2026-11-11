@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from zaic_2026_4.ingestion.service import ingest_business
+from zaic_2026_4.ingestion import ingest_business, resolve_split_paths
 from zaic_2026_4.profiling.lsh_indexer import VietnameseLSHIndexer
 from zaic_2026_4.profiling.profile_summarizer import (
     DEFAULT_LOCAL_MODEL,
@@ -62,7 +62,12 @@ class ProfilingOrchestrator:
         self.llm_engine = llm_engine
         self.embedder = embedder
         self.vector_model_path = vector_model_path
-        self.calendar_path = Path(calendar_path).resolve() if calendar_path else None
+        cal_candidate = self.business_dir.parent.parent / "calendar.csv"
+        self.calendar_path = (
+            Path(calendar_path).resolve()
+            if calendar_path
+            else (cal_candidate if cal_candidate.is_file() else None)
+        )
         self.calendar_cache_path = (
             Path(calendar_cache_path).resolve()
             if calendar_cache_path
@@ -78,28 +83,6 @@ class ProfilingOrchestrator:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.db_path: Path | None = None
         self._pipeline_result: dict[str, Any] | None = None
-
-    def _resolve_calendar_path(self) -> Path | None:
-        """Attempt to auto-discover calendar.csv if not explicitly provided."""
-        if self.calendar_path is not None and self.calendar_path.is_file():
-            return self.calendar_path
-
-        # 1. Look in dataset split directory: <split>/data/<biz_id> -> <split>/calendar.csv
-        candidate_split = self.business_dir.parent.parent / "calendar.csv"
-        if candidate_split.is_file():
-            return candidate_split
-
-        # 2. Look relative to rulebook: <split>/rulebook.md -> <split>/calendar.csv
-        candidate_rulebook = self.rulebook_path.parent / "calendar.csv"
-        if candidate_rulebook.is_file():
-            return candidate_rulebook
-
-        # 3. Competition container standard read-only mount
-        candidate_root = Path("/data/calendar.csv")
-        if candidate_root.is_file():
-            return candidate_root
-
-        return None
 
     def _read_file(self, path: str | Path) -> str:
         """Safely read a text file with UTF-8 encoding and fallback handling.
@@ -124,7 +107,7 @@ class ProfilingOrchestrator:
             return ""
 
     def _get_db_path(self) -> str:
-        """Locate existing SQLite database or automatically ingest CSV/XLSX into /tmp SQLite.
+        """Locate existing SQLite database or automatically ingest tabular data into SQLite.
 
         Returns:
             Absolute path string to SQLite database file.
@@ -134,69 +117,19 @@ class ProfilingOrchestrator:
 
         biz_name = self.business_dir.name
         cached_db_path = self.cache_dir / f"{biz_name}.db"
-
-        # 1. Reuse existing converted DB in cache if present
-        resolved_cal = self._resolve_calendar_path()
         if cached_db_path.is_file():
             self.db_path = cached_db_path
-            if resolved_cal and resolved_cal.is_file():
-                self._ensure_calendar_table_in_db(cached_db_path, resolved_cal)
             return str(cached_db_path)
 
-        cached_split_dbs = list(self.cache_dir.rglob(f"{biz_name}.db"))
-        if cached_split_dbs and cached_split_dbs[0].is_file():
-            self.db_path = cached_split_dbs[0]
-            if resolved_cal and resolved_cal.is_file():
-                self._ensure_calendar_table_in_db(self.db_path, resolved_cal)
-            return str(self.db_path)
-
-        # 2. Check if business_dir contains pre-existing .sqlite or .db file
-        # and has no raw tabular CSV/XLSX files that need ingestion
-        if self.business_dir.is_dir():
-            sqlite_files = sorted(
-                list(self.business_dir.glob("*.sqlite")) + list(self.business_dir.glob("*.db"))
-            )
-            tabular_files = sorted(
-                list(self.business_dir.glob("*.csv"))
-                + list(self.business_dir.glob("*.xlsx"))
-                + list(self.business_dir.glob("*.xls"))
-            )
-            if sqlite_files and not tabular_files:
-                # Standalone SQLite database (e.g. biz_123/pos.sqlite)
-                self.db_path = sqlite_files[0]
-                if resolved_cal and resolved_cal.is_file():
-                    self._ensure_calendar_table_in_db(self.db_path, resolved_cal)
-                return str(self.db_path)
-
-        # 3. Convert CSV/XLSX (or mixed data) into temporary SQLite database in cache_dir
+        # Single authoritative DB generation: ingest all tabular data and calendar
         created_db_path = ingest_business(
             business_dir=self.business_dir,
             output_dir=self.cache_dir,
             create_views=True,
-            calendar_path=resolved_cal,
+            calendar_path=self.calendar_path,
         )
         self.db_path = Path(created_db_path)
         return str(self.db_path)
-
-    def _ensure_calendar_table_in_db(self, db_file: Path, cal_file: Path) -> None:
-        """Ensure calendar table exists in SQLite database file."""
-        import sqlite3
-        conn = sqlite3.connect(db_file)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='calendar' LIMIT 1;")
-            if cur.fetchone() is None:
-                from zaic_2026_4.ingestion.extractors import extract_csv
-                from zaic_2026_4.ingestion.sqlite_sink import polars_type_to_sqlite
-                cal_df = extract_csv(cal_file).get("calendar")
-                if cal_df is not None and cal_df.height > 0:
-                    col_defs = [f'"{c}" {polars_type_to_sqlite(dt)}' for c, dt in zip(cal_df.columns, cal_df.dtypes, strict=False)]
-                    cur.execute(f'CREATE TABLE IF NOT EXISTS "calendar" ({", ".join(col_defs)});')
-                    placeholders = ", ".join(["?"] * len(cal_df.columns))
-                    cur.executemany(f'INSERT INTO "calendar" VALUES ({placeholders})', cal_df.iter_rows())
-                    conn.commit()
-        finally:
-            conn.close()
 
     def run_pipeline(self, force_rebuild: bool = False, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Execute the profiling and indexing pipeline freshly for this business.
@@ -253,10 +186,9 @@ class ProfilingOrchestrator:
             return result
 
         db_path = self._get_db_path()
-        resolved_cal = self._resolve_calendar_path()
 
         # Step 1: Raw Profiling on business tables and calendar
-        raw_profiler = RawDatabaseProfiler(db_path, calendar_path=resolved_cal)
+        raw_profiler = RawDatabaseProfiler(db_path, calendar_path=self.calendar_path)
         raw_profile = raw_profiler.profile_database()
         self.raw_profile = raw_profile
 
@@ -498,8 +430,6 @@ def main() -> None:
     else:
         engine = create_engine(local=args.local, model=args.model)
         embedder = None
-
-    from zaic_2026_4.submission.pipeline import resolve_split_paths
 
     paths = resolve_split_paths(args.split, base_dir=args.base_dir, require_questions=False)
     split_p = paths["split_dir"]

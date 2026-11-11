@@ -16,6 +16,7 @@ from zaic_2026_4.constants import (
     DEFAULT_SQL_MAX_RETRIES,
     DEFAULT_SUBMISSION_PATH,
 )
+from zaic_2026_4.ingestion import resolve_split_paths
 from zaic_2026_4.profiling.profile_manager import ProfilingOrchestrator
 from zaic_2026_4.schema_linking.task_aligned_linker import TaskAlignedSchemaLinker
 from zaic_2026_4.submission.candidate_generator import CandidateGenerator
@@ -385,70 +386,7 @@ class SubmissionPipeline:
         return submissions
 
 
-def resolve_split_paths(
-    split_name_or_path: str | Path,
-    base_dir: Path | str = "dataset",
-    require_questions: bool = True,
-) -> dict[str, Any]:
-    """Resolve standard dataset paths within a split folder.
-
-    Args:
-        split_name_or_path: Split name ('train', 'public_test', 'private_test') or direct path.
-        base_dir: Base directory containing splits (default: 'dataset').
-        require_questions: Whether questions.jsonl is mandatory (True for submission, False for profiling/linking).
-
-    Returns:
-        Dict containing:
-            - split_dir: Path to split root directory.
-            - questions_path: Path to questions.jsonl (or None if not required and absent).
-            - data_dir: Path to data/ directory.
-            - rulebook_path: Path to rulebook.md.
-            - calendar_path: Path to calendar.csv (or None if not present).
-    """
-    raw_path = Path(split_name_or_path)
-
-    if raw_path.is_dir():
-        split_dir = raw_path.resolve()
-    else:
-        candidate = Path(base_dir) / split_name_or_path
-        if candidate.is_dir():
-            split_dir = candidate.resolve()
-        else:
-            raise FileNotFoundError(
-                f"Could not locate dataset split directory for '{split_name_or_path}' "
-                f"(checked '{raw_path}' and '{candidate}')."
-            )
-
-    questions_candidate = split_dir / "questions.jsonl"
-    if require_questions and not questions_candidate.is_file():
-        raise FileNotFoundError(f"Questions file not found: {questions_candidate}")
-    questions_path = questions_candidate if questions_candidate.is_file() else None
-
-    data_dir = split_dir / "data"
-    if not data_dir.is_dir():
-        if any(p.is_dir() for p in split_dir.iterdir() if not p.name.startswith(".")):
-            data_dir = split_dir
-        else:
-            raise FileNotFoundError(f"Data directory not found in split: {data_dir}")
-
-    rulebook_path = split_dir / "rulebook.md"
-    if not rulebook_path.is_file():
-        raise FileNotFoundError(f"Rulebook file not found in split: {rulebook_path}")
-
-    calendar_candidate = split_dir / "calendar.csv"
-    calendar_path = calendar_candidate if calendar_candidate.is_file() else None
-
-    return {
-        "split_dir": split_dir,
-        "questions_path": questions_path,
-        "data_dir": data_dir,
-        "rulebook_path": rulebook_path,
-        "calendar_path": calendar_path,
-    }
-
-
 __all__ = [
     "BusinessContext",
     "SubmissionPipeline",
-    "resolve_split_paths",
 ]

@@ -1,7 +1,8 @@
 """Data reconciliation and schema integrity tests against train dataset."""
 
-from pathlib import Path
 import sqlite3
+from pathlib import Path
+
 import pytest
 
 from zaic_2026_4.ingestion.extractors import extract_csv, extract_excel, extract_sqlite
@@ -79,8 +80,12 @@ def test_reconciliation_exact_row_counts(tmp_path: Path, train_data_dir: Path):
         )
         tables = [r[0] for r in cur.fetchall()]
 
+        assert "calendar" in tables, f"[{biz_id}] Expected auto-ingested 'calendar' table in DB"
+
         db_total_rows = 0
         for tname in tables:
+            if tname == "calendar":
+                continue
             cur.execute(f'SELECT COUNT(*) FROM "{tname}";')
             db_total_rows += cur.fetchone()[0]
         conn.close()

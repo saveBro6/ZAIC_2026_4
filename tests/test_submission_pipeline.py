@@ -113,7 +113,7 @@ def test_submission_pipeline_end_to_end(mock_dataset_env: dict[str, Path]) -> No
 
 
 def test_resolve_split_paths(tmp_path: Path) -> None:
-    from zaic_2026_4.submission.pipeline import resolve_split_paths
+    from zaic_2026_4.ingestion import resolve_split_paths
 
     split_dir = tmp_path / "train"
     split_dir.mkdir()

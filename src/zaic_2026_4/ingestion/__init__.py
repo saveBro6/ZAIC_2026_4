@@ -11,6 +11,7 @@ from zaic_2026_4.ingestion.service import (
     DEFAULT_BASE_OUTPUT_DIR,
     ingest_business,
     ingest_split,
+    resolve_split_paths,
 )
 from zaic_2026_4.ingestion.sqlite_sink import (
     polars_type_to_sqlite,
@@ -32,6 +33,7 @@ __all__ = [
     "ingest_business",
     "ingest_split",
     "polars_type_to_sqlite",
+    "resolve_split_paths",
     "token_common_prefix",
     "write_tables_to_sqlite",
 ]

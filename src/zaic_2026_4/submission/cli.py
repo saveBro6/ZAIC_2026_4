@@ -13,9 +13,10 @@ from zaic_2026_4.constants import (
     DEFAULT_SQL_MAX_RETRIES,
     DEFAULT_SUBMISSION_PATH,
 )
+from zaic_2026_4.ingestion import resolve_split_paths
 from zaic_2026_4.profiling.profile_summarizer import create_engine
 from zaic_2026_4.profiling.vector_indexer import MockEmbedder
-from zaic_2026_4.submission.pipeline import SubmissionPipeline, resolve_split_paths
+from zaic_2026_4.submission.pipeline import SubmissionPipeline
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -15,7 +15,6 @@ from zaic_2026_4.submission.models import (
 from zaic_2026_4.submission.pipeline import (
     BusinessContext,
     SubmissionPipeline,
-    resolve_split_paths,
 )
 from zaic_2026_4.submission.prompt_template import (
     FEW_SHOT_SQL_EXAMPLES_VI,
@@ -64,6 +63,5 @@ __all__ = [
     "normalize_contract_string",
     "parse_structured_sql_output",
     "permute_schema",
-    "resolve_split_paths",
     "summarize_result_set",
 ]
