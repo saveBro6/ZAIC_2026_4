@@ -87,6 +87,12 @@ Every code modification task must strictly adhere to the sequential lifecycle be
 - **Zero-Bypass Policy:** Never generate summary artifacts or declare task completion without an explicit `[PASSED]` verdict from the `code-reviewer` agent.
 - **No Duplicate Test Runs:** Never re-run `pytest` after `code-reviewer` has already executed tests and returned `[PASSED]`.
 - **Context Preservation:** When handing off to `code-reviewer`, pass the exact verbatim user prompt along with relevant issue/ticket context to serve as the ground truth.
+- **Zero-Polling & Anti-Spam Policy for Subagents:**
+  - Strictly prohibit polling in loops or spamming tools like `manage_subagents(Action="list")` and repetitive short `schedule(...)` timers (e.g., 5s–10s) while waiting for `code-reviewer` or other subagents.
+  - Rely exclusively on the platform's reactive wakeup mechanism: after launching a subagent via `invoke_subagent`, immediately stop calling tools and wait for its completion message.
+- **Full Test Suite Schedule Directive (`uv run pytest`):**
+  - The repository's full test suite execution typically takes around 40–45s.
+  - When running `uv run pytest` (full test suite) asynchronously as a background task, schedule a single timer using `schedule(DurationSeconds=45, ...)` rather than repeated short status checks or polling loops.
 - **No Data Leakage / Zero Hardcoding Policy:**
   - Strictly prohibit hardcoding rules, string literals, column mappings, or conditional logic (`if-else`) tailored to specific datasets, shops, or ground truth files (e.g. from `train` split).
   - All query generation, schema linking, and error correction must remain 100% data-agnostic and generalize to unseen private evaluation sets.
