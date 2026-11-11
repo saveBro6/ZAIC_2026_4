@@ -661,3 +661,30 @@ def test_schema_linking_auto_save_cache(
     per_q_file = cache_dir / "schema_linking_result_q_123.json"
     assert per_q_file.is_file()
 
+
+def test_zaic_schema_link_cli_parser_and_matching() -> None:
+    """Verify zaic-schema-link CLI parser and business ID question matching."""
+    from zaic_2026_4.schema_linking.cli import _matches_biz_id, build_parser
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "--split", "dataset/train",
+        "--biz-id", "101",
+        "--output-dir", "/tmp/custom_cache",
+        "--mock",
+    ])
+    assert args.split == "dataset/train"
+    assert args.biz_id == "101"
+    assert args.output_dir == "/tmp/custom_cache"
+    assert args.mock is True
+    assert args.local is False
+
+    # Check _matches_biz_id logic
+    assert _matches_biz_id("101", "biz_101") is True
+    assert _matches_biz_id("biz_101", "biz_101") is True
+    assert _matches_biz_id("101", "101") is True
+    assert _matches_biz_id("biz_101", "101") is True
+    assert _matches_biz_id("1", "biz_01") is True
+    assert _matches_biz_id("101", "biz_102") is False
+
+
