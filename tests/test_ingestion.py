@@ -1,17 +1,11 @@
 """Tests for tabular ingestion module."""
 
-from pathlib import Path
 import sqlite3
+from pathlib import Path
+
 import polars as pl
 import pytest
 
-from zaic_2026_4.ingestion.extractors import (
-    discover_and_extract_business,
-    extract_csv,
-    extract_excel,
-    extract_sqlite,
-)
-from zaic_2026_4.ingestion.header_detector import detect_header_row
 from zaic_2026_4.ingestion.service import ingest_business
 from zaic_2026_4.ingestion.sqlite_sink import write_tables_to_sqlite
 from zaic_2026_4.ingestion.view_builder import (
@@ -174,6 +168,27 @@ def test_ingest_train_business_biz_123_sqlite(tmp_path: Path):
     assert "san_pham" in tables
 
     cur.execute('SELECT COUNT(*) FROM "don_hang";')
+    assert cur.fetchone()[0] > 0
+
+    conn.close()
+
+
+def test_calendar_auto_discovery(tmp_path: Path):
+    """Verify auto-discovery of calendar.csv without explicit calendar_path."""
+    biz_dir = Path("dataset/train/data/biz_101")
+    if not biz_dir.exists():
+        pytest.skip("biz_101 does not exist in dataset/train/data")
+
+    out_db = ingest_business(biz_dir, output_dir=tmp_path, create_views=True)
+    assert out_db.exists()
+
+    conn = sqlite3.connect(out_db)
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = [r[0] for r in cur.fetchall()]
+    assert "calendar" in tables
+
+    cur.execute('SELECT COUNT(*) FROM "calendar";')
     assert cur.fetchone()[0] > 0
 
     conn.close()

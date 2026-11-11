@@ -28,7 +28,7 @@ def ingest_business(
         business_dir: Path to the business directory (e.g. dataset/train/data/biz_101).
         output_dir: Target output directory. Defaults to /tmp/zaic_db/<split>.
         create_views: Whether to generate unified VIEWs for identical schemas.
-        calendar_path: Optional path to calendar.csv to ingest into business database.
+        calendar_path: Optional path to calendar.csv. Auto-discovered from parent directories if omitted.
 
     Returns:
         Path to the created SQLite database file.
@@ -51,14 +51,18 @@ def ingest_business(
     # Extract all tabular data preserving raw types and schemas
     tables = discover_and_extract_business(biz_path)
 
-    # Ingest split calendar table if provided
-    if calendar_path:
-        cal_p = Path(calendar_path).resolve()
-        if cal_p.is_file() and "calendar" not in tables:
-            cal_tables = extract_csv(cal_p)
-            for df in cal_tables.values():
-                tables["calendar"] = df
-                break
+    # Ingest split calendar table if provided or auto-discovered
+    cal_p = Path(calendar_path).resolve() if calendar_path else None
+    if cal_p is None:
+        cand_cal = biz_path.parent.parent / "calendar.csv"
+        if cand_cal.is_file():
+            cal_p = cand_cal.resolve()
+
+    if cal_p and cal_p.is_file() and "calendar" not in tables:
+        cal_tables = extract_csv(cal_p)
+        for df in cal_tables.values():
+            tables["calendar"] = df
+            break
 
     # Persist tables to SQLite with view generation
     write_tables_to_sqlite(tables, output_path, create_views=create_views)
@@ -105,6 +109,11 @@ def ingest_split(
         cand = raw_path / "calendar.csv"
         if cand.is_file():
             resolved_cal = cand
+
+    if resolved_cal is None:
+        cand_base = Path(base_dir) / split_name_or_path / "calendar.csv"
+        if cand_base.is_file():
+            resolved_cal = cand_base.resolve()
 
     if raw_path.is_dir() and (raw_path / "data").is_dir():
         data_dir = raw_path / "data"
