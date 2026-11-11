@@ -84,7 +84,7 @@ class VotingExecutor:
 
         except sqlite3.Error as exc:
             return False, f"SQLite error: {exc}", None, None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return False, f"Execution error: {exc}", None, None
         finally:
             if conn is not None:

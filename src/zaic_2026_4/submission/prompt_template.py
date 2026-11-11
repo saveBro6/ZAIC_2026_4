@@ -19,13 +19,9 @@ FEW_SHOT_SQL_EXAMPLES_VI: str = (
     '        <column name="Trạng thái học vụ" type="STRING">Trạng thái hồ sơ học vụ. | Samples: [\'Đã ghi danh\', \'Bảo lưu\']</column>\n'
     "      </table>\n"
     "    </selected_schema>\n"
-    "    <sql>\n"
-    'SELECT SUM(CAST(REPLACE(T1."Học phí thực thu", \',\', \'\') AS REAL)) AS "Tổng học phí"\n'
-    'FROM "dang_ky_khoa_hoc" AS T1\n'
-    'WHERE LOWER(T1."Tên khóa học") LIKE LOWER(\'%Lập trình Python%\')\n'
-    '  AND T1."Trạng thái học vụ" != \'Bảo lưu\'\n'
-    '  AND (substr(T1."Ngày ghi danh", 7, 4) || \'-\' || substr(T1."Ngày ghi danh", 4, 2) || \'-\' || substr(T1."Ngày ghi danh", 1, 2)) BETWEEN \'2026-05-01\' AND \'2026-05-25\';\n'
-    "    </sql>\n"
+    "    <output>\n"
+    '{"sql": "SELECT SUM(CAST(REPLACE(T1.\\"Học phí thực thu\\", \',\', \'\') AS REAL)) AS \\"Tổng học phí\\" FROM \\"dang_ky_khoa_hoc\\" AS T1 WHERE LOWER(T1.\\"Tên khóa học\\") LIKE LOWER(\'%Lập trình Python%\') AND T1.\\"Trạng thái học vụ\\" != \'Bảo lưu\' AND (substr(T1.\\"Ngày ghi danh\\", 7, 4) || \'-\' || substr(T1.\\"Ngày ghi danh\\", 4, 2) || \'-\' || substr(T1.\\"Ngày ghi danh\\", 1, 2)) BETWEEN \'2026-05-01\' AND \'2026-05-25\';", "type": "number"}\n'
+    "    </output>\n"
     "  </example>\n\n"
     '  <example id="2">\n'
     '    <user_question>Thiết bị nào có kinh phí duy trì thấp nhất còn số lượng khả dụng?</user_question>\n'
@@ -38,14 +34,9 @@ FEW_SHOT_SQL_EXAMPLES_VI: str = (
     '        <column name="Số lượng khả dụng" type="NUMERIC">Số lượng thiết bị sẵn sàng vận hành. | Samples: [2, 10]</column>\n'
     "      </table>\n"
     "    </selected_schema>\n"
-    "    <sql>\n"
-    'SELECT T1."Tên thiết bị", T1."Kinh phí duy trì"\n'
-    'FROM "thiet_bi_phong_lab" AS T1\n'
-    'WHERE T1."Kinh phí duy trì" IS NOT NULL\n'
-    '  AND T1."Số lượng khả dụng" > 0\n'
-    'ORDER BY CAST(REPLACE(T1."Kinh phí duy trì", \',\', \'\') AS REAL) ASC, T1."Mã thiết bị" ASC\n'
-    "LIMIT 1;\n"
-    "    </sql>\n"
+    "    <output>\n"
+    '{"sql": "SELECT T1.\\"Tên thiết bị\\" FROM \\"thiet_bi_phong_lab\\" AS T1 WHERE T1.\\"Kinh phí duy trì\\" IS NOT NULL AND T1.\\"Số lượng khả dụng\\" > 0 ORDER BY CAST(REPLACE(T1.\\"Kinh phí duy trì\\", \',\', \'\') AS REAL) ASC, T1.\\"Mã thiết bị\\" ASC LIMIT 1;", "type": "string"}\n'
+    "    </output>\n"
     "  </example>\n"
     "</few_shot_examples>"
 )
@@ -204,12 +195,24 @@ def build_sql_generation_prompt(
     prompt_parts = [
         "<system>",
         "Bạn là chuyên gia kỹ sư Text-to-SQL chuyên sâu về SQLite cho hệ thống dữ liệu doanh nghiệp (SMB) tại Việt Nam.",
-        "Nhiệm vụ: Phân tích ngữ cảnh và xuất DUY NHẤT một câu truy vấn SQLite chuẩn xác, hợp lệ để trả lời câu hỏi.",
+        'Nhiệm vụ: Phân tích ngữ cảnh và xuất DUY NHẤT một đối tượng JSON hợp lệ theo đúng cấu trúc: {"sql": "<câu lệnh SQLite SQL>", "type": "<type>"}.',
+        "",
+        "[QUY TẮC ĐỊNH DẠNG ĐẦU RA JSON & KIỂU DỮ LIỆU DATAMATE]",
+        '1. Trường "sql": Câu lệnh SQLite SQL thô có thể thực thi được. Tuyệt đối không thêm lời giải thích, chào hỏi hoặc văn bản mở đầu/kết thúc bên ngoài JSON.',
+        '2. Trường "type": BẮT BUỘC là 1 trong các kiểu dữ liệu hợp lệ sau theo quy chuẩn cuộc thi DataMate:',
+        '   - "number": Câu hỏi về giá trị số (tổng tiền VNĐ, số lượng, đếm, chi phí). Mệnh đề SELECT trả về 1 dòng, 1 cột số.',
+        '   - "percent": Câu hỏi về tỷ lệ phần trăm (tính theo %, thang đo 0-100, ví dụ 12.45 tương ứng 12.45%). Mệnh đề SELECT trả về 1 dòng, 1 cột tỷ lệ.',
+        '   - "string": Câu hỏi về tên hoặc mã của một đối tượng/thực thể cụ thể (sản phẩm, khách hàng, chi nhánh, thứ trong tuần). Mệnh đề SELECT trả về 1 dòng, 1 cột chuỗi.',
+        '   - "date": Câu hỏi về ngày tháng theo chuẩn ISO (YYYY-MM-DD hoặc YYYY-MM). Mệnh đề SELECT trả về 1 dòng, 1 cột ngày tháng.',
+        '   - "boolean": Câu hỏi dạng Có/Không, Đúng/Sai. Mệnh đề SELECT trả về 1 dòng, 1 cột logic (1/0 hoặc true/false).',
+        '   - "list": Câu hỏi yêu cầu danh sách các tên hoặc số (ví dụ Top 3 sản phẩm, danh sách khách hàng). Mệnh đề SELECT BẮT BUỘC CHỈ CHỌN 1 CỘT DUY NHẤT với nhiều dòng theo đúng thứ tự yêu cầu.',
+        '   - "table": Câu hỏi yêu cầu bảng dữ liệu nhiều cột. Mệnh đề SELECT chọn nhiều cột thông tin.',
+        '   - "unanswerable": Khi cơ sở dữ liệu/schema hoàn toàn không có thông tin để trả lời câu hỏi. Khi đó đặt "sql": "" và "type": "unanswerable".',
+        '   - "abstain": Khi không thể xác định câu truy vấn an toàn hoặc rủi ro sai sót cao. Khi đó đặt "sql": "" và "type": "abstain".',
         "",
         "[HƯỚNG DẪN SQL VÀ QUY TẮC CHÍNH]",
-        "1. Chỉ xuất DUY NHẤT câu lệnh SQLite SQL thô có thể thực thi được. Tuyệt đối không thêm lời giải thích, chào hỏi hoặc văn bản mở đầu/kết thúc.",
-        '2. Bọc tên bảng và tên cột trong dấu ngoặc kép (double quotes) nếu chứa dấu tiếng Việt, khoảng trắng hoặc ký tự đặc biệt (ví dụ: SELECT T1."Tên hàng" FROM "ban_hang" AS T1).',
-        "3. Luôn ưu tiên dùng LEFT JOIN khi nối từ bảng giao dịch/bán hàng sang bảng danh mục để bảo toàn dữ liệu khi khóa ngoại chứa NULL hoặc bị thiếu.",
+        '1. Bọc tên bảng và tên cột trong dấu ngoặc kép (double quotes) nếu chứa dấu tiếng Việt, khoảng trắng hoặc ký tự đặc biệt (ví dụ: SELECT T1."Tên hàng" FROM "ban_hang" AS T1).',
+        "2. Luôn ưu tiên dùng LEFT JOIN khi nối từ bảng giao dịch/bán hàng sang bảng danh mục để bảo toàn dữ liệu khi khóa ngoại chứa NULL hoặc bị thiếu.",
         "",
         "[XỬ LÝ DỮ LIỆU & BẪY KỸ THUẬT SQLITE THEO PROFILING]",
         "1. Neo mốc thời gian (<temporal_anchor>):",
@@ -262,15 +265,19 @@ def build_sql_correction_prompt(
     faulty_sql: str,
     validation_issues: list[str],
     schema_xml: str | None = None,
+    previous_type: str = "number",
 ) -> str:
     """Build prompt asking LLM to correct bad SQL constructions, runtime execution errors, or empty results."""
     issues_str = "\n".join(f"- {issue}" for issue in validation_issues)
 
     prompt_parts = [
         "<system>",
-        "Bạn là một chuyên gia kỹ thuật SQL. Câu truy vấn SQLite trước đó gặp lỗi thực thi hoặc kết quả không phù hợp.",
-        "Vui lòng sửa lại câu truy vấn dựa trên các phản hồi bên dưới.",
-        "Chỉ xuất DUY NHẤT câu lệnh SQLite SQL đã sửa và có thể thực thi được.",
+        "Bạn là một chuyên gia kỹ thuật SQL. Câu truy vấn SQLite hoặc định dạng JSON trước đó gặp lỗi thực thi hoặc kết quả không phù hợp.",
+        (
+            "Vui lòng sửa lại và xuất DUY NHẤT một đối tượng JSON hợp lệ theo cấu trúc: "
+            '{"sql": "<câu lệnh SQLite SQL đã sửa>", "type": "<type>"} '
+            'với type là 1 trong các giá trị: ("number", "percent", "string", "date", "boolean", "list", "table", "unanswerable", "abstain").'
+        ),
         "</system>",
         "",
         f"<user_question>\n{question}\n</user_question>",
@@ -283,11 +290,11 @@ def build_sql_correction_prompt(
 
     prompt_parts.extend([
         "",
-        f"<previous_sql>\n{faulty_sql}\n</previous_sql>",
+        f"<previous_output>\n{{\"sql\": {faulty_sql!r}, \"type\": {previous_type!r}}}\n</previous_output>",
         "",
         f"<validation_errors>\n{issues_str}\n</validation_errors>",
         "",
-        "<corrected_sql>",
+        "<output>",
     ])
 
     return "\n".join(prompt_parts)

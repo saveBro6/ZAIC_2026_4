@@ -147,37 +147,43 @@ class MockLLMEngine:
 
             # Support SQL generation prompts for Mock testing
             if "<target_column>" not in prompt and (
-                "SQL engineer" in prompt or "<database_schema>" in prompt
+                "SQL engineer" in prompt
+                or "<database_schema>" in prompt
+                or "Text-to-SQL" in prompt
+                or "<temporal_anchor>" in prompt
+                or kwargs.get("structured_outputs") is not None
             ):
+                import json
                 import re
 
                 if "Fresno" in prompt:
-                    if "reprompt_correction_guidance" in prompt:
-                        results.append(
-                            "SELECT T2.Zip FROM frpm AS T1 "
-                            "INNER JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode "
-                            "WHERE T1.`Charter School (Y/N)` = 1 AND T2.District = 'Fresno County Office of Education'"
-                        )
-                    else:
-                        results.append(
-                            "SELECT T2.Zip FROM frpm AS T1 "
-                            "INNER JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode "
-                            "WHERE T1.`Charter School (Y/N)` = 1 AND T1.`County Name` = 'Fresno County Office of Education'"
-                        )
-                    continue
-
-                # General mock SQL from schema
-                tables = re.findall(r'<table name="([^"]+)">', prompt)
-                cols = re.findall(r'<column name="([^"]+)"', prompt)
-                if tables and cols:
-                    main_tbl = tables[0]
-                    col_refs = [f'T1."{c}"' for c in cols[:3]]
-                    sql = f'SELECT {", ".join(col_refs)} FROM "{main_tbl}" AS T1'
-                    if len(cols) > 3:
-                        sql += f' WHERE T1."{cols[3]}" IS NOT NULL'
-                    results.append(sql)
+                    sql = (
+                        "SELECT T2.Zip FROM frpm AS T1 "
+                        "INNER JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode "
+                        "WHERE T1.`Charter School (Y/N)` = 1 AND T2.District = 'Fresno County Office of Education'"
+                        if "reprompt_correction_guidance" in prompt
+                        else "SELECT T2.Zip FROM frpm AS T1 "
+                        "INNER JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode "
+                        "WHERE T1.`Charter School (Y/N)` = 1 AND T1.`County Name` = 'Fresno County Office of Education'"
+                    )
                 else:
-                    results.append("SELECT 1")
+                    tables = re.findall(r'<table name="([^"]+)">', prompt)
+                    cols = re.findall(r'<column name="([^"]+)"', prompt)
+                    if tables and cols:
+                        main_tbl = tables[0]
+                        col_refs = [f'T1."{c}"' for c in cols[:3]]
+                        sql = f'SELECT {", ".join(col_refs)} FROM "{main_tbl}" AS T1'
+                        if len(cols) > 3:
+                            sql += f' WHERE T1."{cols[3]}" IS NOT NULL'
+                    else:
+                        sql = "SELECT 1"
+
+                # If structured outputs is requested or prompt expects JSON {"sql": ..., "type": ...}
+                if kwargs.get("structured_outputs") is not None or '{"sql":' in prompt or "Text-to-SQL" in prompt:
+                    out_dict = {"sql": sql, "type": "number"}
+                    results.append(json.dumps(out_dict, ensure_ascii=False))
+                else:
+                    results.append(sql)
                 continue
 
             # Check whether it is a minimal or maximal prompt
@@ -245,16 +251,14 @@ class MockLLMEngine:
                 if 'Tóm tắt rút gọn: "' in target_text:
                     try:
                         raw_line = target_text.split('Tóm tắt rút gọn: "')[1].split("\n")[0].strip()
-                        if raw_line.endswith('"'):
-                            raw_line = raw_line[:-1]
+                        raw_line = raw_line.removesuffix('"')
                         minimal_profile_in_prompt = raw_line
                     except IndexError:
                         pass
                 elif 'Minimal Profile: "' in target_text:
                     try:
                         raw_line = target_text.split('Minimal Profile: "')[1].split("\n")[0].strip()
-                        if raw_line.endswith('"'):
-                            raw_line = raw_line[:-1]
+                        raw_line = raw_line.removesuffix('"')
                         minimal_profile_in_prompt = raw_line
                     except IndexError:
                         pass

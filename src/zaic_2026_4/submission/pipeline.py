@@ -165,7 +165,7 @@ class SubmissionPipeline:
         if path.is_file():
             try:
                 return path.read_text(encoding="utf-8").strip()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to read %s: %s", path, exc)
         return ""
 
@@ -202,7 +202,7 @@ class SubmissionPipeline:
             try:
                 with open(raw_profile_path, "r", encoding="utf-8") as f:
                     raw_profile = json.load(f)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 raw_profile = None
 
         linker = TaskAlignedSchemaLinker(
@@ -231,7 +231,7 @@ class SubmissionPipeline:
 
         try:
             biz_ctx = self.get_or_load_business(item.business_id)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.error("Failed to load business context for %s: %s", item.business_id, exc)
             return QuestionSubmission(
                 id=item.id,
@@ -254,7 +254,7 @@ class SubmissionPipeline:
                 question_id=item.id,
             )
             reduced_schema = linking_res.final_linked_schema
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Schema linking error on %s: %s", item.id, exc)
             reduced_schema = set()
 
@@ -289,7 +289,7 @@ class SubmissionPipeline:
         elapsed = time.perf_counter() - t0
 
         # 4. Result Formatting
-        if winner is None or winner.raw_result is None:
+        if winner is None:
             submission = QuestionSubmission(
                 id=item.id,
                 type="abstain",
@@ -300,10 +300,32 @@ class SubmissionPipeline:
                 voting_status=status,
                 selection_reason=reason,
             )
+        elif winner.predicted_type == "unanswerable":
+            submission = QuestionSubmission(
+                id=item.id,
+                type="unanswerable",
+                answer=None,
+                elapsed_seconds=elapsed,
+                candidates=candidates,
+                winning_candidate_id=winner.candidate_id,
+                voting_status=status,
+                selection_reason=reason,
+            )
+        elif winner.predicted_type == "abstain" or winner.raw_result is None:
+            submission = QuestionSubmission(
+                id=item.id,
+                type="abstain",
+                answer=None,
+                elapsed_seconds=elapsed,
+                candidates=candidates,
+                winning_candidate_id=winner.candidate_id,
+                voting_status=status,
+                selection_reason=reason,
+            )
         else:
             ans_type, ans_val = ResultFormatter.format_result(
-                question=item.question,
                 raw_rows=winner.raw_result,
+                target_type=winner.predicted_type,
             )
             submission = QuestionSubmission(
                 id=item.id,
@@ -321,7 +343,7 @@ class SubmissionPipeline:
         try:
             with open(log_file, "w", encoding="utf-8") as f:
                 json.dump(submission.to_trace_log(item), f, ensure_ascii=False, indent=2)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to write log trace for %s: %s", item.id, exc)
 
         return submission
@@ -343,7 +365,7 @@ class SubmissionPipeline:
                 if line_str:
                     try:
                         questions.append(QuestionItem.from_dict(json.loads(line_str)))
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001
                         logger.warning("Skipping malformed question line: %s (%s)", line_str, exc)
 
         if limit is not None and limit > 0:

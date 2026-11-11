@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from zaic_2026_4.submission.result_formatter import (
     ResultFormatter,
-    infer_question_target_type,
     normalize_contract_string,
 )
 
@@ -16,15 +15,6 @@ def test_normalize_contract_string() -> None:
 
     raw_accents = "Cà phê Sữa   ĐÁ"
     assert normalize_contract_string(raw_accents) == "cà phê sữa đá"
-
-
-def test_infer_question_target_type() -> None:
-    assert infer_question_target_type("Tỉ lệ huỷ đơn tháng này là bao nhiêu %?") == "percent"
-    assert infer_question_target_type("Ngày nào có doanh thu cao nhất?") == "date"
-    assert infer_question_target_type("Có phải khách hàng đã thanh toán?") == "boolean"
-    assert infer_question_target_type("Top 3 sản phẩm bán chạy nhất?") == "list"
-    assert infer_question_target_type("Sản phẩm nào bán chạy nhất?") == "string"
-    assert infer_question_target_type("Tổng doanh thu tháng này là bao nhiêu?") == "number"
 
 
 def test_format_number() -> None:
@@ -51,27 +41,27 @@ def test_format_date() -> None:
 
 def test_format_result_scalar_cases() -> None:
     # Number
-    t, val = ResultFormatter.format_result("Tổng tiền?", [(48250000,)])
+    t, val = ResultFormatter.format_result([(48250000,)], target_type="number")
     assert t == "number"
     assert val == 48250000
 
     # Percent
-    t, val = ResultFormatter.format_result("Tỉ lệ đơn hủy là bao nhiêu %?", [(2.08,)])
+    t, val = ResultFormatter.format_result([(2.08,)], target_type="percent")
     assert t == "percent"
     assert val == 2.08
 
     # String
-    t, val = ResultFormatter.format_result("Mặt hàng nào bán chạy nhất?", [("Sting dâu 330ml",)])
+    t, val = ResultFormatter.format_result([("Sting dâu 330ml",)], target_type="string")
     assert t == "string"
     assert val == "Sting dâu 330ml"
 
     # Date
-    t, val = ResultFormatter.format_result("Ngày nào bán được nhiều nhất?", [("2026-08-15",)])
+    t, val = ResultFormatter.format_result([("2026-08-15",)], target_type="date")
     assert t == "date"
     assert val == "2026-08-15"
 
     # Boolean
-    t, val = ResultFormatter.format_result("Có phải doanh thu tăng không?", [(1,)])
+    t, val = ResultFormatter.format_result([(1,)], target_type="boolean")
     assert t == "boolean"
     assert val is True
 
@@ -79,45 +69,55 @@ def test_format_result_scalar_cases() -> None:
 def test_format_result_list_and_table() -> None:
     # List (single column, multiple rows)
     rows_list = [("Cà phê sữa",), ("Bạc xỉu",), ("Trà đào",)]
-    t, val = ResultFormatter.format_result("Top 3 mặt hàng?", rows_list)
+    t, val = ResultFormatter.format_result(rows_list, target_type="list")
     assert t == "list"
     assert val == ["Cà phê sữa", "Bạc xỉu", "Trà đào"]
 
     # Table (multiple columns, multiple rows)
     rows_table = [("Chị Lan", 3200000), ("Anh Tú", 1500000)]
-    t, val = ResultFormatter.format_result("Bảng công nợ?", rows_table)
+    t, val = ResultFormatter.format_result(rows_table, target_type="table")
     assert t == "table"
     assert isinstance(val, dict)
     assert val["rows"] == [["Chị Lan", 3200000], ["Anh Tú", 1500000]]
 
 
+def test_format_result_unanswerable_and_abstain() -> None:
+    t_unans, val_unans = ResultFormatter.format_result(None, target_type="unanswerable")
+    assert t_unans == "unanswerable"
+    assert val_unans is None
+
+    t_abs, val_abs = ResultFormatter.format_result(None, target_type="abstain")
+    assert t_abs == "abstain"
+    assert val_abs is None
+
+
 def test_format_result_edge_cases_zero_and_none() -> None:
-    # [(0,)] on percent question -> percent, 0.0
-    t_pct, val_pct = ResultFormatter.format_result("Tỉ lệ hủy là %?", [(0,)])
+    # [(0,)] on percent -> percent, 0.0
+    t_pct, val_pct = ResultFormatter.format_result([(0,)], target_type="percent")
     assert t_pct == "percent"
     assert val_pct == 0.0
 
-    # [(0,)] on count question -> number, 0
-    t_num, val_num = ResultFormatter.format_result("Tổng số đơn?", [(0,)])
+    # [(0,)] on number -> number, 0
+    t_num, val_num = ResultFormatter.format_result([(0,)], target_type="number")
     assert t_num == "number"
     assert val_num == 0
 
-    # [(None,)] on aggregate question -> number, 0
-    t_none_agg, val_none_agg = ResultFormatter.format_result("Tổng tiền?", [(None,)])
+    # [(None,)] on number -> number, 0
+    t_none_agg, val_none_agg = ResultFormatter.format_result([(None,)], target_type="number")
     assert t_none_agg == "number"
     assert val_none_agg == 0
 
     # [(None,)] on entity search question -> abstain
-    t_none_ent, val_none_ent = ResultFormatter.format_result("Sản phẩm nào?", [(None,)])
+    t_none_ent, val_none_ent = ResultFormatter.format_result([(None,)], target_type="string")
     assert t_none_ent == "abstain"
     assert val_none_ent is None
 
     # Empty rows on aggregate question -> 0
-    t_empty_agg, val_empty_agg = ResultFormatter.format_result("Tổng tiền?", [])
+    t_empty_agg, val_empty_agg = ResultFormatter.format_result([], target_type="number")
     assert t_empty_agg == "number"
     assert val_empty_agg == 0
 
     # Empty rows on entity question -> abstain
-    t_empty_ent, val_empty_ent = ResultFormatter.format_result("Sản phẩm nào?", [])
+    t_empty_ent, val_empty_ent = ResultFormatter.format_result([], target_type="string")
     assert t_empty_ent == "abstain"
     assert val_empty_ent is None

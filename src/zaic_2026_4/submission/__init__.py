@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from zaic_2026_4.submission.candidate_generator import CandidateGenerator
 from zaic_2026_4.submission.models import (
+    VALID_DATAMATE_TYPES,
     CandidateQuery,
+    DataMateAnswerType,
     QuestionItem,
     QuestionSubmission,
+    SQLGenerationOutput,
     ValidationResult,
 )
 from zaic_2026_4.submission.pipeline import (
@@ -24,10 +27,13 @@ from zaic_2026_4.submission.prompt_template import (
 )
 from zaic_2026_4.submission.result_formatter import (
     ResultFormatter,
-    infer_question_target_type,
     normalize_contract_string,
 )
-from zaic_2026_4.submission.sql_validator import SQLValidator, clean_sql_string
+from zaic_2026_4.submission.sql_validator import (
+    SQLValidator,
+    clean_sql_string,
+    parse_structured_sql_output,
+)
 from zaic_2026_4.submission.voting_executor import (
     VotingExecutor,
     normalize_cell,
@@ -36,12 +42,15 @@ from zaic_2026_4.submission.voting_executor import (
 
 __all__ = [
     "FEW_SHOT_SQL_EXAMPLES_VI",
+    "VALID_DATAMATE_TYPES",
     "BusinessContext",
     "CandidateGenerator",
     "CandidateQuery",
+    "DataMateAnswerType",
     "QuestionItem",
     "QuestionSubmission",
     "ResultFormatter",
+    "SQLGenerationOutput",
     "SQLValidator",
     "SubmissionPipeline",
     "ValidationResult",
@@ -51,9 +60,9 @@ __all__ = [
     "clean_sql_string",
     "format_permuted_schema_xml",
     "format_rulebook_context",
-    "infer_question_target_type",
     "normalize_cell",
     "normalize_contract_string",
+    "parse_structured_sql_output",
     "permute_schema",
     "resolve_split_paths",
     "summarize_result_set",

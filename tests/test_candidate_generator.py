@@ -15,7 +15,10 @@ from zaic_2026_4.submission.prompt_template import (
     format_rulebook_context,
     permute_schema,
 )
-from zaic_2026_4.submission.sql_validator import SQLValidator
+from zaic_2026_4.submission.sql_validator import (
+    SQLValidator,
+    parse_structured_sql_output,
+)
 
 
 class MockRetryLLMEngine:
@@ -225,15 +228,19 @@ def test_build_sql_correction_prompt_vietnamese() -> None:
         as_of_date="2026-05-25",
         faulty_sql="SELECT name FROM users ORDER BY price ASC;",
         validation_issues=["Null values not handled in ASC ordering."],
+        previous_type="number",
     )
 
     assert "Bạn là một chuyên gia kỹ thuật SQL" in prompt
-    assert "Vui lòng sửa lại câu truy vấn dựa trên các phản hồi bên dưới." in prompt
+    assert "đối tượng JSON hợp lệ" in prompt
     assert "<user_question>\nTổng số lượng hàng?\n</user_question>" in prompt
     assert "<temporal_anchor>\nas_of_date: 2026-05-25\n</temporal_anchor>" in prompt
-    assert "<previous_sql>\nSELECT name FROM users ORDER BY price ASC;\n</previous_sql>" in prompt
+    assert "<previous_output>" in prompt
+    assert '"sql":' in prompt
+    assert "SELECT name FROM users ORDER BY price ASC;" in prompt
+    assert '"type":' in prompt
     assert "<validation_errors>\n- Null values not handled in ASC ordering.\n</validation_errors>" in prompt
-    assert "<corrected_sql>" in prompt
+    assert "<output>" in prompt
 
 
 def test_candidate_generator_dry_run_success(tmp_path: Path) -> None:
@@ -402,4 +409,62 @@ def test_candidate_generator_dry_run_legitimate_zero_fallback(tmp_path: Path) ->
     assert cand.execution_retry_count == 2
     assert cand.total_retry_count == {"sql": 0, "execution": 2}
     assert cand.raw_result == [(0,)]
+
+
+def test_parse_structured_sql_output() -> None:
+    # 1. Standard valid JSON
+    sql, target_type, issues = parse_structured_sql_output('{"sql": "SELECT 1;", "type": "number"}')
+    assert sql == "SELECT 1;"
+    assert target_type == "number"
+    assert issues == []
+
+    # 2. Markdown fence wrapped JSON
+    sql, target_type, issues = parse_structured_sql_output('```json\n{"sql": "SELECT 1;", "type": "string"}\n```')
+    assert sql == "SELECT 1;"
+    assert target_type == "string"
+    assert issues == []
+
+    # 3. Invalid target_type gives issue and keeps parsed type for retry feedback
+    sql, target_type, issues = parse_structured_sql_output('{"sql": "SELECT 1;", "type": "custom_unknown"}')
+    assert sql == "SELECT 1;"
+    assert target_type == "custom_unknown"
+    assert len(issues) == 1
+    assert "không hợp lệ theo quy chế DataMate" in issues[0]
+
+    # 4. Backward compatibility raw SQL
+    sql, target_type, issues = parse_structured_sql_output("SELECT * FROM users;")
+    assert sql == "SELECT * FROM users;"
+    assert target_type == "number"
+    assert issues == []
+
+
+def test_candidate_generator_invalid_type_retry_and_fallback() -> None:
+    class InvalidTypeEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, prompts: Any, **kwargs: Any) -> str:
+            self.calls += 1
+            # Continually return an invalid type
+            return '{"sql": "SELECT 1;", "type": "unrecognized_format"}'
+
+    generator = CandidateGenerator(
+        llm_engine=InvalidTypeEngine(),
+        seeds=(42,),
+        sql_max_retries=2,
+    )
+
+    cand = generator.generate_candidate(
+        candidate_id=0,
+        seed=42,
+        question="Số đơn?",
+        as_of_date="2026-05-25",
+        reduced_schema=set(),
+        processed_metadata={},
+    )
+
+    # Retries were exhausted trying to fix the invalid type
+    assert cand.sql_retry_count == 2
+    # Final type falls back safely to 'abstain' to protect penalty points
+    assert cand.predicted_type == "abstain"
 

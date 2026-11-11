@@ -3,7 +3,40 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel
+
+DataMateAnswerType = Literal[
+    "number",
+    "percent",
+    "string",
+    "date",
+    "boolean",
+    "list",
+    "table",
+    "unanswerable",
+    "abstain",
+]
+
+VALID_DATAMATE_TYPES: tuple[str, ...] = (
+    "number",
+    "percent",
+    "string",
+    "date",
+    "boolean",
+    "list",
+    "table",
+    "unanswerable",
+    "abstain",
+)
+
+
+class SQLGenerationOutput(BaseModel):
+    """Structured JSON output schema for LLM SQL generation and correction."""
+
+    sql: str
+    type: DataMateAnswerType
 
 
 @dataclass
@@ -43,6 +76,7 @@ class CandidateQuery:
     schema_permutation: list[str] = field(default_factory=list)
     initial_sql: str = ""
     final_sql: str = ""
+    predicted_type: str = "number"
     is_valid_syntax: bool = True
     construction_issues: list[str] = field(default_factory=list)
     sql_retry_count: int = 0
@@ -70,13 +104,14 @@ class CandidateQuery:
         """Convert candidate trace to serializable dictionary."""
         res_repr: list[str] | None = None
         if self.result_set is not None:
-            res_repr = [str(r) for r in sorted(list(self.result_set), key=str)]
+            res_repr = [str(r) for r in sorted(self.result_set, key=str)]
 
         return {
             "candidate_id": self.candidate_id,
             "seed": self.seed,
             "initial_sql": self.initial_sql,
             "final_sql": self.final_sql,
+            "predicted_type": self.predicted_type,
             "total_retry_count": {
                 "sql": self.sql_retry_count,
                 "execution": self.execution_retry_count,
@@ -141,8 +176,11 @@ class QuestionSubmission:
 
 
 __all__ = [
+    "VALID_DATAMATE_TYPES",
     "CandidateQuery",
+    "DataMateAnswerType",
     "QuestionItem",
     "QuestionSubmission",
+    "SQLGenerationOutput",
     "ValidationResult",
 ]

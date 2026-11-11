@@ -13,14 +13,22 @@ from zaic_2026_4.constants import (
     DEFAULT_SQL_MAX_RETRIES,
     DEFAULT_SQL_TIMEOUT_SECONDS,
 )
-from zaic_2026_4.submission.models import CandidateQuery
+from zaic_2026_4.submission.models import (
+    VALID_DATAMATE_TYPES,
+    CandidateQuery,
+    SQLGenerationOutput,
+    ValidationResult,
+)
 from zaic_2026_4.submission.prompt_template import (
     build_sql_correction_prompt,
     build_sql_generation_prompt,
     format_permuted_schema_xml,
     permute_schema,
 )
-from zaic_2026_4.submission.sql_validator import SQLValidator, clean_sql_string
+from zaic_2026_4.submission.sql_validator import (
+    SQLValidator,
+    parse_structured_sql_output,
+)
 from zaic_2026_4.submission.voting_executor import normalize_cell
 
 logger = logging.getLogger(__name__)
@@ -63,6 +71,15 @@ class CandidateGenerator:
         self.db_path = Path(db_path).resolve() if db_path else None
         self.timeout_seconds = timeout_seconds
 
+        try:
+            from vllm.sampling_params import StructuredOutputsParams
+
+            self.structured_outputs: Any | None = StructuredOutputsParams(
+                json=SQLGenerationOutput.model_json_schema()
+            )
+        except Exception:  # noqa: BLE001
+            self.structured_outputs = None
+
     def _dry_run_query(
         self,
         sql: str,
@@ -87,7 +104,7 @@ class CandidateGenerator:
             return True, None, raw_rows, result_set
         except sqlite3.Error as exc:
             return False, f"SQLite error: {exc}", None, None
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return False, f"Execution error: {exc}", None, None
         finally:
             if conn is not None:
@@ -137,43 +154,62 @@ class CandidateGenerator:
         )
 
         # 3. Initial generation
-        raw_output = self.llm_engine.generate(
-            prompt,
-            temperature=0.7,
-            max_tokens=512,
-            seed=seed,
-        )
-        current_sql = clean_sql_string(raw_output if isinstance(raw_output, str) else raw_output[0])
+        gen_kwargs: dict[str, Any] = {
+            "temperature": 0.7,
+            "max_tokens": 512,
+            "seed": seed,
+        }
+        if self.structured_outputs is not None:
+            gen_kwargs["structured_outputs"] = self.structured_outputs
+
+        raw_output = self.llm_engine.generate(prompt, **gen_kwargs)
+        raw_str = raw_output if isinstance(raw_output, str) else raw_output[0]
+        current_sql, current_type, parse_issues = parse_structured_sql_output(raw_str)
         initial_sql = current_sql
 
         # 4. Static Validation & Self-Correction loop (up to sql_max_retries)
-        v_res = self.validator.validate(current_sql)
+        if current_type in ("unanswerable", "abstain") and not current_sql:
+            v_res = ValidationResult(is_valid=True, issues=[])
+        else:
+            v_res = self.validator.validate(current_sql)
+
+        all_issues = list(parse_issues) + list(v_res.issues)
         sql_retries = 0
 
-        while not v_res.is_valid and sql_retries < self.sql_max_retries:
+        while (not v_res.is_valid or parse_issues) and sql_retries < self.sql_max_retries:
             sql_retries += 1
             logger.debug(
                 "Candidate %d (seed %d) static retry %d due to issues: %s",
                 candidate_id,
                 seed,
                 sql_retries,
-                v_res.issues,
+                all_issues,
             )
             corr_prompt = build_sql_correction_prompt(
                 question=question,
                 as_of_date=as_of_date,
                 faulty_sql=current_sql,
-                validation_issues=v_res.issues,
+                validation_issues=all_issues,
                 schema_xml=schema_xml,
+                previous_type=current_type,
             )
-            corr_output = self.llm_engine.generate(
-                corr_prompt,
-                temperature=0.2,
-                max_tokens=512,
-                seed=seed + sql_retries,
-            )
-            current_sql = clean_sql_string(corr_output if isinstance(corr_output, str) else corr_output[0])
+            corr_kwargs: dict[str, Any] = {
+                "temperature": 0.2,
+                "max_tokens": 512,
+                "seed": seed + sql_retries,
+            }
+            if self.structured_outputs is not None:
+                corr_kwargs["structured_outputs"] = self.structured_outputs
+
+            corr_output = self.llm_engine.generate(corr_prompt, **corr_kwargs)
+            corr_str = corr_output if isinstance(corr_output, str) else corr_output[0]
+            current_sql, current_type, parse_issues = parse_structured_sql_output(corr_str, default_type=current_type)
+            if current_type in ("unanswerable", "abstain") and not current_sql:
+                v_res = ValidationResult(is_valid=True, issues=[])
+                all_issues = []
+                break
             v_res = self.validator.validate(current_sql)
+            all_issues = list(parse_issues) + list(v_res.issues)
 
         # 5. Dry-run Execution & Runtime Self-Correction loop (up to execution_max_retries)
         execution_retries = 0
@@ -182,7 +218,9 @@ class CandidateGenerator:
         raw_rows: list[Any] | None = None
         r_set: set[tuple[Any, ...]] | None = None
 
-        if v_res.is_valid and target_db is not None and target_db.is_file():
+        if current_type in ("unanswerable", "abstain") and not current_sql:
+            exec_success = True
+        elif v_res.is_valid and target_db is not None and target_db.is_file():
             exec_success, exec_error, raw_rows, r_set = self._dry_run_query(current_sql, target_db)
             is_suspicious = exec_success and self._is_suspicious_zero_result(raw_rows)
 
@@ -192,8 +230,10 @@ class CandidateGenerator:
                     issues = [f"Lỗi thực thi SQLite (Runtime Error): {exec_error}"]
                 else:
                     issues = [
-                        "Truy vấn thực thi thành công nhưng trả về 0 dòng khớp (hoặc kết quả là 0 / NULL). "
-                        "Vui lòng đối chiếu schema để kiểm tra lại: định dạng ngày tháng của cột thời gian trong schema/mẫu dữ liệu, các điều kiện so sánh chuỗi trong WHERE, và điều kiện JOIN."
+                        (
+                            "Truy vấn thực thi thành công nhưng trả về 0 dòng khớp (hoặc kết quả là 0 / NULL). "
+                            "Vui lòng đối chiếu schema để kiểm tra lại: định dạng ngày tháng của cột thời gian trong schema/mẫu dữ liệu, các điều kiện so sánh chuỗi trong WHERE, và điều kiện JOIN."
+                        )
                     ]
 
                 logger.debug(
@@ -209,17 +249,34 @@ class CandidateGenerator:
                     faulty_sql=current_sql,
                     validation_issues=issues,
                     schema_xml=schema_xml,
+                    previous_type=current_type,
                 )
-                corr_output = self.llm_engine.generate(
-                    corr_prompt,
-                    temperature=0.2,
-                    max_tokens=512,
-                    seed=seed + self.sql_max_retries + execution_retries,
-                )
-                new_sql = clean_sql_string(corr_output if isinstance(corr_output, str) else corr_output[0])
+                exec_retry_kwargs: dict[str, Any] = {
+                    "temperature": 0.2,
+                    "max_tokens": 512,
+                    "seed": seed + self.sql_max_retries + execution_retries,
+                }
+                if self.structured_outputs is not None:
+                    exec_retry_kwargs["structured_outputs"] = self.structured_outputs
+
+                corr_output = self.llm_engine.generate(corr_prompt, **exec_retry_kwargs)
+                new_str = corr_output if isinstance(corr_output, str) else corr_output[0]
+                new_sql, new_type, new_parse_issues = parse_structured_sql_output(new_str, default_type=current_type)
+
+                if new_type in ("unanswerable", "abstain") and not new_sql:
+                    current_sql = ""
+                    current_type = new_type
+                    v_res = ValidationResult(is_valid=True, issues=[])
+                    exec_success = True
+                    exec_error = None
+                    raw_rows = None
+                    r_set = None
+                    break
+
                 new_v_res = self.validator.validate(new_sql)
-                if new_v_res.is_valid:
+                if new_v_res.is_valid and not new_parse_issues:
                     current_sql = new_sql
+                    current_type = new_type
                     v_res = new_v_res
                     exec_success, exec_error, raw_rows, r_set = self._dry_run_query(current_sql, target_db)
                     is_suspicious = exec_success and self._is_suspicious_zero_result(raw_rows)
@@ -228,7 +285,12 @@ class CandidateGenerator:
                         break
                 else:
                     exec_success = False
-                    exec_error = f"Lỗi cú pháp SQL sau khi sửa: {'; '.join(new_v_res.issues)}"
+                    comb_errs = list(new_parse_issues) + list(new_v_res.issues)
+                    exec_error = f"Lỗi cú pháp/schema SQL sau khi sửa: {'; '.join(comb_errs)}"
+
+        # Final safety check on predicted_type to guarantee 100% adherence to problem contract
+        if current_type not in VALID_DATAMATE_TYPES:
+            current_type = "abstain"
 
         return CandidateQuery(
             candidate_id=candidate_id,
@@ -236,6 +298,7 @@ class CandidateGenerator:
             schema_permutation=permuted_keys,
             initial_sql=initial_sql,
             final_sql=current_sql,
+            predicted_type=current_type,
             is_valid_syntax=v_res.is_valid,
             construction_issues=v_res.issues,
             sql_retry_count=sql_retries,

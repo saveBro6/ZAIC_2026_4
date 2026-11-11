@@ -24,28 +24,6 @@ def normalize_contract_string(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def infer_question_target_type(question: str) -> str:
-    """Infer intended answer type based on Vietnamese question semantics."""
-    q_norm = question.lower()
-
-    if any(k in q_norm for k in ["tỉ lệ", "tỷ lệ", "phần trăm", "%"]):
-        return "percent"
-
-    if any(k in q_norm for k in ["ngày nào", "tháng nào", "hôm nào", "thời điểm nào"]):
-        return "date"
-
-    if any(k in q_norm for k in ["có phải", "đúng không", "có hay không", "phải không", "đúng hay sai"]):
-        return "boolean"
-
-    if any(k in q_norm for k in ["top 3", "top 5", "top 10", "danh sách", "liệt kê"]):
-        return "list"
-
-    if any(k in q_norm for k in ["mặt hàng nào", "sản phẩm nào", "khách hàng nào", "hàng nào", "chi nhánh nào", "tên là gì"]):
-        return "string"
-
-    return "number"
-
-
 class ResultFormatter:
     """Formats and validates raw SQLite query results into contract-compliant output JSON."""
 
@@ -97,15 +75,23 @@ class ResultFormatter:
     @classmethod
     def format_result(
         cls,
-        question: str,
         raw_rows: list[Any] | None,
+        target_type: str = "number",
     ) -> tuple[str, Any]:
         """Format raw SQLite rows into (answer_type, answer_value) conforming to problem contract.
+
+        Args:
+            raw_rows: Raw rows returned by SQLite query execution.
+            target_type: Valid DataMate target type predicted by LLM Structured Outputs.
 
         Returns:
             Tuple of (type_str, answer_val).
         """
-        target_type = infer_question_target_type(question)
+        if target_type == "unanswerable":
+            return "unanswerable", None
+
+        if target_type == "abstain":
+            return "abstain", None
 
         # 1. Handle Empty Rows (0 rows returned)
         if not raw_rows:
@@ -158,6 +144,10 @@ class ResultFormatter:
             if target_type == "string":
                 return "string", str(scalar).strip()
 
+            if target_type == "list":
+                val = cls.format_number(scalar) if isinstance(scalar, (int, float)) else str(scalar).strip()
+                return "list", [val]
+
             # Fallback for scalar
             if isinstance(scalar, (int, float)):
                 return "number", cls.format_number(scalar)
@@ -167,7 +157,7 @@ class ResultFormatter:
         first_row = raw_rows[0]
         num_cols = len(first_row) if isinstance(first_row, (list, tuple)) else 1
 
-        if num_cols == 1:
+        if num_cols == 1 or target_type == "list":
             # Single column with multiple rows -> List
             extracted_list: list[Any] = []
             for r in raw_rows:
@@ -189,6 +179,5 @@ class ResultFormatter:
 
 __all__ = [
     "ResultFormatter",
-    "infer_question_target_type",
     "normalize_contract_string",
 ]
