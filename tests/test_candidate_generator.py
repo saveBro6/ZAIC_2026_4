@@ -416,8 +416,55 @@ def test_candidate_generator_dry_run_legitimate_zero_fallback(tmp_path: Path) ->
     assert cand.execution_retry_count == 0
     assert cand.total_retry_count == {"sql": 0, "execution": 0}
     assert cand.raw_result == [(0,)]
+    assert cand.unresolved_zero is False
+    assert cand.repair_stop_reason == "legitimate_zero"
+
+
+def test_candidate_generator_true_unresolved_zero(tmp_path: Path) -> None:
+    """Verify that when a zero result is accompanied by a semantic warning, it attempts repair and flags unresolved_zero=True if exhausted."""
+    db_file = tmp_path / "test_unresolved_zero.db"
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT);")
+    cursor.execute("INSERT INTO orders VALUES (1, 'active'), (2, 'completed');")
+    conn.commit()
+    conn.close()
+
+    class MismatchedStatusEngine:
+        def generate(self, prompts: Any, **kwargs: Any) -> str:
+            # Query uses 'unknown_status' which triggers LITERAL_NOT_IN_ENUM warning
+            return '{"sql": "SELECT id FROM orders WHERE status = \'unknown_status\';", "type": "list"}'
+
+    generator = CandidateGenerator(
+        llm_engine=MismatchedStatusEngine(),
+        seeds=(42,),
+        db_path=db_file,
+        sql_max_retries=1,
+        execution_max_retries=1,
+    )
+
+    cand = generator.generate_candidate(
+        candidate_id=0,
+        seed=42,
+        question="Đơn hàng nào ở trạng thái lạ?",
+        as_of_date="2026-05-25",
+        reduced_schema={"orders.id", "orders.status"},
+        processed_metadata={
+            "orders.id": {"data_format": "NUMERIC", "null_count": 0},
+            "orders.status": {
+                "distinct_count": 2,
+                "sample_values": ["active", "completed"],
+                "data_format": "STRING",
+                "null_count": 0,
+            },
+        },
+        db_path=db_file,
+    )
+
+    # Because of LITERAL_NOT_IN_ENUM + zero result, it retries until budget exhausted, then flags unresolved_zero
+    assert cand.is_valid_syntax is True
     assert cand.unresolved_zero is True
-    assert cand.repair_stop_reason == "unexplained_zero"
+    assert cand.repair_stop_reason in ("budget_exhausted", "stagnation")
 
 
 def test_parse_structured_sql_output() -> None:

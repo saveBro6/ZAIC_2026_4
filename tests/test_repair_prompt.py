@@ -159,7 +159,7 @@ def test_rejected_attempt_is_shown(tmp_path: Path) -> None:
             self.prompts.append(prompt_str)
             if len(self.prompts) == 1:
                 return '{"sql": "SELECT json(a) FROM t;", "type": "number"}'
-            return '{"sql": "SELECT a, a FROM t;", "type": "number"}'
+            return '{"reasoning": "<think>invalid projection</think>", "sql": "SELECT a, a FROM t;", "type": "number"}'
 
     engine = RejectingEngine()
     generator = CandidateGenerator(
@@ -186,6 +186,8 @@ def test_rejected_attempt_is_shown(tmp_path: Path) -> None:
     assert "<last_raw_output>" in third_prompt
     assert "SELECT a, a FROM t;" in third_prompt
     assert _cdata_body(third_prompt, "accepted_sql") == "SELECT json(a) FROM t;"
+    assert "SELECT a, a FROM t;" in _cdata_body(third_prompt, "previous_output")
+    assert _cdata_body(third_prompt, "previous_output") != _cdata_body(third_prompt, "accepted_sql")
 
 
 def test_repair_prompt_growth_bounded() -> None:

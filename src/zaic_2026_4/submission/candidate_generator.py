@@ -156,19 +156,6 @@ class CandidateGenerator:
             if conn is not None:
                 conn.close()
 
-    @staticmethod
-    def _is_suspicious_zero_result(raw_rows: list[Any] | None) -> bool:
-        """Detect whether query execution returned empty rows, single NULL, or single zero."""
-        if not raw_rows:
-            return True
-        if len(raw_rows) == 1:
-            row = raw_rows[0]
-            if len(row) == 1:
-                val = row[0]
-                if val is None or val == 0 or val == 0.0 or val == "0":
-                    return True
-        return False
-
     def _build_repair_prompt(
         self,
         prompt_kwargs: dict[str, Any],
@@ -405,7 +392,7 @@ class CandidateGenerator:
             # 2. Zero / NULL / Empty result check
             if curr_attempt.executed and not curr_blocking and curr_attempt.shape_ok and not curr_attempt.has_non_zero_evidence:
                 has_semantic_warnings = any(
-                    getattr(i, "code", "") in ("LITERAL_NOT_IN_ENUM", "DATE_FORMAT_MISMATCH", "MONEY_SCALE_RISK", "ORDER_ASC_NULLABLE", "MIN_NULLABLE")
+                    getattr(i, "code", "") in ("LITERAL_NOT_IN_ENUM", "DATE_FORMAT_MISMATCH", "UNKNOWN_QUALIFIER", "MONEY_SCALE_RISK")
                     for i in all_issues
                 )
                 missing_grounded = False
@@ -418,7 +405,7 @@ class CandidateGenerator:
 
                 if not has_semantic_warnings and not missing_grounded:
                     # Legitimate zero result without issues: stop immediately, don't waste LLM calls
-                    stop_reason = "unexplained_zero"
+                    stop_reason = "legitimate_zero"
                     break
                 else:
                     all_issues.append(
@@ -467,14 +454,9 @@ class CandidateGenerator:
                 (canonicalize_sql(a.sql), tuple(getattr(i, "code", "UNKNOWN") for i in a.issues))
                 for a in history[-2:]
             )
-            if best is not None and best != curr_attempt:
-                accepted_sql = best.sql
-                prev_sql = best.sql
-                prev_type = best.target_type
-            else:
-                accepted_sql = best.sql if best else curr_sql
-                prev_sql = curr_sql
-                prev_type = curr_type
+            accepted_sql = best.sql if best is not None else curr_sql
+            prev_sql = curr_sql
+            prev_type = curr_type
 
             corr_prompt = self._build_repair_prompt(
                 prompt_kwargs=prompt_kwargs,
@@ -513,7 +495,7 @@ class CandidateGenerator:
 
         is_valid_syntax = not any(getattr(i, "severity", "blocking") == "blocking" for i in best.issues)
         is_deliberate_abstain = (predicted_type in ("unanswerable", "abstain") and not final_sql.strip())
-        is_unresolved_zero = (stop_reason == "unexplained_zero")
+        is_unresolved_zero = (stop_reason in ("budget_exhausted", "stagnation") and not best.has_non_zero_evidence)
 
         return CandidateQuery(
             candidate_id=candidate_id,

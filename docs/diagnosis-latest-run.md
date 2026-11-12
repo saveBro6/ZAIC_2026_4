@@ -149,3 +149,9 @@ Q1 giữ nguyên → **PA +1.0** trên tập 5 câu này, đồng thời triệt
 "im lặng trả 0" và "literal trạng thái bịa" — hai nhóm chiếm 3/4 câu sai.
 
 Nên đưa 5 câu này thành fixture hồi quy với 5 đáp án đã kiểm chứng ở mục 2.
+
+## 7. Các mục đã đóng (Validator + P2 + P3)
+
+- **S5 (So sánh ngày không có guard)**: Đã đóng qua rule `DATE_FORMAT_MISMATCH` (blocking khi so sánh ISO literal trực tiếp với cột dd/mm/yyyy mà không bọc chuẩn hoá) và mở rộng nhận diện hàm bọc ngày (`date`, `strftime`, `substr`).
+- **S7 (Vote rỗng/NULL thành đồng thuận)**: Đã đóng qua guard `has_evidence(result_set)` trong `voting_executor.py`; tập rỗng/toàn NULL không còn được tính vào nhóm đồng thuận, trả `(None, "insufficient_evidence")`.
+- **S9 (Validator không kiểm schema/enum)**: Đã đóng qua rule `TABLE_NOT_FOUND`, `COLUMN_NOT_FOUND`, `UNKNOWN_QUALIFIER` (AST scope check) và `LITERAL_NOT_IN_ENUM` (khi tập sample phủ đủ distinct_count).

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 from typing import Any
@@ -14,6 +15,8 @@ from sqlglot.optimizer.scope import traverse_scope
 
 from zaic_2026_4.submission.models import VALID_DATAMATE_TYPES, ValidationResult
 from zaic_2026_4.submission.rules import ValidationIssue
+
+logger = logging.getLogger(__name__)
 
 
 def clean_sql_string(raw_sql: str) -> str:
@@ -121,7 +124,7 @@ def _is_pseudo_column_literal(name: str) -> bool:
         return True
     if clean.isdigit():
         return True
-    if re.match(r"^[-\/:\s\.,;]+$", clean):
+    if re.match(r"^[-%/:\s\.,;]+$", clean) or clean.startswith("%"):
         return True
     return bool(re.match(r"^\d{4}-\d{2}-\d{2}$|^\d{1,2}/\d{1,2}/\d{4}$", clean))
 
@@ -185,11 +188,23 @@ def _is_date_normalization_node(node: exp.Expression) -> bool:
     """Check if node wraps an expression inside a date normalization function."""
     curr = node.parent
     while curr is not None:
-        if isinstance(curr, exp.Substring):
+        if isinstance(
+            curr,
+            (
+                exp.Substring,
+                exp.Date,
+                exp.Datetime,
+                exp.TsOrDsToDate,
+                exp.TsOrDsToDatetime,
+                exp.TsOrDsToTimestamp,
+                exp.TimeToStr,
+            ),
+        ):
             return True
-        if isinstance(curr, exp.Anonymous) and curr.name.lower() in (
+        if isinstance(curr, (exp.Func, exp.Anonymous)) and curr.name.lower() in (
             "substr",
             "date",
+            "datetime",
             "strftime",
             "julianday",
         ):
@@ -375,15 +390,12 @@ class SQLValidator:
                         and (isinstance(target_col_node, exp.Column) or list(target_col_node.find_all(exp.Column)))
                     ):
                         target_field = target_col_node.name if isinstance(target_col_node, exp.Column) else col_name
-                        # Only flag warning if metadata absent or column known to have null_count > 0
-                        should_warn = True
-                        if col_info:
-                            matched_metas = [
-                                v for k, v in col_info.items()
-                                if k.endswith(f".{target_field.lower()}") or k == target_field.lower()
-                            ]
-                            if matched_metas and all(m.get("null_count", 0) == 0 for m in matched_metas):
-                                should_warn = False
+                        # Only flag warning if metadata reports null_count > 0
+                        matched_metas = [
+                            v for k, v in col_info.items()
+                            if k.endswith(f".{target_field.lower()}") or k == target_field.lower()
+                        ] if col_info else []
+                        should_warn = bool(matched_metas) and any(m.get("null_count", 0) > 0 for m in matched_metas)
 
                         if should_warn and not cls.has_not_null_predicate(parsed, target_field):
                             issues.append(
@@ -404,14 +416,12 @@ class SQLValidator:
             col_node = min_expr.this
             col_name = _extract_column_name(col_node)
             if col_name and not col_name.isdigit() and col_name != "*":
-                should_warn = True
-                if col_info:
-                    matched_metas = [
-                        v for k, v in col_info.items()
-                        if k.endswith(f".{col_name.lower()}") or k == col_name.lower()
-                    ]
-                    if matched_metas and all(m.get("null_count", 0) == 0 for m in matched_metas):
-                        should_warn = False
+                # Only flag warning if metadata reports null_count > 0
+                matched_metas = [
+                    v for k, v in col_info.items()
+                    if k.endswith(f".{col_name.lower()}") or k == col_name.lower()
+                ] if col_info else []
+                should_warn = bool(matched_metas) and any(m.get("null_count", 0) > 0 for m in matched_metas)
 
                 if should_warn and not cls.has_not_null_predicate(parsed, col_name):
                     issues.append(
@@ -435,10 +445,10 @@ class SQLValidator:
                         concat_nodes.append(anon)
 
                 for c_node in concat_nodes:
-                    # Ignore date formatting expressions using SUBSTR
-                    is_date_fmt = any(c_node.find_all(exp.Substring)) or any(
-                        a.name.lower() in ("substr", "date", "strftime")
-                        for a in c_node.find_all(exp.Anonymous)
+                    # Ignore date formatting expressions using SUBSTR, strftime, or date
+                    is_date_fmt = any(c_node.find_all(exp.Substring, exp.Date, exp.TimeToStr)) or any(
+                        a.name.lower() in ("substr", "date", "datetime", "strftime")
+                        for a in c_node.find_all((exp.Func, exp.Anonymous))
                     )
                     if not is_date_fmt and list(c_node.find_all(exp.Column)):
                         issues.append(
@@ -592,8 +602,8 @@ class SQLValidator:
                                             column=col_name,
                                         )
                                     )
-            except Exception:  # noqa: BLE001, S110
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("schema grounding checks skipped: %s", exc)
 
         # 7. Semantic Metadata Checks: DATE_FORMAT_MISMATCH & LITERAL_NOT_IN_ENUM & MONEY_SCALE_RISK
         if col_info:
@@ -709,7 +719,7 @@ class SQLValidator:
                 distinct_count = matched_meta.get("distinct_count")
                 if distinct_count and 0 < distinct_count <= 10:
                     samples = _get_column_samples(matched_meta)
-                    if samples and (len(samples) >= distinct_count or distinct_count <= 10):
+                    if samples and len(samples) >= distinct_count:
                         parent = col_node.parent
                         while parent is not None and not isinstance(parent, (exp.EQ, exp.NEQ, exp.In, exp.Select)):
                             parent = parent.parent

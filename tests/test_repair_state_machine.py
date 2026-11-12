@@ -210,8 +210,8 @@ def test_scenario_5_deliberate_abstain_stops_immediately() -> None:
     assert cand.repair_stop_reason == "deliberate_abstain"
 
 
-def test_scenario_6_unexplained_zero_stops_without_evidence_issues(tmp_path: Path) -> None:
-    """Scenario 6: Clean query returning 0 stops with unexplained_zero=True and 0 retries (Metric M3)."""
+def test_scenario_6_legitimate_zero_stops_without_evidence_issues(tmp_path: Path) -> None:
+    """Scenario 6: Clean query returning 0 stops with legitimate_zero and unresolved_zero=False (Metric M3)."""
     db_file = tmp_path / "test_s6.db"
     conn = sqlite3.connect(db_file)
     conn.execute("CREATE TABLE orders (id INT, status TEXT);")
@@ -247,6 +247,75 @@ def test_scenario_6_unexplained_zero_stops_without_evidence_issues(tmp_path: Pat
     assert engine.calls == 1  # 0 retries on clean legitimate zero!
     assert cand.execution_success is True
     assert cand.raw_result == [(0,)]
-    assert cand.unresolved_zero is True
-    assert cand.repair_stop_reason == "unexplained_zero"
+    assert cand.unresolved_zero is False
+    assert cand.repair_stop_reason == "legitimate_zero"
     assert cand.execution_retry_count == 0
+
+
+def test_scenario_7_repair_prompt_separates_accepted_and_previous_sql(tmp_path: Path) -> None:
+    """Scenario 7 (G7): When best != curr_attempt, previous_output reflects immediate prior attempt while accepted_sql retains best baseline."""
+    db_file = tmp_path / "test_s7.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE metrics (id INT, status TEXT, val REAL);")
+    conn.execute("INSERT INTO metrics VALUES (1, 'active', 10.5);")
+    conn.commit()
+    conn.close()
+
+    captured_prompts: list[str] = []
+
+    class MultiTurnFaultyEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, prompts: Any, **kwargs: Any) -> str:
+            prompt_str = prompts if isinstance(prompts, str) else prompts[0]
+            captured_prompts.append(prompt_str)
+            self.calls += 1
+            if self.calls == 1:
+                # Turn 0: Valid query with 0 rows and LITERAL_NOT_IN_ENUM warning -> triggers repair
+                return '{"sql": "SELECT val FROM metrics WHERE status = \'unknown\';", "type": "number"}'
+            elif self.calls == 2:
+                # Turn 1: Degraded attempt with syntax error
+                return '{"sql": "SELECT BROKEN SYNTAX FROM metrics;", "type": "number"}'
+            else:
+                # Turn 2: Recover
+                return '{"sql": "SELECT val FROM metrics WHERE status = \'active\';", "type": "number"}'
+
+    engine = MultiTurnFaultyEngine()
+    gen = CandidateGenerator(
+        llm_engine=engine,
+        seeds=(42,),
+        db_path=db_file,
+        sql_max_retries=2,
+        execution_max_retries=2,
+    )
+
+    cand = gen.generate_candidate(
+        candidate_id=0,
+        seed=42,
+        question="Giá trị số liệu?",
+        as_of_date="2026-05-25",
+        reduced_schema={"metrics.id", "metrics.status", "metrics.val"},
+        processed_metadata={
+            "metrics.id": {"data_format": "NUMERIC", "null_count": 0},
+            "metrics.val": {"data_format": "NUMERIC", "null_count": 0},
+            "metrics.status": {
+                "distinct_count": 2,
+                "sample_values": ["active", "closed"],
+                "data_format": "STRING",
+                "null_count": 0,
+            },
+        },
+        db_path=db_file,
+    )
+
+    # Check the repair prompt captured in Turn 2 (captured_prompts[2]):
+    # When best != curr_attempt (Turn 1 was degraded):
+    # accepted_sql retains the accepted baseline (best.sql)
+    # previous_output explicitly reflects the immediate prior attempt (curr_sql != accepted_sql)
+    assert len(captured_prompts) >= 3
+    repair_prompt_turn_2 = captured_prompts[2]
+    assert "<accepted_sql><![CDATA[SELECT val FROM metrics WHERE status = 'unknown';]]></accepted_sql>" in repair_prompt_turn_2
+    assert "<previous_output><![CDATA[{\"sql\": \"SELECT BROKEN SYNTAX FROM metrics;\", \"type\": \"number\"}]]></previous_output>" in repair_prompt_turn_2
+    assert "SELECT BROKEN SYNTAX FROM metrics;" in repair_prompt_turn_2
+    assert cand.execution_success is True

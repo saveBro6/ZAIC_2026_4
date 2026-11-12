@@ -49,17 +49,31 @@ def test_safety_mutation_rejection() -> None:
 
 
 def test_check_1_null_ascending_order_demoted_to_warning() -> None:
-    # ASC without NOT NULL check -> Now a WARNING, is_valid remains True
     sql_bad = 'SELECT id, price FROM orders ORDER BY price ASC;'
-    res_bad = SQLValidator.validate(sql_bad)
-    assert res_bad.is_valid
-    assert "ORDER_ASC_NULLABLE" in res_bad.codes()
-    assert len(res_bad.blocking_issues()) == 0
-    assert len(res_bad.warning_issues()) == 1
 
-    # ASC with NOT NULL check -> Passes cleanly
+    # When metadata is None or empty: No warning emitted
+    res_none = SQLValidator.validate(sql_bad, metadata=None)
+    assert res_none.is_valid
+    assert "ORDER_ASC_NULLABLE" not in res_none.codes()
+
+    res_empty = SQLValidator.validate(sql_bad, metadata={})
+    assert res_empty.is_valid
+    assert "ORDER_ASC_NULLABLE" not in res_empty.codes()
+
+    # When metadata reports null_count > 0: Warning emitted
+    meta_with_nulls = {
+        "orders.id": {"null_count": 0, "data_format": "STRING"},
+        "orders.price": {"null_count": 5, "data_format": "NUMERIC"},
+    }
+    res_warn = SQLValidator.validate(sql_bad, metadata=meta_with_nulls)
+    assert res_warn.is_valid
+    assert "ORDER_ASC_NULLABLE" in res_warn.codes()
+    assert len(res_warn.blocking_issues()) == 0
+    assert len(res_warn.warning_issues()) == 1
+
+    # ASC with NOT NULL check -> Passes cleanly even with null_count > 0
     sql_good = 'SELECT id, price FROM orders WHERE price IS NOT NULL ORDER BY price ASC;'
-    res_good = SQLValidator.validate(sql_good)
+    res_good = SQLValidator.validate(sql_good, metadata=meta_with_nulls)
     assert res_good.is_valid
     assert "ORDER_ASC_NULLABLE" not in res_good.codes()
 
@@ -74,16 +88,25 @@ def test_check_1_null_ascending_order_demoted_to_warning() -> None:
 
 
 def test_check_2_aggregate_min_null_check_demoted_to_warning() -> None:
-    # MIN(f) without NOT NULL -> Now a WARNING, is_valid remains True
     sql_bad = 'SELECT MIN(don_gia) FROM hoa_don_chi_tiet;'
-    res_bad = SQLValidator.validate(sql_bad)
-    assert res_bad.is_valid
-    assert "MIN_NULLABLE" in res_bad.codes()
-    assert len(res_bad.blocking_issues()) == 0
+
+    # When metadata is None or empty: No warning emitted
+    res_none = SQLValidator.validate(sql_bad, metadata=None)
+    assert res_none.is_valid
+    assert "MIN_NULLABLE" not in res_none.codes()
+
+    # When metadata reports null_count > 0: Warning emitted
+    meta_with_nulls = {
+        "hoa_don_chi_tiet.don_gia": {"null_count": 10, "data_format": "NUMERIC"},
+    }
+    res_warn = SQLValidator.validate(sql_bad, metadata=meta_with_nulls)
+    assert res_warn.is_valid
+    assert "MIN_NULLABLE" in res_warn.codes()
+    assert len(res_warn.blocking_issues()) == 0
 
     # MIN(f) with NOT NULL -> Passes cleanly
     sql_good = 'SELECT MIN(don_gia) FROM hoa_don_chi_tiet WHERE don_gia IS NOT NULL;'
-    res_good = SQLValidator.validate(sql_good)
+    res_good = SQLValidator.validate(sql_good, metadata=meta_with_nulls)
     assert res_good.is_valid
     assert "MIN_NULLABLE" not in res_good.codes()
 
@@ -179,6 +202,53 @@ def test_date_format_mismatch_detection() -> None:
     res_norm = SQLValidator.validate(sql_norm_date, target_type="number", metadata=metadata)
     assert res_norm.is_valid
     assert "DATE_FORMAT_MISMATCH" not in res_norm.codes()
+
+    # Case 4: Wrapped in date(...) function -> Recognized as normalization, not blocked
+    sql_func_date = 'SELECT SUM(1) FROM don_hang AS T1 WHERE date(T1."Thời gian") = "2026-09-01";'
+    res_func = SQLValidator.validate(sql_func_date, target_type="number", metadata=metadata)
+    assert res_func.is_valid
+    assert "DATE_FORMAT_MISMATCH" not in res_func.codes()
+
+    # Case 5: Wrapped in strftime(...) function -> Recognized as normalization, not blocked
+    sql_strftime = 'SELECT SUM(1) FROM don_hang AS T1 WHERE strftime("%Y-%m-%d", T1."Thời gian") = "2026-09-01";'
+    res_strftime = SQLValidator.validate(sql_strftime, target_type="number", metadata=metadata)
+    assert res_strftime.is_valid
+    assert "DATE_FORMAT_MISMATCH" not in res_strftime.codes()
+
+
+def test_enum_coverage_literal_not_in_enum_guard() -> None:
+    """Test G3: LITERAL_NOT_IN_ENUM only emits when samples fully cover distinct_count."""
+    # Column has distinct_count = 9, but samples only contain 2 items (partial coverage)
+    meta_partial = {
+        "don_hang.id": {"data_format": "NUMERIC", "null_count": 0},
+        "don_hang.Trạng thái": {
+            "distinct_count": 9,
+            "sample_values": ["Hoàn thành", "Đã hủy"],
+            "data_format": "STRING",
+            "null_count": 0,
+        },
+    }
+    sql_partial = "SELECT id FROM don_hang WHERE \"Trạng thái\" = 'Đang giao';"
+    res_partial = SQLValidator.validate(sql_partial, target_type="list", metadata=meta_partial)
+    assert res_partial.is_valid
+    # Samples do not fully cover distinct_count -> MUST NOT warn
+    assert "LITERAL_NOT_IN_ENUM" not in res_partial.codes()
+
+    # Column has distinct_count = 2, samples contain 2 items (full coverage)
+    meta_full = {
+        "don_hang.id": {"data_format": "NUMERIC", "null_count": 0},
+        "don_hang.Trạng thái": {
+            "distinct_count": 2,
+            "sample_values": ["Hoàn thành", "Đã hủy"],
+            "data_format": "STRING",
+            "null_count": 0,
+        },
+    }
+    sql_mismatch = "SELECT id FROM don_hang WHERE \"Trạng thái\" = 'Đang giao';"
+    res_mismatch = SQLValidator.validate(sql_mismatch, target_type="list", metadata=meta_full)
+    assert res_mismatch.is_valid
+    # Full coverage and value is missing -> emits WARNING
+    assert "LITERAL_NOT_IN_ENUM" in res_mismatch.codes()
 
 
 def test_shape_mismatch_and_tiebreak_rules() -> None:
