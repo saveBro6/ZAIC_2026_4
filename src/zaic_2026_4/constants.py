@@ -20,7 +20,7 @@ DEFAULT_SHINGLE_K: int = 3
 DEFAULT_MAX_SAMPLE_VALUES: int = 10000
 
 # Profiling: LLM summarization defaults
-DEFAULT_PROD_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
+DEFAULT_PROD_MODEL: str = "Qwen/Qwen3.5-9B"
 DEFAULT_LOCAL_MODEL: str = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_PROD_GPU_UTIL: float = 0.70
 DEFAULT_LOCAL_GPU_UTIL: float = 0.60
