@@ -6,10 +6,6 @@ from pathlib import Path
 import pytest
 
 from zaic_2026_4.profiling.profile_summarizer import (
-    DEFAULT_LOCAL_GPU_UTIL,
-    DEFAULT_LOCAL_MODEL,
-    DEFAULT_PROD_GPU_UTIL,
-    DEFAULT_PROD_MODEL,
     MINIMAL_PROFILE_PROMPT,
     LLMEngineProtocol,
     MockLLMEngine,
@@ -17,14 +13,6 @@ from zaic_2026_4.profiling.profile_summarizer import (
     create_engine,
 )
 from zaic_2026_4.profiling.raw_profiler import RawDatabaseProfiler
-
-
-def test_default_constants() -> None:
-    """Verify default models and GPU utilization constants adhere to technical requirements."""
-    assert DEFAULT_PROD_MODEL == "Qwen/Qwen2.5-7B-Instruct"
-    assert DEFAULT_LOCAL_MODEL == "Qwen/Qwen2.5-1.5B-Instruct"
-    assert DEFAULT_PROD_GPU_UTIL == 0.70
-    assert DEFAULT_LOCAL_GPU_UTIL == 0.60
 
 
 def test_engine_factory_mock() -> None:

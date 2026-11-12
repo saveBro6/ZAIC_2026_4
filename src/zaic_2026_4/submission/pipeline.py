@@ -101,10 +101,10 @@ class SubmissionPipeline:
         try:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
             self.logs_dir.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
+        except (PermissionError, OSError):
             fallback_dir = Path("result").resolve()
             logger.warning(
-                "Permission denied creating %s or %s. Falling back to local directory %s",
+                "Permission denied or filesystem error creating %s or %s. Falling back to local directory %s",
                 self.output_path.parent,
                 self.logs_dir,
                 fallback_dir,

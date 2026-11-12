@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -226,6 +227,30 @@ def test_submission_pipeline_permission_fallback(mock_dataset_env: dict[str, Pat
     # Must gracefully fall back to local result/
     assert pipeline.output_path.name == "sub.jsonl"
     assert pipeline.output_path.parent == Path("result").resolve()
+
+    # Explicitly verify OSError [Errno 30] Read-only file system fallback
+    original_mkdir = Path.mkdir
+
+    def mock_ro_mkdir(self: Path, *args: Any, **kwargs: Any) -> None:
+        if "readonly_system_dir" in str(self):
+            raise OSError(30, "Read-only file system")
+        original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mock_ro_mkdir)
+
+    ro_path = Path("/readonly_system_dir/sub.jsonl")
+    ro_pipeline = SubmissionPipeline(
+        data_dir=mock_dataset_env["data_dir"],
+        rulebook_path=mock_dataset_env["rulebook_path"],
+        llm_engine=llm,
+        embedder=embedder,
+        vector_model_path="mock",
+        output_path=ro_path,
+        logs_dir=Path("/readonly_system_dir/logs"),
+        cache_base_dir=mock_dataset_env["cache_dir"],
+    )
+    assert ro_pipeline.output_path.name == "sub.jsonl"
+    assert ro_pipeline.output_path.parent == Path("result").resolve()
 
 
 def test_submission_pipeline_auto_saves_schema_linking_result(mock_dataset_env: dict[str, Path]) -> None:

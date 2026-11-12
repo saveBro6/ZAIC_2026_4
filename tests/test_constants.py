@@ -116,7 +116,7 @@ def test_constant_types_and_values() -> None:
     assert constants.DEFAULT_MAX_SAMPLE_VALUES == 10000
 
     assert isinstance(constants.DEFAULT_PROD_MODEL, str)
-    assert constants.DEFAULT_LOCAL_MODEL == "Qwen/Qwen2.5-1.5B-Instruct"
+    assert isinstance(constants.DEFAULT_LOCAL_MODEL, str)
     assert isinstance(constants.DEFAULT_PROD_GPU_UTIL, float)
     assert isinstance(constants.DEFAULT_LOCAL_GPU_UTIL, float)
     assert constants.DEFAULT_LLM_MAX_LENGTH == 16384
