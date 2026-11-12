@@ -205,7 +205,8 @@ def test_build_index_column_profiles() -> None:
 
     assert indexer.doc_map[0]["key"] == "DonHang.tong_tien"
     assert indexer.doc_map[0]["type"] == "column"
-    assert "Tổng số tiền thanh toán" in indexer.doc_map[0]["content"]
+    # Prioritizes minimal_profile for semantic purity
+    assert "Tổng tiền thanh toán" in indexer.doc_map[0]["content"]
 
     # Fallback to minimal_profile when maximal_profile is missing
     assert indexer.doc_map[2]["key"] == "KhachHang.ma_kh"

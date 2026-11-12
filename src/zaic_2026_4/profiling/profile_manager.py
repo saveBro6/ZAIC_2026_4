@@ -101,9 +101,9 @@ class ProfilingOrchestrator:
         except UnicodeDecodeError:
             try:
                 return p.read_text(encoding="utf-8", errors="replace")
-            except Exception:
+            except OSError:
                 return ""
-        except Exception:
+        except OSError:
             return ""
 
     def _get_db_path(self) -> str:

@@ -124,11 +124,7 @@ class VietnameseLSHIndexer:
             if not isinstance(meta, dict):
                 continue
 
-            sample_values = (
-                meta.get("raw_samples")
-                or meta.get("sample_values")
-                or []
-            )
+            sample_values = meta.get("sample_values") or meta.get("raw_samples") or []
             candidates = sample_values[: self.max_sample_values]
 
             seen_in_col: set[str] = set()

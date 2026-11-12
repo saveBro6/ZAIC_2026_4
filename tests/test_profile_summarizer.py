@@ -10,7 +10,6 @@ from zaic_2026_4.profiling.profile_summarizer import (
     DEFAULT_LOCAL_MODEL,
     DEFAULT_PROD_GPU_UTIL,
     DEFAULT_PROD_MODEL,
-    MAXIMAL_PROFILE_PROMPT,
     MINIMAL_PROFILE_PROMPT,
     LLMEngineProtocol,
     MockLLMEngine,
@@ -84,28 +83,8 @@ def test_minimal_prompt_few_shots() -> None:
     assert "<output>" in MINIMAL_PROFILE_PROMPT
 
 
-def test_maximal_prompt_few_shots() -> None:
-    """Verify MAXIMAL_PROFILE_PROMPT contains XML structure and exactly 2 Vietnamese SMB few-shot examples."""
-    assert "<system>" in MAXIMAL_PROFILE_PROMPT
-    assert "<instructions>" in MAXIMAL_PROFILE_PROMPT
-    assert "<business_readme>" in MAXIMAL_PROFILE_PROMPT
-    assert "<few_shot_examples>" in MAXIMAL_PROFILE_PROMPT
-    assert '<example id="1">' in MAXIMAL_PROFILE_PROMPT
-    assert '<example id="2">' in MAXIMAL_PROFILE_PROMPT
-    assert 'Cột: "tien_do_sua"' in MAXIMAL_PROFILE_PROMPT
-    assert 'Cột: "ngay_kham_hen"' in MAXIMAL_PROFILE_PROMPT
-    assert 'Tóm tắt rút gọn: "' in MAXIMAL_PROFILE_PROMPT
-    assert "Các cột khác trong bảng:" in MAXIMAL_PROFILE_PROMPT
-    assert "<target_column>" in MAXIMAL_PROFILE_PROMPT
-    assert "<output>" in MAXIMAL_PROFILE_PROMPT
-    assert "{null_ratio" not in MAXIMAL_PROFILE_PROMPT
-    assert "lần xuất hiện" not in MAXIMAL_PROFILE_PROMPT
-    assert "{top_10}" not in MAXIMAL_PROFILE_PROMPT
-    assert "Top giá trị phổ biến" not in MAXIMAL_PROFILE_PROMPT
-
-
 def test_summarizer_prompt_builders() -> None:
-    """Verify prompt formatting methods with realistic column metrics and full business_readme."""
+    """Verify minimal prompt formatting methods with realistic column metrics and full business_readme."""
     summarizer = ProfileLLMSummarizer(MockLLMEngine())
 
     col_stats = {
@@ -134,28 +113,6 @@ def test_summarizer_prompt_builders() -> None:
     assert "<business_readme>" in min_p
     assert "Tạp hóa Phương Linh\nQuy đổi: 1 lốc = 6 lon" in min_p
     assert "Formatted VND currency." not in min_p
-
-    max_p = summarizer.build_maximal_prompt(
-        table_name="BanHang",
-        col_name="tien_hang",
-        col_stats=col_stats,
-        total_rows=1000,
-        business_readme="Tạp hóa Phương Linh\nQuy đổi: 1 lốc = 6 lon",
-        minimal_profile='Cột "tien_hang" chứa số tiền bán hàng; định dạng số tiền VNĐ.',
-        sibling_cols=["id", "ngay"],
-    )
-    assert 'Bảng: "BanHang"' in max_p
-    assert 'Cột: "tien_hang"' in max_p
-    assert 'Tóm tắt rút gọn: "Cột "tien_hang" chứa số tiền bán hàng; định dạng số tiền VNĐ."' in max_p
-    assert "Các cột khác trong bảng: ['id', 'ngay']" in max_p
-    assert "THOUSAND_SEPARATOR" in max_p
-    assert "Formatted VND currency." not in max_p
-    assert "<business_readme>" in max_p
-    assert "Tạp hóa Phương Linh\nQuy đổi: 1 lốc = 6 lon" in max_p
-    assert "null_ratio" not in max_p
-    assert "lần xuất hiện" not in max_p
-    assert "Top giá trị phổ biến" not in max_p
-    assert "Giá trị NULL: 10/1000" in max_p
 
 
 def test_summarizer_empty_database() -> None:
@@ -230,19 +187,66 @@ def test_summarizer_mock_workflow() -> None:
     ma_hd_meta = profiles["HoaDon.ma_hd"]
     assert "minimal_profile" in ma_hd_meta
     assert "maximal_profile" in ma_hd_meta
-    assert "raw_samples" in ma_hd_meta
-    assert ma_hd_meta["raw_samples"] == ["HD001", "HD002", "HD003"]
+    assert "sample_values" in ma_hd_meta
+    assert ma_hd_meta["sample_values"] == ["HD001", "HD002", "HD003"]
     assert ma_hd_meta["table_name"] == "HoaDon"
     assert ma_hd_meta["col_name"] == "ma_hd"
     assert ma_hd_meta["data_format"] == "STRING"
     assert len(ma_hd_meta["minimal_profile"]) > 0
     assert len(ma_hd_meta["maximal_profile"]) > 0
     assert ma_hd_meta["minimal_profile"] in ma_hd_meta["maximal_profile"]
-    assert "Các giá trị phổ biến: ['HD001', 'HD002']" in ma_hd_meta["maximal_profile"]
+    assert "Giá trị phổ biến: 'HD001' (1), 'HD002' (1)" in ma_hd_meta["maximal_profile"]
+    assert "min_val" in ma_hd_meta
+    assert "max_val" in ma_hd_meta
+    assert "is_unique" in ma_hd_meta
+    assert "join_candidates" in ma_hd_meta
 
     ngay_meta = profiles["HoaDon.ngay_tao"]
     assert ngay_meta["data_format"] == "DATE"
     assert ngay_meta["date_subtype"] == "ISO_DATE"
+
+
+def test_summarizer_calls_llm_only_for_minimal() -> None:
+    """Verify that ProfileLLMSummarizer only invokes the LLM engine for minimal prompts (0 maximal calls)."""
+    class TrackingMockEngine(MockLLMEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.call_count = 0
+            self.total_prompts = 0
+
+        def generate(self, prompts, **kwargs):
+            p_list = [prompts] if isinstance(prompts, str) else prompts
+            self.call_count += 1
+            self.total_prompts += len(p_list)
+            return super().generate(prompts, **kwargs)
+
+    tracking_engine = TrackingMockEngine()
+    summarizer = ProfileLLMSummarizer(tracking_engine, batch_size=64)
+
+    dummy_db = {
+        "tables": {
+            "T1": {
+                "row_count": 10,
+                "columns": {
+                    "c1": {"data_format": "STRING", "sample_values": ["A", "B"]},
+                    "c2": {"data_format": "NUMERIC", "sample_values": ["1", "2"]},
+                },
+            },
+            "T2": {
+                "row_count": 5,
+                "columns": {
+                    "c3": {"data_format": "STRING", "sample_values": ["X"]},
+                },
+            },
+        },
+        "undocumented_joins": [],
+    }
+
+    profiles = summarizer.generate_profiles(dummy_db)
+    assert len(profiles) == 3
+    # Exactly 3 minimal prompts submitted across 1 batch call, 0 maximal calls
+    assert tracking_engine.call_count == 1
+    assert tracking_engine.total_prompts == 3
 
 
 def test_summarizer_e2e_with_raw_profiler(tmp_path: Path) -> None:

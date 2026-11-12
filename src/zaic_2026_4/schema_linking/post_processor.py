@@ -252,7 +252,7 @@ class SchemaPostProcessor:
 
             col_meta = target_dict.get(col_key, {})
             data_type = col_meta.get("data_format", "STRING")
-            desc = col_meta.get("maximal_profile") or col_meta.get("minimal_profile") or "Tabular column"
+            desc = col_meta.get("maximal_profile", "")
 
             tables.setdefault(tbl, []).append((q_col, data_type, desc))
 

@@ -93,20 +93,14 @@ def format_permuted_schema_xml(
         col_meta = target_dict.get(meta_key, {})
 
         data_format = col_meta.get("data_format", "STRING")
-        desc = (
-            col_meta.get("maximal_profile")
-            or col_meta.get("minimal_profile")
-            or "Tabular column"
-        )
-        samples = col_meta.get("raw_samples", [])
-        sample_str = f" | Samples: {samples[:3]}" if samples else ""
+        desc = col_meta.get("maximal_profile", "")
         llm_hint = col_meta.get("llm_hint")
         hint_str = f" | Hint: {llm_hint}" if llm_hint else ""
 
         table_groups.setdefault(tbl, []).append({
             "col_name": col_clean,
             "data_format": data_format,
-            "desc": f"{desc}{sample_str}{hint_str}",
+            "desc": f"{desc}{hint_str}".strip(),
         })
 
     lines = ["<selected_schema>"]

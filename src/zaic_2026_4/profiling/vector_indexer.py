@@ -20,7 +20,6 @@ import numpy as np
 from zaic_2026_4 import constants
 from zaic_2026_4.constants import (
     DEFAULT_BATCH_SIZE,
-    DEFAULT_EMBED_GPU_UTIL,
     DEFAULT_EMBED_MAX_LENGTH,
     DEFAULT_EMBED_MODEL_PATH,
     DEFAULT_EMBEDDING_DIM,
@@ -29,6 +28,8 @@ from zaic_2026_4.constants import (
     DEFAULT_TOP_K,
     MIN_TABLE_ROWS_FOR_SPLIT,
 )
+
+DEFAULT_EMBED_GPU_UTIL = constants.DEFAULT_EMBED_GPU_UTIL
 
 # Module-level in-memory cache to ensure BGE-M3 is loaded only once per process lifecycle
 _EMBEDDER_CACHE: dict[tuple[str, float, int, bool], Any] = {}
@@ -574,17 +575,12 @@ class SemanticVectorIndexer:
             if not isinstance(meta, dict):
                 continue
 
-            # Prioritize maximal_profile, fallback to minimal_profile or basic stats
-            desc = (
-                meta.get("maximal_profile")
-                or meta.get("minimal_profile")
-                or (
-                    f"Format: {meta.get('data_format', 'STRING')}. "
-                    f"Distinct count: {meta.get('distinct_count', 0)}."
-                )
-            )
-
-            text_to_embed = f"Column: {col_key}. Description: {desc}"
+            # Prioritize semantic minimal_profile to avoid statistical noise, fallback to maximal_profile
+            desc = meta.get("minimal_profile") or meta.get("maximal_profile", "")
+            samples = meta.get("sample_values") or meta.get("raw_samples") or []
+            sample_str = f" Sample values: {samples[:5]}." if samples else ""
+            desc_part = f" Description: {desc}." if desc else ""
+            text_to_embed = f"Column: {col_key}.{desc_part}{sample_str}".strip()
             texts.append(text_to_embed)
 
             # Split table and column identifiers if formatted as 'table.col'

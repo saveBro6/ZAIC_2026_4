@@ -82,70 +82,37 @@ Mục tiêu của bạn là tạo ra một câu TÓM TẮT RÚT GỌN (đúng 1 
 <output>
 """
 
-MAXIMAL_PROFILE_PROMPT: str = """<system>
-Bạn là chuyên gia phân tích và kiến trúc dữ liệu cho cơ sở dữ liệu doanh nghiệp vừa và nhỏ (SMB) tại Việt Nam.
-Mục tiêu của bạn là tạo ra một đoạn TÓM TẮT ĐẦY ĐỦ bằng tiếng Việt cho cột mục tiêu, hợp nhất ý nghĩa nghiệp vụ từ Tóm tắt rút gọn (Minimal Profile) với toàn bộ thông số phân bổ dữ liệu thực tế.
-</system>
-
-<instructions>
-Bao gồm các nội dung có cấu trúc sau bằng tiếng Việt:
-1. Ý nghĩa nghiệp vụ & Mở đầu: BẮT BUỘC dùng câu Tóm tắt rút gọn (Minimal Profile) làm câu mở đầu nguyên vẹn (bắt đầu bằng Cột "{col_name}"...), sau đó mở rộng về vai trò trong quy trình vận hành và mối liên hệ với các cột khác trong bảng.
-2. Phân bổ dữ liệu thực tế:
-   - Giá trị NULL: Nếu số lượng NULL là 0, khẳng định rõ: "Cột không có giá trị NULL". Nếu số lượng NULL > 0, ghi rõ số lượng (ví dụ: "Cột chứa {null_count} giá trị NULL"). TUYỆT ĐỐI KHÔNG dùng cụm từ "không có giá trị NULL" khi có giá trị NULL.
-   - Độ biến thiên & Giới hạn: Nêu số lượng giá trị duy nhất (distinct_count) và khoảng giá trị thực tế từ min_val đến max_val.
-</instructions>
-
-<business_readme>
-{business_readme}
-</business_readme>
-
-<few_shot_examples>
-  <example id="1">
-    <target_column>
-      Bảng: "NhatKyBaoDuong"
-      Cột: "tien_do_sua"
-      Tóm tắt rút gọn: "Cột \\"tien_do_sua\\" theo dõi tiến độ xử lý bảo dưỡng xe (Chờ phụ tùng, Đang sửa, Đã bàn giao, Khách hủy); định dạng chuỗi phân loại trạng thái."
-      Các cột khác trong bảng: ["ma_xe", "thoi_diem_vao", "phi_dich_vu", "so_gio_cong"]
-      Giá trị NULL: 120/15000
-      Số giá trị duy nhất: 4
-      Khoảng giá trị: ["Chờ phụ tùng" đến "Đang sửa"]
-      Định dạng: STRING (Categorical status)
-    </target_column>
-    <output>
-      Cột "tien_do_sua" theo dõi tiến độ xử lý bảo dưỡng xe (Chờ phụ tùng, Đang sửa, Đã bàn giao, Khách hủy); định dạng chuỗi phân loại trạng thái. Cột giữ vai trò quản lý tiến trình thực hiện dịch vụ kỹ thuật trong xưởng sửa chữa, liên kết với thời điểm nhận xe và phí dịch vụ. Cột chứa 120 giá trị NULL, với 4 giá trị phân loại khác nhau từ 'Chờ phụ tùng' đến 'Đang sửa'.
-    </output>
-  </example>
-
-  <example id="2">
-    <target_column>
-      Bảng: "LichHenKham"
-      Cột: "ngay_kham_hen"
-      Tóm tắt rút gọn: "Cột \\"ngay_kham_hen\\" ghi nhận mốc thời gian hẹn khám chuyên khoa; định dạng chuỗi ngày tháng DD/MM/YYYY."
-      Các cột khác trong bảng: ["ma_ho_so", "bac_si_phu_trach", "tong_chi_phi"]
-      Giá trị NULL: 0/8500
-      Số giá trị duy nhất: 365
-      Khoảng giá trị: ["01/01/2025" đến "31/12/2025"]
-      Định dạng: DATE (SLASH_DATE_DD_MM_YYYY)
-    </target_column>
-    <output>
-      Cột "ngay_kham_hen" ghi nhận mốc thời gian hẹn khám chuyên khoa; định dạng chuỗi ngày tháng DD/MM/YYYY. Cột giữ vai trò quản lý lịch hẹn khám của khách hàng tại phòng khám. Cột không có giá trị NULL với 365 mốc ngày khác nhau từ 01/01/2025 đến 31/12/2025.
-    </output>
-  </example>
-</few_shot_examples>
-
-<target_column>
-  Bảng: "{table_name}"
-  Cột: "{col_name}"
-  Tóm tắt rút gọn: "{minimal_profile}"
-  Các cột khác trong bảng: {sibling_cols}
-  Giá trị NULL: {null_count}/{total_rows}
-  Số giá trị duy nhất: {distinct_count}
-  Khoảng giá trị: [{min_val} đến {max_val}]
-  Định dạng: {data_format} ({subtype_info})
-</target_column>
-
-<output>
-"""
+MAXIMAL_ENUM_MAX_DISTINCT: int = 10
+MAXIMAL_TOP_VALUES: int = 5
+MAXIMAL_DOMINANT_RATIO: float = 0.9
+MAXIMAL_MAX_JOINS_PER_COLUMN: int = 3
+MAXIMAL_MAX_VALUE_CHARS: int = 40
+RANGE_ELIGIBLE_FORMATS: frozenset[str] = frozenset({
+    "NUMERIC",
+    "NUMERIC_STRING",
+    "CURRENCY",
+    "ISO_DATE",
+    "ISO_DATETIME",
+    "SLASH_DATE",
+    "VN_DATE_ABBR",
+    "EXCEL_SERIAL",
+    "FIXED_CODE",
+})
+DATE_FORMATS: frozenset[str] = frozenset({
+    "DATE",
+    "DATE_MIXED",
+    "ISO_DATE",
+    "ISO_DATETIME",
+    "SLASH_DATE",
+    "SLASH_DATE_SHORT",
+    "VN_DATE_ABBR",
+    "EN_DATE_ABBR",
+    "VN_DATE_FULL",
+    "EN_DATE_FULL",
+    "VN_DATE_WEEKDAY",
+    "EN_DATE_WEEKDAY",
+    "EXCEL_SERIAL",
+})
 
 # Profiling: Raw profiler date regex patterns
 ISO_DATE_REGEX: re.Pattern[str] = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
@@ -270,6 +237,7 @@ DEFAULT_LOGS_DIR: Path = Path(
 __all__ = [
     "ACCOUNTING_DASH_ZERO_REGEX",
     "ACCOUNTING_PARENTHESES_REGEX",
+    "DATE_FORMATS",
     # Ingestion
     "DEFAULT_BASE_OUTPUT_DIR",
     "DEFAULT_BATCH_SIZE",
@@ -310,11 +278,16 @@ __all__ = [
     # Raw profiler
     "ISO_DATE_REGEX",
     "KEY_TOKENS",
-    "MAXIMAL_PROFILE_PROMPT",
+    "MAXIMAL_DOMINANT_RATIO",
+    "MAXIMAL_ENUM_MAX_DISTINCT",
+    "MAXIMAL_MAX_JOINS_PER_COLUMN",
+    "MAXIMAL_MAX_VALUE_CHARS",
+    "MAXIMAL_TOP_VALUES",
     "MINIMAL_PROFILE_PROMPT",
     "MIN_TABLE_ROWS_FOR_SPLIT",
     "NON_KEY_METRIC_TOKENS",
     "PLAIN_NUMBER_REGEX",
+    "RANGE_ELIGIBLE_FORMATS",
     "SCALED_BILLION_TY_REGEX",
     "SCALED_MILLION_TR_REGEX",
     "SCALED_THOUSAND_K_REGEX",

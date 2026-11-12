@@ -174,20 +174,20 @@ def test_format_permuted_schema_xml_with_hint() -> None:
     metadata = {
         "orders.price": {
             "data_format": "CURRENCY",
-            "minimal_profile": "Cột lưu giá tiền",
-            "raw_samples": ["10,000", "20,000"],
+            "maximal_profile": "Cột lưu giá tiền",
+            "sample_values": ["10,000", "20,000"],
             "llm_hint": "Formatted VND currency. CAST(REPLACE(col, ',', '') AS REAL)",
         },
         "orders.date": {
             "data_format": "SLASH_DATE",
-            "minimal_profile": "Cột ngày",
+            "maximal_profile": "Cột ngày",
             "llm_hint": "Vietnamese date (D/M/YYYY).",
         },
     }
     xml_output = format_permuted_schema_xml(["orders.price", "orders.date"], metadata)
     assert '<table name="orders">' in xml_output
     assert 'type="CURRENCY"' in xml_output
-    assert "Samples: ['10,000', '20,000']" in xml_output
+    assert "Cột lưu giá tiền" in xml_output
     assert "Hint: Formatted VND currency." in xml_output
     assert "Hint: Vietnamese date (D/M/YYYY)." in xml_output
 

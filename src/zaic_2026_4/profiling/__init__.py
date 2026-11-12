@@ -8,6 +8,13 @@ from zaic_2026_4.profiling.lsh_indexer import (
     VietnameseLSHIndexer,
     compute_minhash,
 )
+from zaic_2026_4.profiling.maximal_composer import (
+    JoinRef,
+    TableContext,
+    build_join_index,
+    build_table_context,
+    compose_maximal_profile,
+)
 from zaic_2026_4.profiling.profile_manager import (
     ProfilingOrchestrator,
 )
@@ -16,7 +23,6 @@ from zaic_2026_4.profiling.profile_summarizer import (
     DEFAULT_LOCAL_MODEL,
     DEFAULT_PROD_GPU_UTIL,
     DEFAULT_PROD_MODEL,
-    MAXIMAL_PROFILE_PROMPT,
     MINIMAL_PROFILE_PROMPT,
     LLMEngineProtocol,
     MockLLMEngine,
@@ -35,6 +41,7 @@ from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_BATCH_SIZE as DEFAULT_VECTOR_BATCH_SIZE,
 )
 from zaic_2026_4.profiling.vector_indexer import (
+    DEFAULT_EMBED_MAX_LENGTH,
     DEFAULT_EMBED_MODEL_PATH,
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_MAX_CHUNK_CHARS,
@@ -47,9 +54,6 @@ from zaic_2026_4.profiling.vector_indexer import (
     get_embedder_cache_size,
     parse_markdown_hierarchical,
     recursive_split_paragraph,
-)
-from zaic_2026_4.profiling.vector_indexer import (
-    DEFAULT_EMBED_MAX_LENGTH,
 )
 from zaic_2026_4.profiling.vector_indexer import (
     DEFAULT_TOP_K as DEFAULT_VECTOR_TOP_K,
@@ -71,12 +75,12 @@ __all__ = [
     "DEFAULT_THRESHOLD",
     "DEFAULT_VECTOR_BATCH_SIZE",
     "DEFAULT_VECTOR_TOP_K",
-    "MAXIMAL_PROFILE_PROMPT",
     "MINIMAL_PROFILE_PROMPT",
     "MIN_TABLE_ROWS_FOR_SPLIT",
     "ColumnProfile",
     "DatabaseProfile",
     "EmbedderProtocol",
+    "JoinRef",
     "LLMEngineProtocol",
     "MockEmbedder",
     "MockLLMEngine",
@@ -84,11 +88,15 @@ __all__ = [
     "ProfilingOrchestrator",
     "RawDatabaseProfiler",
     "SemanticVectorIndexer",
+    "TableContext",
     "TableProfile",
     "UndocumentedJoin",
     "VLLMEngine",
     "VietnameseLSHIndexer",
+    "build_join_index",
+    "build_table_context",
     "clear_embedder_cache",
+    "compose_maximal_profile",
     "compute_minhash",
     "create_engine",
     "get_embedder_cache_size",

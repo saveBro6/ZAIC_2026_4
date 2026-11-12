@@ -195,14 +195,10 @@ class SchemaContextBuilder:
             data_format = col_meta.get("data_format", "STRING")
 
             if profile_type == "minimal_profile":
-                desc = col_meta.get("minimal_profile") or "Standard tabular column"
+                desc = col_meta.get("minimal_profile", "")
             else:
                 # maximal_profile or full_profile
-                desc = (
-                    col_meta.get("maximal_profile")
-                    or col_meta.get("minimal_profile")
-                    or "Standard tabular column"
-                )
+                desc = col_meta.get("maximal_profile", "")
 
             table_groups.setdefault(tbl, []).append({
                 "col_name": col,

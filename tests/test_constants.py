@@ -39,7 +39,13 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_LLM_MAX_LENGTH",
         "DEFAULT_QUANTIZATION",
         "MINIMAL_PROFILE_PROMPT",
-        "MAXIMAL_PROFILE_PROMPT",
+        "MAXIMAL_ENUM_MAX_DISTINCT",
+        "MAXIMAL_TOP_VALUES",
+        "MAXIMAL_DOMINANT_RATIO",
+        "MAXIMAL_MAX_JOINS_PER_COLUMN",
+        "MAXIMAL_MAX_VALUE_CHARS",
+        "RANGE_ELIGIBLE_FORMATS",
+        "DATE_FORMATS",
         # Raw Profiler
         "ISO_DATE_REGEX",
         "ISO_DATETIME_REGEX",
@@ -86,7 +92,7 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_SUBMISSION_PATH",
     }
     assert set(constants.__all__) == expected_constants
-    assert len(constants.__all__) == 53
+    assert len(constants.__all__) == len(expected_constants)
 
     for name in expected_constants:
         assert hasattr(constants, name), f"constants module missing {name}"
@@ -111,7 +117,9 @@ def test_constant_types_and_values() -> None:
     assert isinstance(constants.DEFAULT_LOCAL_GPU_UTIL, float)
     assert constants.DEFAULT_LLM_MAX_LENGTH == 16384
     assert "<system>" in constants.MINIMAL_PROFILE_PROMPT
-    assert "<system>" in constants.MAXIMAL_PROFILE_PROMPT
+    assert constants.MAXIMAL_ENUM_MAX_DISTINCT == 10
+    assert "NUMERIC" in constants.RANGE_ELIGIBLE_FORMATS
+    assert "ISO_DATE" in constants.DATE_FORMATS
 
     # Regex patterns
     assert isinstance(constants.ISO_DATE_REGEX, re.Pattern)

@@ -1,7 +1,7 @@
-"""Module 2: LLM-powered database profile summarization using vLLM and Qwen2.5.
+"""Module 2: Database profile summarization using vLLM minimal profiles and deterministic composition.
 
-Generates Minimal Profiles (Short Summaries for Schema Linking) and
-Maximal Profiles (Long Summaries for Code Synthesis & FAISS Vector Indexing).
+Generates Minimal Profiles via LLM (Short Summaries for Schema Linking) and
+Maximal Profiles via deterministic composition from raw statistics and join metadata.
 """
 
 import os
@@ -17,8 +17,12 @@ from zaic_2026_4.constants import (
     DEFAULT_PROD_GPU_UTIL,
     DEFAULT_PROD_MODEL,
     DEFAULT_QUANTIZATION,
-    MAXIMAL_PROFILE_PROMPT,
     MINIMAL_PROFILE_PROMPT,
+)
+from zaic_2026_4.profiling.maximal_composer import (
+    build_join_index,
+    build_table_context,
+    compose_maximal_profile,
 )
 from zaic_2026_4.profiling.raw_profiler import ColumnProfile, DatabaseProfile
 
@@ -186,9 +190,6 @@ class MockLLMEngine:
                     results.append(sql)
                 continue
 
-            # Check whether it is a minimal or maximal prompt
-            is_minimal = "SHORT SUMMARY" in prompt or "TÓM TẮT RÚT GỌN" in prompt
-
             # Scope extraction to the target column section (after <few_shot_examples>)
             target_text = (
                 prompt.split("</few_shot_examples>")[-1]
@@ -235,44 +236,17 @@ class MockLLMEngine:
                 format_str = target_text.split("Format & Pattern: ")[1].split("\n")[0]
 
             col_lower = col_name.lower()
-            if is_minimal:
-                if any(k in col_lower for k in ("ngay", "ngày", "date", "time")):
-                    summary = f'Cột "{col_name}" lưu trữ ngày tháng giao dịch trong bảng {table_name}; định dạng thời gian cần chuẩn hóa ISO YYYY-MM-DD khi truy vấn.'
-                elif any(k in col_lower for k in ("tien", "tiền", "gia", "giá", "cost", "price", "amount")):
-                    summary = f'Cột "{col_name}" chứa giá trị tiền tệ trong bảng {table_name}; định dạng số tiền VNĐ cần làm sạch dấu phân cách trước khi tính toán tổng/bình quân.'
-                elif any(k in col_lower for k in ("ma", "mã", "id", "code", "sku")):
-                    summary = f'Cột "{col_name}" là mã định danh nghiệp vụ trong bảng {table_name}; định dạng chuỗi mã số/ký tự chữ và số.'
-                elif any(k in col_lower for k in ("trang_thai", "trạng thái", "status", "ket_qua", "kết quả", "tien_do")):
-                    summary = f'Cột "{col_name}" theo dõi trạng thái xử lý giao dịch trong bảng {table_name}; cờ phân loại cần lọc theo quy ước nghiệp vụ.'
-                else:
-                    summary = f'Cột "{col_name}" lưu trữ thuộc tính thông tin trong bảng {table_name}; kiểu dữ liệu {format_str}.'
+            if any(k in col_lower for k in ("ngay", "ngày", "date", "time")):
+                summary = f'Cột "{col_name}" lưu trữ ngày tháng giao dịch trong bảng {table_name}; định dạng thời gian cần chuẩn hóa ISO YYYY-MM-DD khi truy vấn.'
+            elif any(k in col_lower for k in ("tien", "tiền", "gia", "giá", "cost", "price", "amount")):
+                summary = f'Cột "{col_name}" chứa giá trị tiền tệ trong bảng {table_name}; định dạng số tiền VNĐ cần làm sạch dấu phân cách trước khi tính toán tổng/bình quân.'
+            elif any(k in col_lower for k in ("ma", "mã", "id", "code", "sku")):
+                summary = f'Cột "{col_name}" là mã định danh nghiệp vụ trong bảng {table_name}; định dạng chuỗi mã số/ký tự chữ và số.'
+            elif any(k in col_lower for k in ("trang_thai", "trạng thái", "status", "ket_qua", "kết quả", "tien_do")):
+                summary = f'Cột "{col_name}" theo dõi trạng thái xử lý giao dịch trong bảng {table_name}; cờ phân loại cần lọc theo quy ước nghiệp vụ.'
             else:
-                minimal_profile_in_prompt = ""
-                if 'Tóm tắt rút gọn: "' in target_text:
-                    try:
-                        raw_line = target_text.split('Tóm tắt rút gọn: "')[1].split("\n")[0].strip()
-                        raw_line = raw_line.removesuffix('"')
-                        minimal_profile_in_prompt = raw_line
-                    except IndexError:
-                        pass
-                elif 'Minimal Profile: "' in target_text:
-                    try:
-                        raw_line = target_text.split('Minimal Profile: "')[1].split("\n")[0].strip()
-                        raw_line = raw_line.removesuffix('"')
-                        minimal_profile_in_prompt = raw_line
-                    except IndexError:
-                        pass
+                summary = f'Cột "{col_name}" lưu trữ thuộc tính thông tin trong bảng {table_name}; kiểu dữ liệu {format_str}.'
 
-                lead_in = (
-                    f"{minimal_profile_in_prompt} "
-                    if minimal_profile_in_prompt
-                    else f'Cột "{col_name}" thuộc bảng {table_name}, giữ vai trò quản lý thông tin trong luồng nghiệp vụ SMB. '
-                )
-                summary = (
-                    f"{lead_in}"
-                    f"Kiểu dữ liệu và mẫu nhận diện: {format_str}. Dữ liệu được quản lý đồng nhất, phục vụ trực tiếp cho "
-                    f"các câu truy vấn phân tích, kết hợp quy chuẩn tính toán và trích xuất theo quy ước nghiệp vụ."
-                )
             results.append(summary)
 
         return results[0] if is_single else results
@@ -351,58 +325,17 @@ class ProfileLLMSummarizer:
             business_readme=business_readme.strip(),
         )
 
-    def build_maximal_prompt(
-        self,
-        table_name: str,
-        col_name: str,
-        col_stats: ColumnProfile | dict[str, Any],
-        total_rows: int,
-        business_readme: str = "",
-        minimal_profile: str = "",
-        sibling_cols: list[str] | None = None,
-    ) -> str:
-        """Construct the Maximal Profile XML prompt with full business_readme."""
-        null_count = col_stats.get("null_count", 0) or 0
-        distinct_count = col_stats.get("distinct_count", 0) or 0
-        min_val = col_stats.get("min_val", "N/A")
-        if min_val is None:
-            min_val = "N/A"
-        max_val = col_stats.get("max_val", "N/A")
-        if max_val is None:
-            max_val = "N/A"
-        data_format = col_stats.get("data_format", "STRING") or "STRING"
-
-        subtype = (
-            col_stats.get("date_subtype")
-            or col_stats.get("currency_subtype")
-            or "Standard"
-        )
-
-        return MAXIMAL_PROFILE_PROMPT.format(
-            table_name=table_name,
-            col_name=col_name,
-            minimal_profile=minimal_profile.strip(),
-            sibling_cols=sibling_cols or [],
-            null_count=null_count,
-            total_rows=total_rows,
-            distinct_count=distinct_count,
-            min_val=min_val,
-            max_val=max_val,
-            data_format=data_format,
-            subtype_info=subtype,
-            business_readme=business_readme.strip(),
-        )
-
     def generate_profiles(
         self,
         db_profile: DatabaseProfile | dict[str, Any],
         business_readme: str = "",
     ) -> dict[str, Any]:
-        """Generate Minimal and Maximal profiles for all columns across all tables.
+        """Generate Minimal profiles via LLM and Maximal profiles via deterministic composition.
 
-        Follows a Two-Stage generation workflow:
-        Stage 1: Generate Minimal Profiles (concise business meaning & abbreviation decoding).
-        Stage 2: Inject Minimal Profiles into Maximal Prompts to generate in-depth summaries.
+        Workflow:
+        1. Batch inference for concise Minimal Profiles (semantic meaning & abbreviation decoding).
+        2. Deterministic composition of Maximal Profiles using raw statistics, domain patterns,
+           unified VIEW notices, and filtered join candidates.
         """
         readme_clean = business_readme.strip()
 
@@ -437,7 +370,7 @@ class ProfileLLMSummarizer:
         if not work_items:
             return {}
 
-        # Phase 2: Batch inference for minimal prompts (Stage 1)
+        # Phase 2: Batch inference for minimal prompts
         all_min_prompts = [item["min_prompt"] for item in work_items]
         min_summaries: list[str] = []
         for i in range(0, len(all_min_prompts), self.batch_size):
@@ -451,32 +384,9 @@ class ProfileLLMSummarizer:
                 chunk_outs = [chunk_outs]
             min_summaries.extend(chunk_outs)
 
-        # Phase 3: Build and batch inference for maximal prompts (Stage 2: Two-stage inheritance)
-        all_max_prompts: list[str] = []
-        for idx, item in enumerate(work_items):
-            min_summary = min_summaries[idx].strip()
-            max_prompt = self.build_maximal_prompt(
-                table_name=item["table_name"],
-                col_name=item["col_name"],
-                col_stats=item["col_stats"],
-                total_rows=item["total_rows"],
-                business_readme=readme_clean,
-                minimal_profile=min_summary,
-                sibling_cols=item["sibling_cols"],
-            )
-            all_max_prompts.append(max_prompt)
-
-        max_summaries: list[str] = []
-        for i in range(0, len(all_max_prompts), self.batch_size):
-            chunk = all_max_prompts[i : i + self.batch_size]
-            chunk_outs = self.llm.generate(
-                chunk,
-                max_tokens=450,
-                stop=["\n\n\n", "</output>", "<|im_end|>", "<|endoftext|>"],
-            )
-            if isinstance(chunk_outs, str):
-                chunk_outs = [chunk_outs]
-            max_summaries.extend(chunk_outs)
+        # Phase 3: Deterministic Maximal Profile Composition & Structural Indexing
+        table_ctx_map = build_table_context(db_profile)
+        join_index = build_join_index(db_profile)
 
         # Phase 4: Construct the final processed_metadata dictionary
         processed_metadata: dict[str, Any] = {}
@@ -484,29 +394,50 @@ class ProfileLLMSummarizer:
             col_key = item["col_key"]
             col_stats = item["col_stats"]
             short_summary = min_summaries[idx].strip()
-            long_summary = max_summaries[idx].strip()
+            tbl_name = item["table_name"]
+            c_name = item["col_name"]
+            tbl_ctx = table_ctx_map.get(tbl_name)
+            col_joins = join_index.get(col_key, [])
 
-            top_10_list = list((col_stats.get("top_10_samples") or {}).keys())[:10]
-            if top_10_list:
-                top_str = f"Các giá trị phổ biến: {top_10_list}"
-                maximal_profile = f"{long_summary} {top_str}" if long_summary else top_str
-            else:
-                maximal_profile = long_summary
+            maximal_profile = compose_maximal_profile(
+                minimal_profile=short_summary,
+                table_name=tbl_name,
+                col_name=c_name,
+                col_stats=col_stats,
+                table_ctx=tbl_ctx,
+                joins=col_joins,
+            )
+
+            distinct_cnt = col_stats.get("distinct_count", 0) or 0
+            null_cnt = col_stats.get("null_count", 0) or 0
+            total_r = item["total_rows"]
+            is_unique = bool(distinct_cnt > 0 and distinct_cnt == (total_r - null_cnt))
 
             processed_metadata[col_key] = {
                 "minimal_profile": short_summary,
                 "maximal_profile": maximal_profile,
-                "raw_samples": col_stats.get("sample_values") or [],
+                "sample_values": col_stats.get("sample_values") or [],
                 # Enriched attributes preserved for downstream vector and schema operations
-                "table_name": item["table_name"],
-                "col_name": item["col_name"],
+                "table_name": tbl_name,
+                "col_name": c_name,
                 "data_format": col_stats.get("data_format", "STRING") or "STRING",
                 "date_subtype": col_stats.get("date_subtype"),
                 "currency_subtype": col_stats.get("currency_subtype"),
-                "null_count": col_stats.get("null_count", 0) or 0,
-                "distinct_count": col_stats.get("distinct_count", 0) or 0,
+                "null_count": null_cnt,
+                "distinct_count": distinct_cnt,
                 "top_10_samples": col_stats.get("top_10_samples") or {},
                 "llm_hint": col_stats.get("llm_hint"),
+                "min_val": col_stats.get("min_val"),
+                "max_val": col_stats.get("max_val"),
+                "is_unique": is_unique,
+                "join_candidates": [
+                    {
+                        "target": j.target_col,
+                        "resemblance": j.resemblance,
+                        "is_target_unique": j.is_target_unique,
+                    }
+                    for j in col_joins
+                ],
             }
 
         return processed_metadata
