@@ -80,6 +80,7 @@ Every code modification task must strictly adhere to the sequential lifecycle be
 4. **Phase 4: Summary & Walkthrough**
    - **Entry Condition:** Phase 2 is **`[PASSED]`** AND Phase 3 linter check passes cleanly.
    - Synthesize changes, explain implementation details, and produce the final user-facing summary walkthrough.
+   - **Commit Message Requirement:** Always accompany the summary walkthrough with a short, compact, one-line commit message for the changes (following conventional commits format, e.g. `feat(...)`, `refactor(...)`, `fix(...)`).
 
 ---
 
