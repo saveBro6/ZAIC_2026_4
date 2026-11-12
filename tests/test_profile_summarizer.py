@@ -195,7 +195,7 @@ def test_summarizer_mock_workflow() -> None:
     assert len(ma_hd_meta["minimal_profile"]) > 0
     assert len(ma_hd_meta["maximal_profile"]) > 0
     assert ma_hd_meta["minimal_profile"] in ma_hd_meta["maximal_profile"]
-    assert "Giá trị phổ biến: 'HD001' (1), 'HD002' (1)" in ma_hd_meta["maximal_profile"]
+    assert "Giá trị phổ biến: 'HD001', 'HD002'" in ma_hd_meta["maximal_profile"]
     assert "min_val" in ma_hd_meta
     assert "max_val" in ma_hd_meta
     assert "is_unique" in ma_hd_meta

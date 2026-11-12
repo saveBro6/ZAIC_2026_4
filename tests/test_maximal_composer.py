@@ -274,3 +274,38 @@ def test_determinism() -> None:
     res1 = compose_maximal_profile("Đơn giá.", "Sales", "price", col_stats, table_ctx, joins)
     res2 = compose_maximal_profile("Đơn giá.", "Sales", "price", col_stats, table_ctx, joins)
     assert res1 == res2
+
+
+def test_frequent_values_omits_counts() -> None:
+    """Verify distinct > 10 lists frequent values without parenthetical frequency counts."""
+    col_stats = {
+        "null_count": 0,
+        "distinct_count": 50,
+        "data_format": "STRING",
+        "top_10_samples": {
+            "1": 26296,
+            "2": 9451,
+            "1 gói": 8527,
+            "1 chai": 5612,
+            "3": 3451,
+            "4": 1200,
+        },
+    }
+    table_ctx = TableContext(
+        table_name="ChiTietDon",
+        row_count=100000,
+        is_view=False,
+        is_unified_view=False,
+        source_tables=(),
+    )
+    result = compose_maximal_profile(
+        minimal_profile="Đơn vị tính số lượng.",
+        table_name="ChiTietDon",
+        col_name="dvt",
+        col_stats=col_stats,
+        table_ctx=table_ctx,
+    )
+
+    assert "Giá trị phổ biến: '1', '2', '1 gói', '1 chai', '3'" in result
+    assert "26,296" not in result
+    assert "(26296)" not in result

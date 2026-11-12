@@ -288,10 +288,8 @@ def compose_maximal_profile(
             )
             segments.append(f"Tập giá trị đầy đủ: {items_str}")
         else:
-            top_items = list(top_samples.items())[:MAXIMAL_TOP_VALUES]
-            items_str = ", ".join(
-                f"'{_truncate_val(k)}' ({v:,})" for k, v in top_items
-            )
+            top_items = list(top_samples.keys())[:MAXIMAL_TOP_VALUES]
+            items_str = ", ".join(f"'{_truncate_val(k)}'" for k in top_items)
             segments.append(f"Giá trị phổ biến: {items_str}")
 
     # 8. Dominant value flag (>= 90%)
