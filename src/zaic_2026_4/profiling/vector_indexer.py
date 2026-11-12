@@ -578,7 +578,7 @@ class SemanticVectorIndexer:
             # Prioritize semantic minimal_profile to avoid statistical noise, fallback to maximal_profile
             desc = meta.get("minimal_profile") or meta.get("maximal_profile", "")
             samples = meta.get("sample_values") or meta.get("raw_samples") or []
-            sample_str = f" Sample values: {samples[:5]}." if samples else ""
+            sample_str = f" Sample values: {samples[:10]}." if samples else ""
             desc_part = f" Description: {desc}." if desc else ""
             text_to_embed = f"Column: {col_key}.{desc_part}{sample_str}".strip()
             texts.append(text_to_embed)
@@ -685,7 +685,7 @@ class SemanticVectorIndexer:
         return results
 
     def search_columns(
-        self, query: str, top_k: int = 5
+        self, query: str, top_k: int = 20
     ) -> list[dict[str, Any]]:
         """Convenience method to retrieve top semantically matching database columns."""
         return self.search_similar_schema(query, top_k=top_k, doc_type="column")

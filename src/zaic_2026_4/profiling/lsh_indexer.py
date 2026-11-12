@@ -159,7 +159,7 @@ class VietnameseLSHIndexer:
         return flattened
 
     def query_literal_with_scores(
-        self, literal_text: str, top_k: int = 5
+        self, literal_text: str, top_k: int = 10
     ) -> list[tuple[str, str, float]]:
         """Query literal mention against indexed values, returning results with Jaccard scores.
 
@@ -205,7 +205,7 @@ class VietnameseLSHIndexer:
         return unique_results
 
     def query_literal(
-        self, literal_text: str, top_k: int = 5
+        self, literal_text: str, top_k: int = 10
     ) -> list[tuple[str, str]]:
         """Query literal mention against indexed values according to code specification.
 
@@ -220,7 +220,7 @@ class VietnameseLSHIndexer:
         return [(col_key, real_val) for col_key, real_val, _ in scored]
 
     def lookup_value(
-        self, literal_text: str, threshold: float = 0.4, top_k: int = 10
+        self, literal_text: str, threshold: float = 0.4, top_k: int = 15
     ) -> set[str]:
         """Look up set of column keys (table.column) containing values matching the literal.
 

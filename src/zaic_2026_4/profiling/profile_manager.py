@@ -236,7 +236,7 @@ class ProfilingOrchestrator:
         self._pipeline_result = result
         return result
 
-    def query_literals(self, entity_text: str, top_k: int = 5) -> list[tuple[str, str]]:
+    def query_literals(self, entity_text: str, top_k: int = 10) -> list[tuple[str, str]]:
         """Query literal mention against indexed column values using LSH.
 
         Args:
@@ -249,7 +249,7 @@ class ProfilingOrchestrator:
         pipeline = self.run_pipeline()
         return pipeline["lsh_indexer"].query_literal(entity_text, top_k=top_k)
 
-    def search_columns(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
+    def search_columns(self, query: str, top_k: int = 20) -> list[dict[str, Any]]:
         """Search top semantically matching database columns using FAISS.
 
         Args:

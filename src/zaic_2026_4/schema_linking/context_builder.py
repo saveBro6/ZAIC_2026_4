@@ -81,7 +81,7 @@ def parse_case_spec(cases: str | list[str] | set[str] | None) -> list[str]:
 class SchemaContextBuilder:
     """Constructs focused schema subsets and formats prompts for the 5 context variants."""
 
-    def __init__(self, top_k_vector: int = 10, top_k_lsh: int = 5, top_k_rules: int = 3, top_k_readme: int = 2) -> None:
+    def __init__(self, top_k_vector: int = 20, top_k_lsh: int = 10, top_k_rules: int = 3, top_k_readme: int = 2) -> None:
         """Initialize SchemaContextBuilder with retrieval parameters."""
         self.top_k_vector = top_k_vector
         self.top_k_lsh = top_k_lsh
@@ -143,7 +143,7 @@ class SchemaContextBuilder:
             for size in (3, 2):
                 for i in range(max(0, n - size + 1)):
                     ngram = " ".join(words[i : i + size])
-                    ng_matches = lsh_indexer.query_literal_with_scores(ngram, top_k=2)
+                    ng_matches = lsh_indexer.query_literal_with_scores(ngram, top_k=5)
                     for col_key, _, score in ng_matches:
                         if score >= 0.5:
                             focused.add(col_key)

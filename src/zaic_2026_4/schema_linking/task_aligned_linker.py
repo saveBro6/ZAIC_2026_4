@@ -188,7 +188,7 @@ class TaskAlignedSchemaLinker:
         # 3. Query LSH for each mention
         results: list[dict[str, Any]] = []
         for m in mentions:
-            scored = lsh_indexer.query_literal_with_scores(m, top_k=3)
+            scored = lsh_indexer.query_literal_with_scores(m, top_k=5)
             for col_key, real_val, score in scored:
                 if score < threshold:
                     continue
@@ -386,7 +386,7 @@ class TaskAlignedSchemaLinker:
                             continue
 
                         # Look up columns matching literal in LSH index
-                        scored_matches = lsh_indexer.query_literal_with_scores(literal, top_k=3)
+                        scored_matches = lsh_indexer.query_literal_with_scores(literal, top_k=5)
                         fields_l = {col for col, _, sc in scored_matches if sc >= 0.4}
 
                         for col, real_val, sc in scored_matches:

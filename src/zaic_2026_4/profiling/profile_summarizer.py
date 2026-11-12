@@ -343,7 +343,7 @@ class ProfileLLMSummarizer:
     ) -> str:
         """Construct the Minimal Profile XML prompt with full business_readme."""
         data_format = col_stats.get("data_format", "STRING") or "STRING"
-        samples = (col_stats.get("sample_values") or [])[:5]
+        samples = (col_stats.get("sample_values") or [])[:10]
 
         return MINIMAL_PROFILE_PROMPT.format(
             table_name=table_name,

@@ -61,7 +61,7 @@ def quote_attr(val: Any, max_len: int | None = None) -> str:
 
 def sanitize_samples(
     samples: list[Any] | None,
-    max_samples: int = 3,
+    max_samples: int = 8,
     max_sample_len: int = 60,
 ) -> list[str]:
     """Sanitize and cap sample values for prompt embedding."""
