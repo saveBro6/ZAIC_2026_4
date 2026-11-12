@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,7 @@ from zaic_2026_4.common.xml_sanitizer import (
     sanitize_cdata,
     sanitize_text,
 )
+from zaic_2026_4.submission.rules import ValidationIssue, render_diagnostics
 
 # Few-shot SQL examples in Vietnamese for SQLite generation
 FEW_SHOT_SQL_EXAMPLES_VI: str = (
@@ -216,12 +218,13 @@ REPAIR_CONTRACT_TEXT: str = (
 class RepairContext:
     """Repair-specific inputs appended after the shared generation prefix."""
 
-    diagnostics: list[str]
+    diagnostics: Sequence[ValidationIssue | str]
     previous_sql: str = ""
     previous_type: str = "number"
     accepted_sql: str = ""
     last_output: str = ""
     max_chars: int = 4000
+    previous_attempts: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def _build_prompt_prefix(
@@ -321,7 +324,8 @@ def _format_repair_task(repair: RepairContext) -> str:
         {"sql": repair.previous_sql, "type": repair.previous_type},
         ensure_ascii=False,
     )
-    diagnostics = "\n".join(f"- {issue}" for issue in repair.diagnostics)
+    rendered_issues = render_diagnostics(repair.diagnostics)
+    diagnostics = "\n".join(rendered_issues)
     if not diagnostics:
         diagnostics = "- (no diagnostics were reported)"
 
@@ -344,6 +348,18 @@ def _format_repair_task(repair: RepairContext) -> str:
             f"{sanitize_cdata(repair.last_output, repair.max_chars)}"
             "]]></last_raw_output>"
         )
+
+    if repair.previous_attempts:
+        attempt_lines = [
+            "<previous_attempts>",
+            "Các câu lệnh trước đó đã thử nhưng không hợp lệ (không lặp lại):",
+        ]
+        for idx, (attempt_sql, issue_codes) in enumerate(repair.previous_attempts[-2:], 1):
+            codes_str = ", ".join(issue_codes) if issue_codes else "None"
+            attempt_lines.append(f"- Lần thử {idx}: `{attempt_sql}` -> Lỗi: [{codes_str}]")
+        attempt_lines.append("</previous_attempts>")
+        sections.append("\n".join(attempt_lines))
+
     sections.extend([
         "<repair_diagnostics>",
         diagnostics,

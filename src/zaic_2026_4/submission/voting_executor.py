@@ -19,7 +19,6 @@ def normalize_cell(val: Any) -> Any:
     if val is None:
         return None
     if isinstance(val, float):
-        # Round to 4 decimal places to prevent floating point representation noise
         return round(val, 4)
     if isinstance(val, str):
         return val.strip()
@@ -38,6 +37,13 @@ def summarize_result_set(res_set: set[tuple[Any, ...]] | frozenset[tuple[Any, ..
     return f"{{{items[0]}, {items[1]}, ... ({len(items)} items)}}"
 
 
+def has_evidence(res_set: set[tuple[Any, ...]] | frozenset[tuple[Any, ...]] | None) -> bool:
+    """Check whether result set contains at least one non-None cell in at least one row."""
+    if res_set is None or len(res_set) == 0:
+        return False
+    return not all(all(cell is None for cell in row) for row in res_set)
+
+
 class VotingExecutor:
     """Executes candidate queries against SQLite database and selects final answer via majority voting."""
 
@@ -47,13 +53,7 @@ class VotingExecutor:
         timeout_seconds: float = DEFAULT_SQL_TIMEOUT_SECONDS,
         random_seed: int = 42,
     ) -> None:
-        """Initialize VotingExecutor.
-
-        Args:
-            db_path: Path to the target business SQLite database.
-            timeout_seconds: Timeout for query execution.
-            random_seed: Seed for reproducible tie-breaking selection.
-        """
+        """Initialize VotingExecutor."""
         self.db_path = Path(db_path).resolve()
         self.timeout_seconds = timeout_seconds
         self.rng = random.Random(random_seed)
@@ -74,7 +74,6 @@ class VotingExecutor:
             cursor.execute(sql)
             raw_rows = cursor.fetchall()
 
-            # Normalize rows to immutable tuples
             normalized_rows = [
                 tuple(normalize_cell(cell) for cell in row)
                 for row in raw_rows
@@ -93,6 +92,15 @@ class VotingExecutor:
     def execute_candidates(self, candidates: list[CandidateQuery]) -> None:
         """Execute all valid candidates and record execution outcomes in-place."""
         for cand in candidates:
+            # Handle deliberate abstain / unanswerable
+            if cand.deliberate_abstain or (
+                cand.predicted_type in ("unanswerable", "abstain") and not cand.final_sql.strip()
+            ):
+                cand.execution_success = True
+                cand.raw_result = None
+                cand.result_set = None
+                continue
+
             if not cand.is_valid_syntax:
                 cand.execution_success = False
                 cand.execution_error = "Skipped execution due to static syntax/construction errors."
@@ -112,28 +120,41 @@ class VotingExecutor:
         self,
         candidates: list[CandidateQuery],
     ) -> tuple[CandidateQuery | None, str, str]:
-        """Perform majority voting among executed candidates.
-
-        Returns:
-            Tuple of (winning_candidate, voting_status, selection_reason).
-        """
-        valid_candidates = [
+        """Perform majority voting among executed candidates with evidence guards."""
+        # 1. Check deliberate unanswerable consensus
+        unans_cands = [
             c for c in candidates
-            if c.execution_success and c.result_set is not None
+            if c.deliberate_abstain or (
+                c.predicted_type in ("unanswerable", "abstain") and not c.final_sql.strip()
+            )
+        ]
+        evidence_cands = [
+            c for c in candidates
+            if c.execution_success and has_evidence(c.result_set)
         ]
 
-        if not valid_candidates:
+        if unans_cands and not evidence_cands:
+            winner = unans_cands[0]
+            reason = "unanswerable: Candidate consensus or deliberate abstain on unanswerable query."
+            return winner, "unanswerable_consensus", reason
+
+        # 2. Check insufficient evidence or complete failure
+        if not evidence_cands:
+            executed_any = any(c.execution_success for c in candidates)
+            if executed_any:
+                reason = "insufficient_evidence: Executed candidate queries produced empty set or all-NULL cells."
+                return None, "insufficient_evidence", reason
             reason = "abstain: All candidate queries failed static checks or SQLite execution."
             return None, "abstain_fallback", reason
 
-        # Group valid candidates by result set (using frozenset as hashable key)
+        # 3. Group candidates by identical result set
         groups: dict[frozenset[tuple[Any, ...]], list[CandidateQuery]] = {}
-        for c in valid_candidates:
+        for c in evidence_cands:
             if c.result_set is not None:
                 f_key = frozenset(c.result_set)
                 groups.setdefault(f_key, []).append(c)
 
-        # 1. Check for Majority Agreement (>= 2 candidates agree on identical result set)
+        # 4. Majority agreement check (>= 2 candidates produce identical result set)
         majority_group: list[CandidateQuery] | None = None
         for f_key, group in groups.items():
             if len(group) >= 2:
@@ -143,7 +164,8 @@ class VotingExecutor:
         if majority_group is not None:
             winner = majority_group[0]
             agreeing_ids = [c.candidate_id for c in majority_group]
-            status = "unanimous_3_of_3" if len(majority_group) == len(candidates) else "majority_2_of_3"
+            prefix = "unanimous" if len(majority_group) == len(candidates) else "majority"
+            status = f"{prefix}_{len(majority_group)}_of_{len(candidates)}"
             summary = summarize_result_set(winner.result_set)
             reason = (
                 f"majority: Candidate {winner.candidate_id} chosen as winning candidate because candidates {agreeing_ids} "
@@ -151,12 +173,12 @@ class VotingExecutor:
             )
             return winner, status, reason
 
-        # 2. Tie-break: All valid candidates produced divergent results -> Pick one randomly
-        winner = self.rng.choice(valid_candidates)
-        cand_ids = [c.candidate_id for c in valid_candidates]
+        # 5. Tie-break: All valid candidates produced divergent results -> Pick one randomly from evidence candidates
+        winner = self.rng.choice(evidence_cands)
+        cand_ids = [c.candidate_id for c in evidence_cands]
         summary = summarize_result_set(winner.result_set)
         reason = (
-            f"random: No agreement among {len(valid_candidates)} candidates {cand_ids}; "
+            f"random: No agreement among {len(evidence_cands)} candidates {cand_ids}; "
             f"randomly selected candidate {winner.candidate_id} with result {summary}."
         )
         return winner, "random_tiebreak", reason
@@ -164,6 +186,7 @@ class VotingExecutor:
 
 __all__ = [
     "VotingExecutor",
+    "has_evidence",
     "normalize_cell",
     "summarize_result_set",
 ]

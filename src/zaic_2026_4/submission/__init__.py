@@ -30,6 +30,12 @@ from zaic_2026_4.submission.result_formatter import (
     ResultFormatter,
     normalize_contract_string,
 )
+from zaic_2026_4.submission.rules import (
+    RULE_REGISTRY,
+    Severity,
+    ValidationIssue,
+    render_diagnostics,
+)
 from zaic_2026_4.submission.sql_validator import (
     SQLValidator,
     clean_sql_string,
@@ -43,6 +49,7 @@ from zaic_2026_4.submission.voting_executor import (
 
 __all__ = [
     "FEW_SHOT_SQL_EXAMPLES_VI",
+    "RULE_REGISTRY",
     "VALID_DATAMATE_TYPES",
     "BusinessContext",
     "CandidateGenerator",
@@ -54,7 +61,9 @@ __all__ = [
     "ResultFormatter",
     "SQLGenerationOutput",
     "SQLValidator",
+    "Severity",
     "SubmissionPipeline",
+    "ValidationIssue",
     "ValidationResult",
     "VotingExecutor",
     "build_sql_correction_prompt",
@@ -67,5 +76,6 @@ __all__ = [
     "normalize_contract_string",
     "parse_structured_sql_output",
     "permute_schema",
+    "render_diagnostics",
     "summarize_result_set",
 ]

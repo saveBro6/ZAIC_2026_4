@@ -158,8 +158,8 @@ def test_rejected_attempt_is_shown(tmp_path: Path) -> None:
             prompt_str = prompts if isinstance(prompts, str) else prompts[0]
             self.prompts.append(prompt_str)
             if len(self.prompts) == 1:
-                return '{"sql": "SELECT nope FROM t;", "type": "number"}'
-            return '{"sql": "SELECT substr(a,1,1) || \'x\' AS c FROM t;", "type": "number"}'
+                return '{"sql": "SELECT json(a) FROM t;", "type": "number"}'
+            return '{"sql": "SELECT a, a FROM t;", "type": "number"}'
 
     engine = RejectingEngine()
     generator = CandidateGenerator(
@@ -184,8 +184,8 @@ def test_rejected_attempt_is_shown(tmp_path: Path) -> None:
     assert len(engine.prompts) >= 3
     third_prompt = engine.prompts[2]
     assert "<last_raw_output>" in third_prompt
-    assert "substr(a,1,1)" in third_prompt
-    assert _cdata_body(third_prompt, "accepted_sql") == "SELECT nope FROM t;"
+    assert "SELECT a, a FROM t;" in third_prompt
+    assert _cdata_body(third_prompt, "accepted_sql") == "SELECT json(a) FROM t;"
 
 
 def test_repair_prompt_growth_bounded() -> None:

@@ -43,10 +43,10 @@ class MockRetryLLMEngine:
 
         # If it's a correction prompt, return fixed SQL
         if "repair_diagnostics" in prompt_text:
-            res = 'SELECT name FROM users WHERE price IS NOT NULL ORDER BY price ASC;'
+            res = 'SELECT price FROM users WHERE price IS NOT NULL ORDER BY price ASC;'
         else:
-            # First attempt: faulty SQL with ASC but no NOT NULL
-            res = 'SELECT name FROM users ORDER BY price ASC;'
+            # First attempt: faulty SQL with unknown column
+            res = 'SELECT bad_col FROM users ORDER BY price ASC;'
 
         return res if is_single else [res]
 
@@ -351,9 +351,9 @@ def test_candidate_generator_dry_run_suspicious_zero_retry(tmp_path: Path) -> No
         def generate(self, prompts: Any, **kwargs: Any) -> str:
             self.calls += 1
             prompt_str = prompts if isinstance(prompts, str) else prompts[0]
-            if "trả về 0 dòng khớp" in prompt_str:
+            if "UNRESOLVED_ZERO" in prompt_str or "cảnh báo ngữ nghĩa" in prompt_str or "0 dòng khớp" in prompt_str:
                 return "SELECT COUNT(*) FROM orders WHERE order_date >= '2026-05-01';"
-            # First attempt: date filter matches 0 rows
+            # First attempt: date filter matches 0 rows and misses grounded literal
             return "SELECT COUNT(*) FROM orders WHERE order_date = '1999-01-01';"
 
     generator = CandidateGenerator(
@@ -365,10 +365,11 @@ def test_candidate_generator_dry_run_suspicious_zero_retry(tmp_path: Path) -> No
     cand = generator.generate_candidate(
         candidate_id=0,
         seed=42,
-        question="Số đơn?",
+        question="Số đơn ngày 2026-05-01?",
         as_of_date="2026-05-25",
         reduced_schema={"orders.order_date"},
         processed_metadata={},
+        grounded_literals=[{"mention": "2026-05-01", "canonical_value": "2026-05-01"}],
     )
 
     assert cand.is_valid_syntax is True
@@ -380,7 +381,7 @@ def test_candidate_generator_dry_run_suspicious_zero_retry(tmp_path: Path) -> No
 
 
 def test_candidate_generator_dry_run_legitimate_zero_fallback(tmp_path: Path) -> None:
-    """Verify that when a question legitimately has 0 results, retries exhaust gracefully and accept 0."""
+    """Verify that when a question legitimately has 0 results with clean SQL, it stops at turn 0 (Metric M3)."""
     db_file = tmp_path / "test_biz_legit_zero.db"
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -409,12 +410,14 @@ def test_candidate_generator_dry_run_legitimate_zero_fallback(tmp_path: Path) ->
         processed_metadata={},
     )
 
-    # Exhausted retries but execution was successful and accepted 0
+    # Legitimate clean zero stops immediately at turn 0 without wasting LLM calls (Metric M3)
     assert cand.is_valid_syntax is True
     assert cand.execution_success is True
-    assert cand.execution_retry_count == 2
-    assert cand.total_retry_count == {"sql": 0, "execution": 2}
+    assert cand.execution_retry_count == 0
+    assert cand.total_retry_count == {"sql": 0, "execution": 0}
     assert cand.raw_result == [(0,)]
+    assert cand.unresolved_zero is True
+    assert cand.repair_stop_reason == "unexplained_zero"
 
 
 def test_parse_structured_sql_output() -> None:
@@ -451,8 +454,8 @@ def test_candidate_generator_invalid_type_retry_and_fallback() -> None:
 
         def generate(self, prompts: Any, **kwargs: Any) -> str:
             self.calls += 1
-            # Continually return an invalid type
-            return '{"sql": "SELECT 1;", "type": "unrecognized_format"}'
+            # Return distinct SQL each call so stagnation is not triggered
+            return f'{{"sql": "SELECT {self.calls};", "type": "unrecognized_format"}}'
 
     generator = CandidateGenerator(
         llm_engine=InvalidTypeEngine(),

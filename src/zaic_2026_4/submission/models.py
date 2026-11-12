@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from zaic_2026_4.submission.rules import ValidationIssue
+
 DataMateAnswerType = Literal[
     "number",
     "percent",
@@ -65,7 +67,24 @@ class ValidationResult:
     """Outcome of static SQLglot AST syntax and construction checks."""
 
     is_valid: bool
-    issues: list[str] = field(default_factory=list)
+    issues: list[ValidationIssue | str] = field(default_factory=list)
+
+    @property
+    def issue_texts(self) -> list[str]:
+        """Return list of string representations for all issues."""
+        return [str(i) for i in self.issues]
+
+    def codes(self) -> set[str]:
+        """Return set of issue codes present in issues."""
+        return {getattr(i, "code", "UNKNOWN") for i in self.issues}
+
+    def blocking_issues(self) -> list[ValidationIssue | str]:
+        """Return only blocking severity issues."""
+        return [i for i in self.issues if getattr(i, "severity", "blocking") == "blocking"]
+
+    def warning_issues(self) -> list[ValidationIssue | str]:
+        """Return only warning severity issues."""
+        return [i for i in self.issues if getattr(i, "severity", "blocking") == "warning"]
 
 
 @dataclass
@@ -79,7 +98,7 @@ class CandidateQuery:
     final_sql: str = ""
     predicted_type: str = "number"
     is_valid_syntax: bool = True
-    construction_issues: list[str] = field(default_factory=list)
+    construction_issues: list[ValidationIssue | str] = field(default_factory=list)
     sql_retry_count: int = 0
     execution_retry_count: int = 0
     total_retry_count: dict[str, int] = field(default_factory=dict)
@@ -87,6 +106,9 @@ class CandidateQuery:
     execution_error: str | None = None
     raw_result: list[Any] | None = None
     result_set: set[tuple[Any, ...]] | None = None
+    deliberate_abstain: bool = False
+    unresolved_zero: bool = False
+    repair_stop_reason: str | None = None
 
     def __post_init__(self) -> None:
         """Ensure total_retry_count dictionary is synchronized with granular retry counts."""
@@ -118,10 +140,13 @@ class CandidateQuery:
                 "execution": self.execution_retry_count,
             },
             "syntax_valid": self.is_valid_syntax,
-            "construction_issues": list(self.construction_issues),
+            "construction_issues": [str(x) for x in self.construction_issues],
             "execution_success": self.execution_success,
             "execution_error": self.execution_error,
             "result_set": res_repr,
+            "deliberate_abstain": self.deliberate_abstain,
+            "unresolved_zero": self.unresolved_zero,
+            "repair_stop_reason": self.repair_stop_reason,
         }
 
 
