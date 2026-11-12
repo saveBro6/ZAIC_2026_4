@@ -106,6 +106,7 @@ class CandidateQuery:
     execution_error: str | None = None
     raw_result: list[Any] | None = None
     result_set: set[tuple[Any, ...]] | None = None
+    result_columns: list[str] = field(default_factory=list)
     deliberate_abstain: bool = False
     unresolved_zero: bool = False
     repair_stop_reason: str | None = None
@@ -144,6 +145,7 @@ class CandidateQuery:
             "execution_success": self.execution_success,
             "execution_error": self.execution_error,
             "result_set": res_repr,
+            "result_columns": list(self.result_columns[:20]),
             "deliberate_abstain": self.deliberate_abstain,
             "unresolved_zero": self.unresolved_zero,
             "repair_stop_reason": self.repair_stop_reason,
@@ -163,6 +165,7 @@ class QuestionSubmission:
     winning_candidate_id: int | None = None
     voting_status: str = "abstain_fallback"
     selection_reason: str = ""
+    formatting_trace: dict[str, Any] = field(default_factory=dict)
 
     def to_submission_dict(self) -> dict[str, Any]:
         """Format strictly according to problem contract specification for submission.jsonl."""
@@ -194,6 +197,7 @@ class QuestionSubmission:
             "selection_reason": self.selection_reason,
             "voting_status": self.voting_status,
             "winning_candidate_id": self.winning_candidate_id,
+            "formatting_trace": self.formatting_trace,
             "candidates": [c.to_dict() for c in self.candidates],
         }
         if self.reason:

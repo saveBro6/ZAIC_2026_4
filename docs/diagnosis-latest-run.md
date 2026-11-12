@@ -150,8 +150,9 @@ Q1 giữ nguyên → **PA +1.0** trên tập 5 câu này, đồng thời triệt
 
 Nên đưa 5 câu này thành fixture hồi quy với 5 đáp án đã kiểm chứng ở mục 2.
 
-## 7. Các mục đã đóng (Validator + P2 + P3)
+## 7. Các mục đã đóng (Validator + P2 + P3 + P4)
 
 - **S5 (So sánh ngày không có guard)**: Đã đóng qua rule `DATE_FORMAT_MISMATCH` (blocking khi so sánh ISO literal trực tiếp với cột dd/mm/yyyy mà không bọc chuẩn hoá) và mở rộng nhận diện hàm bọc ngày (`date`, `strftime`, `substr`).
-- **S7 (Vote rỗng/NULL thành đồng thuận)**: Đã đóng qua guard `has_evidence(result_set)` trong `voting_executor.py`; tập rỗng/toàn NULL không còn được tính vào nhóm đồng thuận, trả `(None, "insufficient_evidence")`.
+- **S6 (Silent zero - Rỗng/NULL thành 0/0.0)**: Đã đóng qua P4 (`result_formatter.py`). Rỗng, toàn NULL hoặc ô không parse được kiểu hợp lệ chuyển thành `("abstain", None)` (0 điểm) thay vì bịa `0` hoặc `0.0` (-1 điểm).
+- **S7 & S11 (Vote theo canonical answer, loại bỏ RNG tie-break)**: Đã đóng qua P4 (`voting_executor.py`). Bầu chọn theo `answer_signature(cand)` (phân biệt kiểu dữ liệu, giữ thứ tự `list`, bất biến thứ tự hàng `table`). Bỏ hoàn toàn `rng.choice` và tie-break ngẫu nhiên; ngưỡng đồng thuận $> 0.5$ trên số evidence candidates, các ca chia rẽ $\le 0.5$ (1-1, 1-1-1) chuyển thành `abstain_low_agreement` tất định.
 - **S9 (Validator không kiểm schema/enum)**: Đã đóng qua rule `TABLE_NOT_FOUND`, `COLUMN_NOT_FOUND`, `UNKNOWN_QUALIFIER` (AST scope check) và `LITERAL_NOT_IN_ENUM` (khi tập sample phủ đủ distinct_count).

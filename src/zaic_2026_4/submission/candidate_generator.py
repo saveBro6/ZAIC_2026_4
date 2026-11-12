@@ -55,6 +55,7 @@ class Attempt:
     issues: tuple[ValidationIssue | str, ...]
     raw_rows: list[Any] | None = None
     result_set: set[tuple[Any, ...]] | None = None
+    raw_columns: tuple[str, ...] = ()
     raw_str: str = ""
 
 
@@ -130,10 +131,10 @@ class CandidateGenerator:
         self,
         sql: str,
         db_path: Path | None,
-    ) -> tuple[bool, str | None, list[Any] | None, set[tuple[Any, ...]] | None]:
+    ) -> tuple[bool, str | None, list[Any] | None, set[tuple[Any, ...]] | None, list[str]]:
         """Execute query in read-only mode against SQLite database to verify runtime execution."""
         if db_path is None or not db_path.is_file():
-            return False, "Database path not configured or file not found.", None, None
+            return False, "Database path not configured or file not found.", None, None, []
 
         uri = f"file:{db_path.as_posix()}?mode=ro"
         conn: sqlite3.Connection | None = None
@@ -142,16 +143,17 @@ class CandidateGenerator:
             cursor = conn.cursor()
             cursor.execute(sql)
             raw_rows = cursor.fetchall()
+            columns = [str(col[0]) for col in (cursor.description or ())]
             normalized_rows = [
                 tuple(normalize_cell(cell) for cell in row)
                 for row in raw_rows
             ]
             result_set = set(normalized_rows)
-            return True, None, raw_rows, result_set
+            return True, None, raw_rows, result_set, columns
         except sqlite3.Error as exc:
-            return False, f"SQLite error: {exc}", None, None
+            return False, f"SQLite error: {exc}", None, None, []
         except Exception as exc:  # noqa: BLE001
-            return False, f"Execution error: {exc}", None, None
+            return False, f"Execution error: {exc}", None, None, []
         finally:
             if conn is not None:
                 conn.close()
@@ -291,6 +293,7 @@ class CandidateGenerator:
             executed = False
             raw_rows = None
             r_set = None
+            raw_cols: list[str] = []
             shape_ok = not has_blocking
             has_ev = False
             has_nz_ev = False
@@ -298,7 +301,7 @@ class CandidateGenerator:
             if not has_blocking:
                 if target_db is not None and target_db.is_file():
                     current_phase = "execution"
-                    exec_success, exec_error, raw_rows, r_set = self._dry_run_query(curr_sql, target_db)
+                    exec_success, exec_error, raw_rows, r_set, raw_cols = self._dry_run_query(curr_sql, target_db)
                     if not exec_success:
                         all_issues.append(
                             ValidationIssue(
@@ -373,6 +376,7 @@ class CandidateGenerator:
                 issues=tuple(all_issues),
                 raw_rows=raw_rows,
                 result_set=r_set,
+                raw_columns=tuple(raw_cols),
                 raw_str=curr_raw_str,
             )
             history.append(curr_attempt)
@@ -516,6 +520,7 @@ class CandidateGenerator:
             execution_error=next((str(i) for i in best.issues if getattr(i, "code", "") == "EXECUTION_ERROR"), None),
             raw_result=best.raw_rows,
             result_set=best.result_set,
+            result_columns=list(best.raw_columns),
             deliberate_abstain=is_deliberate_abstain,
             unresolved_zero=is_unresolved_zero,
             repair_stop_reason=stop_reason,

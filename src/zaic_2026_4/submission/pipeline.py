@@ -21,8 +21,14 @@ from zaic_2026_4.profiling.profile_manager import ProfilingOrchestrator
 from zaic_2026_4.schema_linking.task_aligned_linker import TaskAlignedSchemaLinker
 from zaic_2026_4.submission.candidate_generator import CandidateGenerator
 from zaic_2026_4.submission.models import QuestionItem, QuestionSubmission
-from zaic_2026_4.submission.result_formatter import ResultFormatter
-from zaic_2026_4.submission.voting_executor import VotingExecutor
+from zaic_2026_4.submission.result_formatter import (
+    ResultFormatter,
+    detect_percent_scale,
+)
+from zaic_2026_4.submission.voting_executor import (
+    VotingExecutor,
+    answer_signature,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +299,9 @@ class SubmissionPipeline:
         elapsed = time.perf_counter() - t0
 
         # 4. Result Formatting
+        final_type = "abstain"
+        final_ans = None
+
         if winner is None:
             submission = QuestionSubmission(
                 id=item.id,
@@ -305,6 +314,7 @@ class SubmissionPipeline:
                 selection_reason=reason,
             )
         elif winner.predicted_type == "unanswerable":
+            final_type = "unanswerable"
             submission = QuestionSubmission(
                 id=item.id,
                 type="unanswerable",
@@ -330,7 +340,11 @@ class SubmissionPipeline:
             ans_type, ans_val = ResultFormatter.format_result(
                 raw_rows=winner.raw_result,
                 target_type=winner.predicted_type,
+                raw_columns=winner.result_columns,
+                sql=winner.final_sql,
             )
+            final_type = ans_type
+            final_ans = ans_val
             submission = QuestionSubmission(
                 id=item.id,
                 type=ans_type,
@@ -341,6 +355,46 @@ class SubmissionPipeline:
                 voting_status=status,
                 selection_reason=reason,
             )
+
+        # Build diagnostic formatting_trace
+        ev_cands = [c for c in candidates if c.execution_success and c.result_set is not None]
+        sig_groups: dict[Any, int] = {}
+        for c in ev_cands:
+            s = answer_signature(c)
+            if s is not None:
+                sig_groups[s] = sig_groups.get(s, 0) + 1
+        cluster_sizes = sorted(sig_groups.values(), reverse=True)
+
+        raw_val_preview = None
+        pct_scale = None
+        pct_scaled = False
+        res_cols: list[str] = []
+
+        if winner is not None:
+            res_cols = list(winner.result_columns[:20])
+            if winner.raw_result and len(winner.raw_result) > 0:
+                first_row = winner.raw_result[0]
+                raw_val_preview = first_row[0] if isinstance(first_row, (list, tuple)) else first_row
+            if winner.predicted_type == "percent":
+                pct_scale = detect_percent_scale(winner.final_sql)
+                try:
+                    if raw_val_preview is not None and not isinstance(raw_val_preview, bool):
+                        num_f = float(raw_val_preview)
+                        if pct_scale == "ratio" and abs(num_f) <= 1.0:
+                            pct_scaled = True
+                except (ValueError, TypeError):
+                    pass
+
+        submission.formatting_trace = {
+            "answer_type": final_type,
+            "final_answer": final_ans,
+            "percent_scale": pct_scale,
+            "percent_scaled": pct_scaled,
+            "raw_value": str(raw_val_preview) if raw_val_preview is not None else None,
+            "result_columns": res_cols,
+            "evidence_candidates": len(ev_cands),
+            "cluster_sizes": cluster_sizes,
+        }
 
         # 5. Flush diagnostic log to /result/logs/<id>.json
         log_file = self.logs_dir / f"{item.id}.json"

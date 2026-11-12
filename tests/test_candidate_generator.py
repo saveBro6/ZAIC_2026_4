@@ -285,6 +285,8 @@ def test_candidate_generator_dry_run_success(tmp_path: Path) -> None:
     assert cand.total_retry_count == {"sql": 0, "execution": 0}
     assert cand.raw_result == [(27000.0,)]
     assert cand.result_set == {(27000.0,)}
+    assert len(cand.result_columns) == 1
+    assert "SUM(price)" in cand.result_columns[0]
 
 
 def test_candidate_generator_dry_run_runtime_error_retry(tmp_path: Path) -> None:
@@ -592,5 +594,39 @@ def test_candidate_generator_with_grounded_entities() -> None:
     assert "<grounded_entities>" in captured_prompts[0]
     assert "Bia Tiger Bạc lon" in captured_prompts[0]
     assert 'san_pham."ten"' in captured_prompts[0]
+
+
+def test_candidate_generator_dry_run_captures_result_columns(tmp_path: Path) -> None:
+    """Verify CandidateGenerator dry run captures cursor column descriptions."""
+    db_file = tmp_path / "test_cols.db"
+    conn = sqlite3.connect(db_file)
+    conn.execute("CREATE TABLE users (id INT, full_name TEXT, balance REAL);")
+    conn.execute("INSERT INTO users VALUES (1, 'Nguyen Van A', 150000);")
+    conn.commit()
+    conn.close()
+
+    class TableEngine:
+        def generate(self, prompts: Any, **kwargs: Any) -> str:
+            return '{"sql": "SELECT id, full_name, balance FROM users;", "type": "table"}'
+
+    generator = CandidateGenerator(
+        llm_engine=TableEngine(),
+        seeds=(42,),
+        db_path=db_file,
+    )
+
+    cand = generator.generate_candidate(
+        candidate_id=0,
+        seed=42,
+        question="Thông tin?",
+        as_of_date="2026-05-25",
+        reduced_schema={"users.id", "users.full_name", "users.balance"},
+        processed_metadata={},
+        db_path=db_file,
+    )
+
+    assert cand.execution_success is True
+    assert cand.result_columns == ["id", "full_name", "balance"]
+
 
 
