@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from zaic_2026_4.common.xml_sanitizer import format_schema_table_elements
 from zaic_2026_4.constants import FEW_SHOT_SQL_EXAMPLES
 
 
@@ -208,14 +209,7 @@ class SchemaContextBuilder:
 
         lines = ["<database_schema>"]
         for tbl_name, cols in sorted(table_groups.items()):
-            lines.append(f'  <table name="{tbl_name}">')
-            for c in cols:
-                lines.append(
-                    f'    <column name="{c["col_name"]}" type="{c["data_format"]}">'
-                )
-                lines.append(f'      {c["description"]}')
-                lines.append("    </column>")
-            lines.append("  </table>")
+            lines.extend(format_schema_table_elements(tbl_name, cols))
         lines.append("</database_schema>")
 
         return "\n".join(lines)

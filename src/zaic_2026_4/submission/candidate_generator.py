@@ -11,7 +11,9 @@ from zaic_2026_4.constants import (
     DEFAULT_CANDIDATE_SEEDS,
     DEFAULT_EXECUTION_MAX_RETRIES,
     DEFAULT_SQL_MAX_RETRIES,
+    DEFAULT_SQL_MAX_TOKENS,
     DEFAULT_SQL_TIMEOUT_SECONDS,
+    DEFAULT_THINKING_TOKEN_BUDGET,
 )
 from zaic_2026_4.submission.models import (
     VALID_DATAMATE_TYPES,
@@ -158,7 +160,8 @@ class CandidateGenerator:
         # 3. Initial generation
         gen_kwargs: dict[str, Any] = {
             "temperature": 0.7,
-            "max_tokens": 512,
+            "max_tokens": DEFAULT_SQL_MAX_TOKENS,
+            "thinking_token_budget": DEFAULT_THINKING_TOKEN_BUDGET,
             "seed": seed,
         }
         if self.structured_outputs is not None:
@@ -198,7 +201,8 @@ class CandidateGenerator:
             )
             corr_kwargs: dict[str, Any] = {
                 "temperature": 0.2,
-                "max_tokens": 512,
+                "max_tokens": DEFAULT_SQL_MAX_TOKENS,
+                "thinking_token_budget": DEFAULT_THINKING_TOKEN_BUDGET,
                 "seed": seed + sql_retries,
             }
             if self.structured_outputs is not None:
@@ -257,7 +261,8 @@ class CandidateGenerator:
                 )
                 exec_retry_kwargs: dict[str, Any] = {
                     "temperature": 0.2,
-                    "max_tokens": 512,
+                    "max_tokens": DEFAULT_SQL_MAX_TOKENS,
+                    "thinking_token_budget": DEFAULT_THINKING_TOKEN_BUDGET,
                     "seed": seed + self.sql_max_retries + execution_retries,
                 }
                 if self.structured_outputs is not None:

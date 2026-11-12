@@ -12,6 +12,8 @@ import re
 import unicodedata
 from typing import Any
 
+from zaic_2026_4.common.xml_sanitizer import format_schema_table_elements
+
 logger = logging.getLogger(__name__)
 
 
@@ -241,7 +243,7 @@ class SchemaPostProcessor:
             Formatted XML string ready for SQL generation prompt.
         """
         target_dict = processed_metadata.get("metadata_profile", processed_metadata)
-        tables: dict[str, list[tuple[str, str, str]]] = {}
+        tables: dict[str, list[dict[str, Any]]] = {}
 
         for q_field in sorted(quoted_schema):
             if "." not in q_field:
@@ -254,16 +256,15 @@ class SchemaPostProcessor:
             data_type = col_meta.get("data_format", "STRING")
             desc = col_meta.get("maximal_profile", "")
 
-            tables.setdefault(tbl, []).append((q_col, data_type, desc))
+            tables.setdefault(tbl, []).append({
+                "col_name": raw_col,
+                "data_format": data_type,
+                "desc": desc,
+            })
 
         lines = ["<selected_schema>"]
         for tbl, cols in sorted(tables.items()):
-            lines.append(f'  <table name="{tbl}">')
-            for q_col, d_type, desc in cols:
-                lines.append(f'    <column name={q_col} type="{d_type}">')
-                lines.append(f"      {desc}")
-                lines.append("    </column>")
-            lines.append("  </table>")
+            lines.extend(format_schema_table_elements(tbl, cols))
         lines.append("</selected_schema>")
 
         return "\n".join(lines)

@@ -17,6 +17,8 @@ from zaic_2026_4.constants import (
     DEFAULT_PROD_GPU_UTIL,
     DEFAULT_PROD_MODEL,
     DEFAULT_QUANTIZATION,
+    DEFAULT_REASONING_END_STR,
+    DEFAULT_REASONING_START_STR,
     MINIMAL_PROFILE_PROMPT,
 )
 from zaic_2026_4.profiling.maximal_composer import (
@@ -38,6 +40,7 @@ class LLMEngineProtocol(Protocol):
         temperature: float = 0.0,
         stop: list[str] | None = None,
         seed: int | None = None,
+        thinking_token_budget: int | None = None,
         **kwargs: Any,
     ) -> list[str] | str:
         """Generate text completions for a single prompt or batch of prompts."""
@@ -56,6 +59,7 @@ class VLLMEngine:
         trust_remote_code: bool = True,
         dtype: str = "auto",
         quantization: str | None = DEFAULT_QUANTIZATION,
+        reasoning_config: Any | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize vLLM engine instance."""
@@ -67,16 +71,33 @@ class VLLMEngine:
         self.tensor_parallel_size = tensor_parallel_size
         self.quantization = quantization
 
-        self.llm = LLM(
-            model=model,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            tensor_parallel_size=tensor_parallel_size,
-            trust_remote_code=trust_remote_code,
-            dtype=dtype,
-            quantization=quantization,
+        if reasoning_config is None:
+            try:
+                from vllm.config import ReasoningConfig
+
+                reasoning_config = ReasoningConfig(
+                    reasoning_start_str=DEFAULT_REASONING_START_STR,
+                    reasoning_end_str=DEFAULT_REASONING_END_STR,
+                )
+            except (ImportError, AttributeError, Exception):  # noqa: BLE001
+                reasoning_config = None
+
+        self.reasoning_config = reasoning_config
+
+        llm_kwargs: dict[str, Any] = {
+            "model": model,
+            "gpu_memory_utilization": gpu_memory_utilization,
+            "max_model_len": max_model_len,
+            "tensor_parallel_size": tensor_parallel_size,
+            "trust_remote_code": trust_remote_code,
+            "dtype": dtype,
+            "quantization": quantization,
             **kwargs,
-        )
+        }
+        if reasoning_config is not None:
+            llm_kwargs["reasoning_config"] = reasoning_config
+
+        self.llm = LLM(**llm_kwargs)
 
     def generate(
         self,
@@ -85,6 +106,7 @@ class VLLMEngine:
         temperature: float = 0.0,
         stop: list[str] | None = None,
         seed: int | None = None,
+        thinking_token_budget: int | None = None,
         **kwargs: Any,
     ) -> list[str] | str:
         """Generate completions using vLLM continuous batching."""
@@ -109,6 +131,8 @@ class VLLMEngine:
         }
         if seed is not None:
             sampling_kwargs["seed"] = seed
+        if thinking_token_budget is not None:
+            sampling_kwargs["thinking_token_budget"] = thinking_token_budget
 
         sampling_params = SamplingParams(**sampling_kwargs)
 
@@ -132,6 +156,7 @@ class MockLLMEngine:
         temperature: float = 0.0,
         stop: list[str] | None = None,
         seed: int | None = None,
+        thinking_token_budget: int | None = None,
         **kwargs: Any,
     ) -> list[str] | str:
         """Generate mock Vietnamese metadata summaries from prompt hints."""
@@ -184,7 +209,11 @@ class MockLLMEngine:
 
                 # If structured outputs is requested or prompt expects JSON {"sql": ..., "type": ...}
                 if kwargs.get("structured_outputs") is not None or '{"sql":' in prompt or "Text-to-SQL" in prompt:
-                    out_dict = {"sql": sql, "type": "number"}
+                    out_dict = {
+                        "reasoning": "<think>Lập kế hoạch truy vấn SQL</think>",
+                        "sql": sql,
+                        "type": "number",
+                    }
                     results.append(json.dumps(out_dict, ensure_ascii=False))
                 else:
                     results.append(sql)

@@ -160,11 +160,15 @@ def test_few_shot_sql_examples_structure() -> None:
     assert '<example id="1">' in FEW_SHOT_SQL_EXAMPLES_VI
     assert '<example id="2">' in FEW_SHOT_SQL_EXAMPLES_VI
     assert '<example id="3">' not in FEW_SHOT_SQL_EXAMPLES_VI
-    assert "Lập trình Python" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "reasoning" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "<think>" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "</think>" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "don_hang" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "IS NOT NULL" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "BETWEEN" in FEW_SHOT_SQL_EXAMPLES_VI
-    assert "substr" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "SUBSTR" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "REPLACE" in FEW_SHOT_SQL_EXAMPLES_VI
+    assert "INTEGER" in FEW_SHOT_SQL_EXAMPLES_VI
 
 
 def test_format_permuted_schema_xml_with_hint() -> None:

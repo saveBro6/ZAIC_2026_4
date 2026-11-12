@@ -87,9 +87,13 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_EXECUTION_MAX_RETRIES",
         "DEFAULT_LOGS_DIR",
         "DEFAULT_NUM_CANDIDATES",
+        "DEFAULT_REASONING_END_STR",
+        "DEFAULT_REASONING_START_STR",
         "DEFAULT_SQL_MAX_RETRIES",
+        "DEFAULT_SQL_MAX_TOKENS",
         "DEFAULT_SQL_TIMEOUT_SECONDS",
         "DEFAULT_SUBMISSION_PATH",
+        "DEFAULT_THINKING_TOKEN_BUDGET",
     }
     assert set(constants.__all__) == expected_constants
     assert len(constants.__all__) == len(expected_constants)
@@ -120,6 +124,12 @@ def test_constant_types_and_values() -> None:
     assert constants.MAXIMAL_ENUM_MAX_DISTINCT == 10
     assert "NUMERIC" in constants.RANGE_ELIGIBLE_FORMATS
     assert "ISO_DATE" in constants.DATE_FORMATS
+
+    # Submission & SQL Generation
+    assert constants.DEFAULT_SQL_MAX_TOKENS == 2048
+    assert constants.DEFAULT_THINKING_TOKEN_BUDGET == 1536
+    assert constants.DEFAULT_REASONING_START_STR == '{"reasoning": "<think>'
+    assert constants.DEFAULT_REASONING_END_STR == '</think>", "sql": "'
 
     # Regex patterns
     assert isinstance(constants.ISO_DATE_REGEX, re.Pattern)

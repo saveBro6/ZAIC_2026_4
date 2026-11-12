@@ -5,37 +5,43 @@ from __future__ import annotations
 import random
 from typing import Any
 
+from zaic_2026_4.common.xml_sanitizer import (
+    DATA_INSTRUCTION_SEPARATION_DIRECTIVE,
+    format_schema_table_elements,
+    sanitize_text,
+)
+
 # Few-shot SQL examples in Vietnamese for SQLite generation
 FEW_SHOT_SQL_EXAMPLES_VI: str = (
     "<few_shot_examples>\n"
     '  <example id="1">\n'
-    '    <user_question>Tổng học phí thực thu của khóa học "Lập trình Python" trong tháng này là bao nhiêu?</user_question>\n'
+    '    <user_question>Tổng doanh thu bán hàng thực tế trong tháng này (tính đến hôm nay) là bao nhiêu?</user_question>\n'
     '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
     "    <selected_schema>\n"
-    '      <table name="dang_ky_khoa_hoc">\n'
-    '        <column name="Ngày ghi danh" type="SLASH_DATE">Cột lưu trữ ngày ghi danh học viên định dạng DD/MM/YYYY. | Samples: [\'02/05/2026\', \'15/05/2026\'] | Hint: Vietnamese date (D/M/YYYY).</column>\n'
-    '        <column name="Học phí thực thu" type="CURRENCY">Tổng số tiền học phí thực tế sau miễn giảm. | Samples: [\'1,200,000\', \'3,500,000\'] | Hint: Formatted VND currency. CAST(REPLACE(col, \',\', \'\') AS REAL)</column>\n'
-    '        <column name="Tên khóa học" type="STRING">Tên học phần hoặc chuyên đề đào tạo. | Samples: [\'Lập trình Python chuyên sâu\']</column>\n'
-    '        <column name="Trạng thái học vụ" type="STRING">Trạng thái hồ sơ học vụ. | Samples: [\'Đã ghi danh\', \'Bảo lưu\']</column>\n'
+    '      <table name="don_hang">\n'
+    '        <column name="Mã đơn" type="STRING">Mã định danh duy nhất của hóa đơn. | Samples: [\'DH001\', \'DH002\']</column>\n'
+    '        <column name="Ngày đặt" type="SLASH_DATE">Ngày ghi nhận đơn hàng định dạng DD/MM/YYYY. | Samples: [\'02/05/2026\', \'15/05/2026\'] | Hint: Vietnamese date (DD/MM/YYYY).</column>\n'
+    '        <column name="Tổng tiền" type="CURRENCY">Tổng giá trị thanh toán thực tế của đơn hàng. | Samples: [\'1.200.000\', \'3.500.000 đ\'] | Hint: Formatted VND currency string.</column>\n'
+    '        <column name="Trạng thái" type="STRING">Trạng thái xử lý đơn hàng. | Samples: [\'Hoàn thành\', \'Đã hủy\', \'Trả hàng\']</column>\n'
     "      </table>\n"
     "    </selected_schema>\n"
     "    <output>\n"
-    '{"sql": "SELECT SUM(CAST(REPLACE(T1.\\"Học phí thực thu\\", \',\', \'\') AS REAL)) AS \\"Tổng học phí\\" FROM \\"dang_ky_khoa_hoc\\" AS T1 WHERE LOWER(T1.\\"Tên khóa học\\") LIKE LOWER(\'%Lập trình Python%\') AND T1.\\"Trạng thái học vụ\\" != \'Bảo lưu\' AND (substr(T1.\\"Ngày ghi danh\\", 7, 4) || \'-\' || substr(T1.\\"Ngày ghi danh\\", 4, 2) || \'-\' || substr(T1.\\"Ngày ghi danh\\", 1, 2)) BETWEEN \'2026-05-01\' AND \'2026-05-25\';", "type": "number"}\n'
+    '{"reasoning": "<think>1. Thời gian: \'tháng này\' tính từ ngày đầu tháng đến as_of_date: \'2026-05-01\' đến \'2026-05-25\'. Cột \'Ngày đặt\' lưu dạng DD/MM/YYYY nên chuyển về ISO bằng (SUBSTR(T1.\\"Ngày đặt\\", 7, 4) || \'-\' || SUBSTR(T1.\\"Ngày đặt\\", 4, 2) || \'-\' || SUBSTR(T1.\\"Ngày đặt\\", 1, 2)). 2. Tiền tệ: Cột \'Tổng tiền\' dạng chuỗi chứa dấu chấm và ký hiệu đ, cần làm sạch và ép kiểu INTEGER: CAST(REPLACE(REPLACE(REPLACE(T1.\\"Tổng tiền\\", \'đ\', \'\'), \'.\', \'\'), \',\', \'\') AS INTEGER). 3. Bộ lọc: Loại trừ đơn hủy và trả hàng: T1.\\"Trạng thái\\" NOT IN (\'Đã hủy\', \'Trả hàng\').</think>", "sql": "SELECT SUM(CAST(REPLACE(REPLACE(REPLACE(T1.\\"Tổng tiền\\", \'đ\', \'\'), \'.\', \'\'), \',\', \'\') AS INTEGER)) AS \\"Tổng doanh thu\\" FROM \\"don_hang\\" AS T1 WHERE (T1.\\"Trạng thái\\" NOT IN (\'Đã hủy\', \'Trả hàng\') OR T1.\\"Trạng thái\\" IS NULL) AND (SUBSTR(T1.\\"Ngày đặt\\", 7, 4) || \'-\' || SUBSTR(T1.\\"Ngày đặt\\", 4, 2) || \'-\' || SUBSTR(T1.\\"Ngày đặt\\", 1, 2)) BETWEEN \'2026-05-01\' AND \'2026-05-25\';", "type": "number"}\n'
     "    </output>\n"
     "  </example>\n\n"
     '  <example id="2">\n'
-    '    <user_question>Thiết bị nào có kinh phí duy trì thấp nhất còn số lượng khả dụng?</user_question>\n'
+    '    <user_question>Mặt hàng nào có số lượng bán ra nhiều nhất trong kỳ?</user_question>\n'
     '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
     "    <selected_schema>\n"
-    '      <table name="thiet_bi_phong_lab">\n'
-    '        <column name="Mã thiết bị" type="STRING">Mã định danh duy nhất của thiết bị nghiên cứu. | Samples: [\'TB-001\', \'TB-015\']</column>\n'
-    '        <column name="Tên thiết bị" type="STRING">Tên trang thiết bị phòng thí nghiệm. | Samples: [\'Kính hiển vi quang học\']</column>\n'
-    '        <column name="Kinh phí duy trì" type="CURRENCY">Định mức chi phí bảo dưỡng định kỳ. | Samples: [\'350,000\', \'1,200,000\'] | Hint: Formatted VND currency. CAST(REPLACE(col, \',\', \'\') AS REAL)</column>\n'
-    '        <column name="Số lượng khả dụng" type="NUMERIC">Số lượng thiết bị sẵn sàng vận hành. | Samples: [2, 10]</column>\n'
+    '      <table name="chi_tiet_ban_hang">\n'
+    '        <column name="Mã hàng" type="STRING">Mã sản phẩm duy nhất. | Samples: [\'MH01\', \'MH02\']</column>\n'
+    '        <column name="Tên hàng" type="STRING">Tên mặt hàng bán lẻ. | Samples: [\'Gạo thơm ST25\', \'Nước mắm Phú Quốc\']</column>\n'
+    '        <column name="Số lượng" type="NUMERIC">Số lượng sản phẩm bán ra. | Samples: [5, 12]</column>\n'
+    '        <column name="Trạng thái đơn" type="STRING">Trạng thái xử lý. | Samples: [\'Đã giao\', \'Hủy\']</column>\n'
     "      </table>\n"
     "    </selected_schema>\n"
     "    <output>\n"
-    '{"sql": "SELECT T1.\\"Tên thiết bị\\" FROM \\"thiet_bi_phong_lab\\" AS T1 WHERE T1.\\"Kinh phí duy trì\\" IS NOT NULL AND T1.\\"Số lượng khả dụng\\" > 0 ORDER BY CAST(REPLACE(T1.\\"Kinh phí duy trì\\", \',\', \'\') AS REAL) ASC, T1.\\"Mã thiết bị\\" ASC LIMIT 1;", "type": "string"}\n'
+    '{"reasoning": "<think>1. Nghiệp vụ: Tìm mặt hàng bán chạy nhất theo tổng số lượng bán ra, loại trừ đơn hủy. 2. Nhóm và tính toán: GROUP BY T1.\\"Mã hàng\\", T1.\\"Tên hàng\\" và SUM(T1.\\"Số lượng\\"). 3. Sắp xếp & Tie-breaking: Xếp giảm dần theo tổng số lượng và bắt buộc thêm mã định danh T1.\\"Mã hàng\\" ASC để phá vỡ đồng hạng. LIMIT 1 trả về tên hàng.</think>", "sql": "SELECT T1.\\"Tên hàng\\" FROM \\"chi_tiet_ban_hang\\" AS T1 WHERE (T1.\\"Trạng thái đơn\\" != \'Hủy\' OR T1.\\"Trạng thái đơn\\" IS NULL) AND T1.\\"Số lượng\\" IS NOT NULL GROUP BY T1.\\"Mã hàng\\", T1.\\"Tên hàng\\" ORDER BY SUM(T1.\\"Số lượng\\") DESC, T1.\\"Mã hàng\\" ASC LIMIT 1;", "type": "string"}\n'
     "    </output>\n"
     "  </example>\n"
     "</few_shot_examples>"
@@ -105,14 +111,7 @@ def format_permuted_schema_xml(
 
     lines = ["<selected_schema>"]
     for tbl_name, cols in table_groups.items():
-        if tbl_name:
-            lines.append(f'  <table name="{tbl_name}">')
-            for c in cols:
-                lines.append(f'    <column name="{c["col_name"]}" type="{c["data_format"]}">{c["desc"]}</column>')
-            lines.append("  </table>")
-        else:
-            for c in cols:
-                lines.append(f'  <column name="{c["col_name"]}" type="{c["data_format"]}">{c["desc"]}</column>')
+        lines.extend(format_schema_table_elements(tbl_name, cols))
     lines.append("</selected_schema>")
 
     return "\n".join(lines)
@@ -126,7 +125,7 @@ def format_rulebook_context(
     top_k: int = 3,
 ) -> str:
     """Dynamically format split rulebook context under full, retrieval, or hybrid mode."""
-    clean_rulebook = rulebook_text.strip() if rulebook_text else ""
+    clean_rulebook = sanitize_text(rulebook_text.strip()) if rulebook_text else ""
     rule_mode = mode.lower()
 
     if rule_mode == "full" or vector_indexer is None:
@@ -141,7 +140,7 @@ def format_rulebook_context(
         for r in results:
             txt = r.get("text", "").strip()
             if txt:
-                retrieved_chunks.append(txt)
+                retrieved_chunks.append(sanitize_text(txt))
     except Exception:  # noqa: BLE001
         retrieved_chunks = []
 
@@ -179,9 +178,9 @@ def format_grounded_entities_xml(
         "Các thực thể sau trong câu hỏi đã được đối soát chính xác với giá trị thực tế trong cơ sở dữ liệu:",
     ]
     for item in grounded_entities:
-        mention = item.get("mention", "").strip()
+        mention = sanitize_text(item.get("mention", "").strip())
         col = item.get("column", "").strip()
-        can_val = item.get("canonical_value", "").strip()
+        can_val = sanitize_text(item.get("canonical_value", "").strip())
         if mention and can_val:
             if "." in col:
                 tbl, cname = col.split(".", 1)
@@ -219,15 +218,25 @@ def build_sql_generation_prompt(
         question=question,
         mode=rulebook_mode,
     )
+    safe_as_of_date = sanitize_text(as_of_date)
+    safe_question = sanitize_text(question)
 
     prompt_parts = [
         "<system>",
         "Bạn là chuyên gia kỹ sư Text-to-SQL chuyên sâu về SQLite cho hệ thống dữ liệu doanh nghiệp (SMB) tại Việt Nam.",
-        'Nhiệm vụ: Phân tích ngữ cảnh và xuất DUY NHẤT một đối tượng JSON hợp lệ theo đúng cấu trúc: {"sql": "<câu lệnh SQLite SQL>", "type": "<type>"}.',
+        f"{DATA_INSTRUCTION_SEPARATION_DIRECTIVE}",
+        "",
+        'Nhiệm vụ: Phân tích ngữ cảnh và xuất DUY NHẤT một đối tượng JSON hợp lệ theo đúng cấu trúc: {"reasoning": "<think>...</think>", "sql": "<câu lệnh SQLite SQL>", "type": "<type>"}.',
         "",
         "[QUY TẮC ĐỊNH DẠNG ĐẦU RA JSON & KIỂU DỮ LIỆU DATAMATE]",
-        '1. Trường "sql": Câu lệnh SQLite SQL thô có thể thực thi được. Tuyệt đối không thêm lời giải thích, chào hỏi hoặc văn bản mở đầu/kết thúc bên ngoài JSON.',
-        '2. Trường "type": BẮT BUỘC là 1 trong các kiểu dữ liệu hợp lệ sau theo quy chuẩn cuộc thi DataMate:',
+        '1. Trường "reasoning": BẮT BUỘC mở đầu bằng <think> và kết thúc bằng </think>. Thực hiện lập kế hoạch Chain-of-Thought ngắn gọn và có cấu trúc trước khi viết câu truy vấn SQL:',
+        '   - Kiểm tra Schema Metadata & Mẫu dữ liệu (Samples): Quan sát data_format, llm_hint và Samples thực tế của các cột liên quan.',
+        '   - Chuẩn hóa Ngày tháng về ISO DATE: Nếu cột ngày lưu dạng chuỗi chưa chuẩn ISO (ví dụ DD/MM/YYYY, văn bản hoặc timestamp), dựa vào mẫu thực tế để áp dụng biểu thức biến đổi phù hợp (như SUBSTR, date, strftime) đưa về chuỗi ISO YYYY-MM-DD (hoặc YYYY-MM theo tháng) trước khi lọc hoặc so sánh với as_of_date.',
+        '   - Làm sạch & Ép kiểu Tiền tệ về INTEGER: Nếu cột tiền tệ là chuỗi có chứa ký tự phân cách nghìn (., ,), ký hiệu đơn vị (đ, VND), làm sạch và ép kiểu về INTEGER để đảm bảo kết quả đúng từng đồng theo quy định DataMate. Với trung bình tiền bọc ROUND(AVG(...), 0). Chỉ dùng REAL cho số lượng có phần lẻ hoặc tỷ lệ chia.',
+        '   - Bảng, JOIN & Bộ lọc: Xác định bảng chính/phụ, dùng LEFT JOIN cho bảng danh mục, lọc loại trừ đơn hủy/trả theo rulebook, IS NOT NULL cho ORDER BY ... ASC.',
+        '   - Sắp xếp & Tie-breaking: Luôn phá vỡ đồng hạng bằng khóa chính / mã định danh: ORDER BY ..., mã ASC.',
+        '2. Trường "sql": Câu lệnh SQLite SQL thô có thể thực thi được. Tuyệt đối không thêm lời giải thích, chào hỏi hoặc văn bản mở đầu/kết thúc bên ngoài JSON.',
+        '3. Trường "type": BẮT BUỘC là 1 trong các kiểu dữ liệu hợp lệ sau theo quy chuẩn cuộc thi DataMate:',
         '   - "number": Câu hỏi về giá trị số (tổng tiền VNĐ, số lượng, đếm, chi phí). Mệnh đề SELECT trả về 1 dòng, 1 cột số.',
         '   - "percent": Câu hỏi về tỷ lệ phần trăm (tính theo %, thang đo 0-100, ví dụ 12.45 tương ứng 12.45%). Mệnh đề SELECT trả về 1 dòng, 1 cột tỷ lệ.',
         '   - "string": Câu hỏi về tên hoặc mã của một đối tượng/thực thể cụ thể (sản phẩm, khách hàng, chi nhánh, thứ trong tuần). Mệnh đề SELECT trả về 1 dòng, 1 cột chuỗi.',
@@ -272,7 +281,7 @@ def build_sql_generation_prompt(
         prompt_parts.append("")
 
     prompt_parts.extend([
-        f"<temporal_anchor>\nas_of_date: {as_of_date}\n</temporal_anchor>",
+        f"<temporal_anchor>\nas_of_date: {safe_as_of_date}\n</temporal_anchor>",
         "",
         schema_xml,
     ])
@@ -285,7 +294,7 @@ def build_sql_generation_prompt(
 
     prompt_parts.extend([
         "",
-        f"<user_question>\n{question}\n</user_question>",
+        f"<user_question>\n{safe_question}\n</user_question>",
         "",
         "<output>",
     ])

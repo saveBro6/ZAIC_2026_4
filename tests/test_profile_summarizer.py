@@ -367,6 +367,7 @@ def test_engine_factory_quantization(monkeypatch: pytest.MonkeyPatch) -> None:
         trust_remote_code=True,
         dtype="auto",
         quantization=None,
+        reasoning_config=engine_default.reasoning_config,
     )
 
     # 2. Explicit quantization e.g. fp8

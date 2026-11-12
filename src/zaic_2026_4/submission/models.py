@@ -35,6 +35,7 @@ VALID_DATAMATE_TYPES: tuple[str, ...] = (
 class SQLGenerationOutput(BaseModel):
     """Structured JSON output schema for LLM SQL generation and correction."""
 
+    reasoning: str = ""
     sql: str
     type: DataMateAnswerType
 
