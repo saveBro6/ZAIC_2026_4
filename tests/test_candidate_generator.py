@@ -42,7 +42,7 @@ class MockRetryLLMEngine:
         prompt_text = prompts if is_single else prompts[0]
 
         # If it's a correction prompt, return fixed SQL
-        if "validation_errors" in prompt_text:
+        if "repair_diagnostics" in prompt_text:
             res = 'SELECT name FROM users WHERE price IS NOT NULL ORDER BY price ASC;'
         else:
             # First attempt: faulty SQL with ASC but no NOT NULL
@@ -236,7 +236,7 @@ def test_build_sql_correction_prompt_vietnamese() -> None:
         previous_type="number",
     )
 
-    assert "Bạn là một chuyên gia kỹ thuật SQL" in prompt
+    assert "chuyên gia kỹ sư Text-to-SQL" in prompt
     assert "đối tượng JSON hợp lệ" in prompt
     assert "<user_question>\nTổng số lượng hàng?\n</user_question>" in prompt
     assert "<temporal_anchor>\nas_of_date: 2026-05-25\n</temporal_anchor>" in prompt
@@ -244,7 +244,8 @@ def test_build_sql_correction_prompt_vietnamese() -> None:
     assert '"sql":' in prompt
     assert "SELECT name FROM users ORDER BY price ASC;" in prompt
     assert '"type":' in prompt
-    assert "<validation_errors>\n- Null values not handled in ASC ordering.\n</validation_errors>" in prompt
+    assert "<repair_diagnostics>\n- Null values not handled in ASC ordering.\n</repair_diagnostics>" in prompt
+    assert "<repair_contract>" in prompt
     assert "<output>" in prompt
 
 

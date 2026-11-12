@@ -18,6 +18,7 @@ from zaic_2026_4.submission.pipeline import (
 )
 from zaic_2026_4.submission.prompt_template import (
     FEW_SHOT_SQL_EXAMPLES_VI,
+    RepairContext,
     build_sql_correction_prompt,
     build_sql_generation_prompt,
     format_grounded_entities_xml,
@@ -49,6 +50,7 @@ __all__ = [
     "DataMateAnswerType",
     "QuestionItem",
     "QuestionSubmission",
+    "RepairContext",
     "ResultFormatter",
     "SQLGenerationOutput",
     "SQLValidator",

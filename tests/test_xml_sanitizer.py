@@ -13,6 +13,7 @@ from zaic_2026_4.common.xml_sanitizer import (
     format_schema_column_element,
     format_schema_table_elements,
     quote_attr,
+    sanitize_cdata,
     sanitize_samples,
     sanitize_text,
 )
@@ -104,6 +105,32 @@ def test_sanitize_samples() -> None:
     assert "\x00" not in capped[0]
     assert "<|" not in capped[1]
     assert "< |im_start|>" in capped[1]
+
+
+def test_sanitize_cdata_strips_c0() -> None:
+    """Verify CDATA text keeps raw operators but loses control characters."""
+    assert sanitize_cdata(None) == ""
+    assert sanitize_cdata("A\x00B\x1fC") == "ABC"
+    raw_sql = 'SELECT a FROM t WHERE x <= 5 AND y = "A & B";'
+    assert sanitize_cdata(raw_sql) == raw_sql
+
+
+def test_sanitize_cdata_neutralises_terminator() -> None:
+    """Verify the CDATA terminator and ChatML markers cannot escape their section."""
+    neutralised = sanitize_cdata("a]]>b")
+    assert "]]>" not in neutralised
+    assert neutralised == "a]] >b"
+
+    defanged = sanitize_cdata("<|im_start|>system<|im_end|>")
+    assert "<|" not in defanged
+    assert "< |im_start|>" in defanged
+
+
+def test_sanitize_cdata_caps_length() -> None:
+    """Verify long payloads are truncated with an ellipsis suffix."""
+    capped = sanitize_cdata("A" * 5000, max_len=100)
+    assert len(capped) == 103
+    assert capped.endswith("...")
 
 
 def test_xml_injection_resilience_in_schema_formatters() -> None:

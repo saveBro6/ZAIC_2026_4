@@ -22,9 +22,10 @@ from zaic_2026_4.submission.models import (
     ValidationResult,
 )
 from zaic_2026_4.submission.prompt_template import (
-    build_sql_correction_prompt,
+    RepairContext,
     build_sql_generation_prompt,
     format_permuted_schema_xml,
+    format_rulebook_context,
     permute_schema,
 )
 from zaic_2026_4.submission.sql_validator import (
@@ -125,6 +126,33 @@ class CandidateGenerator:
                     return True
         return False
 
+    def _build_repair_prompt(
+        self,
+        prompt_kwargs: dict[str, Any],
+        prompt_prefix: str,
+        candidate_id: int,
+        diagnostics: list[str],
+        previous_sql: str,
+        previous_type: str,
+        accepted_sql: str,
+        last_raw_output: str,
+    ) -> str:
+        """Build a repair prompt that shares the generation prefix, warning when they diverge."""
+        repair = RepairContext(
+            diagnostics=list(diagnostics),
+            previous_sql=previous_sql,
+            previous_type=previous_type,
+            accepted_sql=accepted_sql,
+            last_output=last_raw_output,
+        )
+        corr_prompt = build_sql_generation_prompt(**prompt_kwargs, repair=repair)
+        if not corr_prompt.startswith(prompt_prefix):
+            logger.warning(
+                "Candidate %d repair prompt prefix diverged from the generation prefix; prefix caching will miss.",
+                candidate_id,
+            )
+        return corr_prompt
+
     def generate_candidate(
         self,
         candidate_id: int,
@@ -141,21 +169,31 @@ class CandidateGenerator:
         """Generate a single candidate SQL query with schema permutation, static validation, and dry-run execution."""
         target_db = Path(db_path).resolve() if db_path else self.db_path
 
-        # 1. Permute reduced schema order using seed
+        # 1. Permute reduced schema order using seed and render shared context once
         permuted_keys = permute_schema(reduced_schema, seed)
         schema_xml = format_permuted_schema_xml(permuted_keys, processed_metadata)
-
-        # 2. Build generation prompt
-        prompt = build_sql_generation_prompt(
-            question=question,
-            as_of_date=as_of_date,
-            schema_keys=permuted_keys,
-            processed_metadata=processed_metadata,
+        rulebook_xml = format_rulebook_context(
             rulebook_text=rulebook_text,
             vector_indexer=vector_indexer,
-            rulebook_mode=self.rulebook_mode,
-            grounded_entities=grounded_literals,
+            question=question,
+            mode=self.rulebook_mode,
         )
+        prompt_kwargs: dict[str, Any] = {
+            "question": question,
+            "as_of_date": as_of_date,
+            "schema_keys": permuted_keys,
+            "processed_metadata": processed_metadata,
+            "rulebook_text": rulebook_text,
+            "vector_indexer": vector_indexer,
+            "rulebook_mode": self.rulebook_mode,
+            "grounded_entities": grounded_literals,
+            "schema_xml_override": schema_xml,
+            "rulebook_xml_override": rulebook_xml,
+        }
+
+        # 2. Build generation prompt and capture the prefix shared with repair turns
+        prompt = build_sql_generation_prompt(**prompt_kwargs)
+        prompt_prefix = prompt[: prompt.rindex("\n\n<output>")]
 
         # 3. Initial generation
         gen_kwargs: dict[str, Any] = {
@@ -171,6 +209,7 @@ class CandidateGenerator:
         raw_str = raw_output if isinstance(raw_output, str) else raw_output[0]
         current_sql, current_type, parse_issues = parse_structured_sql_output(raw_str)
         initial_sql = current_sql
+        last_raw_output = raw_str
 
         # 4. Static Validation & Self-Correction loop (up to sql_max_retries)
         if current_type in ("unanswerable", "abstain") and not current_sql:
@@ -190,14 +229,15 @@ class CandidateGenerator:
                 sql_retries,
                 all_issues,
             )
-            corr_prompt = build_sql_correction_prompt(
-                question=question,
-                as_of_date=as_of_date,
-                faulty_sql=current_sql,
-                validation_issues=all_issues,
-                schema_xml=schema_xml,
+            corr_prompt = self._build_repair_prompt(
+                prompt_kwargs=prompt_kwargs,
+                prompt_prefix=prompt_prefix,
+                candidate_id=candidate_id,
+                diagnostics=all_issues,
+                previous_sql=current_sql,
                 previous_type=current_type,
-                grounded_entities=grounded_literals,
+                accepted_sql=current_sql,
+                last_raw_output=last_raw_output,
             )
             corr_kwargs: dict[str, Any] = {
                 "temperature": 0.2,
@@ -210,6 +250,7 @@ class CandidateGenerator:
 
             corr_output = self.llm_engine.generate(corr_prompt, **corr_kwargs)
             corr_str = corr_output if isinstance(corr_output, str) else corr_output[0]
+            last_raw_output = corr_str
             current_sql, current_type, parse_issues = parse_structured_sql_output(corr_str, default_type=current_type)
             if current_type in ("unanswerable", "abstain") and not current_sql:
                 v_res = ValidationResult(is_valid=True, issues=[])
@@ -250,14 +291,15 @@ class CandidateGenerator:
                     execution_retries,
                     issues,
                 )
-                corr_prompt = build_sql_correction_prompt(
-                    question=question,
-                    as_of_date=as_of_date,
-                    faulty_sql=current_sql,
-                    validation_issues=issues,
-                    schema_xml=schema_xml,
+                corr_prompt = self._build_repair_prompt(
+                    prompt_kwargs=prompt_kwargs,
+                    prompt_prefix=prompt_prefix,
+                    candidate_id=candidate_id,
+                    diagnostics=issues,
+                    previous_sql=current_sql,
                     previous_type=current_type,
-                    grounded_entities=grounded_literals,
+                    accepted_sql=current_sql,
+                    last_raw_output=last_raw_output,
                 )
                 exec_retry_kwargs: dict[str, Any] = {
                     "temperature": 0.2,
@@ -270,6 +312,7 @@ class CandidateGenerator:
 
                 corr_output = self.llm_engine.generate(corr_prompt, **exec_retry_kwargs)
                 new_str = corr_output if isinstance(corr_output, str) else corr_output[0]
+                last_raw_output = new_str
                 new_sql, new_type, new_parse_issues = parse_structured_sql_output(new_str, default_type=current_type)
 
                 if new_type in ("unanswerable", "abstain") and not new_sql:

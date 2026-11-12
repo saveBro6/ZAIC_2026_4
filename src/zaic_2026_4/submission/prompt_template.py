@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import random
+from dataclasses import dataclass
 from typing import Any
 
 from zaic_2026_4.common.xml_sanitizer import (
     DATA_INSTRUCTION_SEPARATION_DIRECTIVE,
     format_schema_table_elements,
+    sanitize_cdata,
     sanitize_text,
 )
 
@@ -199,25 +202,37 @@ def format_grounded_entities_xml(
     return "\n".join(lines)
 
 
-def build_sql_generation_prompt(
+REPAIR_CONTRACT_TEXT: str = (
+    "Chỉ sửa tối thiểu để giải quyết đúng các mục trong <repair_diagnostics>.\n"
+    "Giữ nguyên logic thời gian, bộ lọc, JOIN và thứ tự sắp xếp đang đúng trong <accepted_sql>.\n"
+    "Chỉ dùng bảng/cột có trong <selected_schema>; không thêm cột không tồn tại.\n"
+    'Trả lại đúng định dạng JSON {"reasoning": "…", "sql": "…", "type": "…"} như lượt sinh SQL.\n'
+    "Nếu <accepted_sql> đã đúng, trả lại nguyên văn câu lệnh đó.\n"
+    'Nếu dữ liệu phát hành không đủ để trả lời, trả {"sql": "", "type": "unanswerable"}.'
+)
+
+
+@dataclass(frozen=True)
+class RepairContext:
+    """Repair-specific inputs appended after the shared generation prefix."""
+
+    diagnostics: list[str]
+    previous_sql: str = ""
+    previous_type: str = "number"
+    accepted_sql: str = ""
+    last_output: str = ""
+    max_chars: int = 4000
+
+
+def _build_prompt_prefix(
     question: str,
     as_of_date: str,
-    schema_keys: list[str],
-    processed_metadata: dict[str, Any],
-    rulebook_text: str = "",
-    vector_indexer: Any | None = None,
-    rulebook_mode: str = "hybrid",
-    include_few_shot: bool = True,
-    grounded_entities: list[dict[str, Any]] | None = None,
+    schema_xml: str,
+    rulebook_xml: str,
+    grounded_entities: list[dict[str, Any]] | None,
+    include_few_shot: bool,
 ) -> str:
-    """Build complete prompt for LLM SQLite generation with permuted schema, Vietnamese guidelines, and few-shot examples."""
-    schema_xml = format_permuted_schema_xml(schema_keys, processed_metadata)
-    rulebook_xml = format_rulebook_context(
-        rulebook_text=rulebook_text,
-        vector_indexer=vector_indexer,
-        question=question,
-        mode=rulebook_mode,
-    )
+    """Render the shared prompt prefix reused by the generation and repair turns."""
     safe_as_of_date = sanitize_text(as_of_date)
     safe_question = sanitize_text(question)
 
@@ -295,11 +310,99 @@ def build_sql_generation_prompt(
     prompt_parts.extend([
         "",
         f"<user_question>\n{safe_question}\n</user_question>",
-        "",
-        "<output>",
     ])
 
     return "\n".join(prompt_parts)
+
+
+def _format_repair_task(repair: RepairContext) -> str:
+    """Render the <repair_task> section carrying diagnostics and the repair contract."""
+    previous_output_json = json.dumps(
+        {"sql": repair.previous_sql, "type": repair.previous_type},
+        ensure_ascii=False,
+    )
+    diagnostics = "\n".join(f"- {issue}" for issue in repair.diagnostics)
+    if not diagnostics:
+        diagnostics = "- (no diagnostics were reported)"
+
+    sections = [
+        "<repair_task>",
+        (
+            "<accepted_sql><![CDATA["
+            f"{sanitize_cdata(repair.accepted_sql, repair.max_chars)}"
+            "]]></accepted_sql>"
+        ),
+        (
+            "<previous_output><![CDATA["
+            f"{sanitize_cdata(previous_output_json, repair.max_chars)}"
+            "]]></previous_output>"
+        ),
+    ]
+    if repair.last_output and repair.last_output.strip() != previous_output_json:
+        sections.append(
+            "<last_raw_output><![CDATA["
+            f"{sanitize_cdata(repair.last_output, repair.max_chars)}"
+            "]]></last_raw_output>"
+        )
+    sections.extend([
+        "<repair_diagnostics>",
+        diagnostics,
+        "</repair_diagnostics>",
+        "<repair_contract>",
+        REPAIR_CONTRACT_TEXT,
+        "</repair_contract>",
+        "</repair_task>",
+    ])
+    return "\n".join(sections)
+
+
+def build_sql_generation_prompt(
+    question: str,
+    as_of_date: str,
+    schema_keys: list[str],
+    processed_metadata: dict[str, Any],
+    rulebook_text: str = "",
+    vector_indexer: Any | None = None,
+    rulebook_mode: str = "hybrid",
+    include_few_shot: bool = True,
+    grounded_entities: list[dict[str, Any]] | None = None,
+    repair: RepairContext | None = None,
+    schema_xml_override: str | None = None,
+    rulebook_xml_override: str | None = None,
+) -> str:
+    """Build the SQL generation prompt, optionally followed by a repair task section.
+
+    Passing a RepairContext keeps the prompt prefix byte-identical to the generation
+    turn, so the SQL rules, rulebook and schema stay consistent between turns and
+    vLLM prefix caching can reuse the shared prefix.
+    """
+    schema_xml = (
+        schema_xml_override
+        if schema_xml_override is not None
+        else format_permuted_schema_xml(schema_keys, processed_metadata)
+    )
+    if rulebook_xml_override is not None:
+        rulebook_xml = rulebook_xml_override
+    else:
+        rulebook_xml = format_rulebook_context(
+            rulebook_text=rulebook_text,
+            vector_indexer=vector_indexer,
+            question=question,
+            mode=rulebook_mode,
+        )
+
+    prefix = _build_prompt_prefix(
+        question=question,
+        as_of_date=as_of_date,
+        schema_xml=schema_xml,
+        rulebook_xml=rulebook_xml,
+        grounded_entities=grounded_entities,
+        include_few_shot=include_few_shot,
+    )
+
+    if repair is None:
+        return f"{prefix}\n\n<output>"
+    return f"{prefix}\n\n{_format_repair_task(repair)}\n\n<output>"
 
 
 def build_sql_correction_prompt(
@@ -310,46 +413,46 @@ def build_sql_correction_prompt(
     schema_xml: str | None = None,
     previous_type: str = "number",
     grounded_entities: list[dict[str, Any]] | None = None,
+    last_output: str | None = None,
+    accepted_sql: str | None = None,
+    rulebook_text: str = "",
+    vector_indexer: Any | None = None,
+    rulebook_mode: str = "hybrid",
+    include_few_shot: bool = True,
 ) -> str:
-    """Build prompt asking LLM to correct bad SQL constructions, runtime execution errors, or empty results."""
-    issues_str = "\n".join(f"- {issue}" for issue in validation_issues)
+    """Build a repair prompt through the unified generation pipeline (deprecated wrapper).
 
-    prompt_parts = [
-        "<system>",
-        "Bạn là một chuyên gia kỹ thuật SQL. Câu truy vấn SQLite hoặc định dạng JSON trước đó gặp lỗi thực thi hoặc kết quả không phù hợp.",
-        (
-            "Vui lòng sửa lại và xuất DUY NHẤT một đối tượng JSON hợp lệ theo cấu trúc: "
-            '{"sql": "<câu lệnh SQLite SQL đã sửa>", "type": "<type>"} '
-            'với type là 1 trong các giá trị: ("number", "percent", "string", "date", "boolean", "list", "table", "unanswerable", "abstain").'
-        ),
-        "</system>",
-        "",
-        f"<user_question>\n{question}\n</user_question>",
-        "",
-        f"<temporal_anchor>\nas_of_date: {as_of_date}\n</temporal_anchor>",
-    ]
+    Prefer passing a RepairContext to build_sql_generation_prompt directly, which keeps
+    the prompt prefix byte-identical to the generation turn and lets the caller reuse a
+    pre-rendered schema and rulebook.
+    """
+    repair = RepairContext(
+        diagnostics=list(validation_issues),
+        previous_sql=faulty_sql,
+        previous_type=previous_type,
+        accepted_sql=accepted_sql if accepted_sql is not None else faulty_sql,
+        last_output=last_output or "",
+    )
 
-    grounded_xml = format_grounded_entities_xml(grounded_entities)
-    if grounded_xml:
-        prompt_parts.extend(["", grounded_xml])
-
-    if schema_xml:
-        prompt_parts.extend(["", schema_xml])
-
-    prompt_parts.extend([
-        "",
-        f"<previous_output>\n{{\"sql\": {faulty_sql!r}, \"type\": {previous_type!r}}}\n</previous_output>",
-        "",
-        f"<validation_errors>\n{issues_str}\n</validation_errors>",
-        "",
-        "<output>",
-    ])
-
-    return "\n".join(prompt_parts)
+    return build_sql_generation_prompt(
+        question=question,
+        as_of_date=as_of_date,
+        schema_keys=[],
+        processed_metadata={},
+        rulebook_text=rulebook_text,
+        vector_indexer=vector_indexer,
+        rulebook_mode=rulebook_mode,
+        include_few_shot=include_few_shot,
+        grounded_entities=grounded_entities,
+        repair=repair,
+        schema_xml_override=schema_xml or "",
+    )
 
 
 __all__ = [
     "FEW_SHOT_SQL_EXAMPLES_VI",
+    "REPAIR_CONTRACT_TEXT",
+    "RepairContext",
     "build_sql_correction_prompt",
     "build_sql_generation_prompt",
     "format_grounded_entities_xml",

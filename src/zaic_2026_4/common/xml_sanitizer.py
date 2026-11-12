@@ -77,6 +77,24 @@ def sanitize_samples(
     return cleaned
 
 
+def sanitize_cdata(val: Any, max_len: int = 4000) -> str:
+    """Sanitize text for embedding inside a CDATA section.
+
+    Strips C0 control characters, defangs ChatML markers, neutralises the CDATA
+    terminator so the section cannot be closed early, and truncates long payloads.
+    XML entities are deliberately NOT escaped: raw SQL must stay byte-identical,
+    because rewriting '<=' into '&lt;=' makes the model echo escaped operators.
+    """
+    if val is None:
+        return ""
+    s = clean_c0_and_newlines(str(val))
+    s = defang_chatml(s)
+    s = s.replace("]]>", "]] >")
+    if max_len is not None and len(s) > max_len:
+        s = f"{s[:max_len]}..."
+    return s
+
+
 def format_schema_column_element(
     col_name: str,
     data_format: str,
@@ -122,6 +140,7 @@ __all__ = [
     "format_schema_column_element",
     "format_schema_table_elements",
     "quote_attr",
+    "sanitize_cdata",
     "sanitize_samples",
     "sanitize_text",
 ]
