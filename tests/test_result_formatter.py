@@ -135,6 +135,23 @@ def test_derive_table_columns() -> None:
     cols_dup = derive_table_columns(sql_dup, None, 2)
     assert cols_dup == ["col", "col_2"]
 
+    # UNION query projection extraction
+    sql_union = "SELECT product_name, unit_price FROM store_a UNION SELECT product_name, unit_price FROM store_b"
+    cols_union = derive_table_columns(sql_union, None, 2)
+    assert cols_union == ["product_name", "unit_price"]
+
+    # t1.* join query falls back to description
+    sql_t1_star = "SELECT t1.*, t2.total FROM orders AS t1 JOIN totals AS t2 ON t1.id = t2.id"
+    desc_join = ["order_id", "created_date", "total"]
+    cols_join = derive_table_columns(sql_t1_star, desc_join, 3)
+    assert cols_join == ["order_id", "created_date", "total"]
+
+    # Single table star query t1.* falls back to description (not literal '*')
+    sql_single_star = "SELECT t1.* FROM orders AS t1"
+    desc_single = ["order_id"]
+    cols_single = derive_table_columns(sql_single_star, desc_single, 1)
+    assert cols_single == ["order_id"]
+
 
 def test_format_result_scalar_cases() -> None:
     # Number
@@ -246,3 +263,35 @@ def test_format_result_edge_cases_zero_and_none() -> None:
     t_bad_bool, val_bad_bool = ResultFormatter.format_result([("maybe",)], target_type="boolean")
     assert t_bad_bool == "abstain"
     assert val_bad_bool is None
+
+
+def test_format_result_table_single_row_multi_column_with_raw_columns() -> None:
+    # 1. Single row, multiple columns with explicit target_type="table" and raw_columns
+    raw_rows = [("Hà Nội", 1500000)]
+    raw_cols = ["Thành phố", "Doanh thu"]
+    sql = 'SELECT city AS "Thành phố", revenue AS "Doanh thu" FROM sales LIMIT 1;'
+    t, val = ResultFormatter.format_result(
+        raw_rows,
+        target_type="table",
+        raw_columns=raw_cols,
+        sql=sql,
+    )
+    assert t == "table"
+    assert val == {
+        "columns": ["Thành phố", "Doanh thu"],
+        "rows": [["Hà Nội", 1500000]],
+    }
+
+    # 2. Scalar predicted_type="number" recovering to 1-row table because raw_rows has 2 columns
+    t_rec, val_rec = ResultFormatter.format_result(
+        raw_rows,
+        target_type="number",
+        raw_columns=raw_cols,
+        sql=sql,
+    )
+    assert t_rec == "table"
+    assert val_rec == {
+        "columns": ["Thành phố", "Doanh thu"],
+        "rows": [["Hà Nội", 1500000]],
+    }
+

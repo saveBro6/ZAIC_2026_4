@@ -28,6 +28,7 @@ from zaic_2026_4.submission.result_formatter import (
 from zaic_2026_4.submission.voting_executor import (
     VotingExecutor,
     answer_signature,
+    has_evidence,
 )
 
 logger = logging.getLogger(__name__)
@@ -237,6 +238,21 @@ class SubmissionPipeline:
         t0 = time.perf_counter()
 
         try:
+            return self._process_question_impl(item, t0)
+        except Exception as exc:
+            logger.exception("Unexpected error processing question %s", item.id)
+            return QuestionSubmission(
+                id=item.id,
+                type="abstain",
+                answer=None,
+                elapsed_seconds=time.perf_counter() - t0,
+                voting_status="abstain_fallback",
+                selection_reason=f"abstain: Unexpected execution error ({exc})",
+            )
+
+    def _process_question_impl(self, item: QuestionItem, t0: float) -> QuestionSubmission:
+        """Internal implementation of question processing."""
+        try:
             biz_ctx = self.get_or_load_business(item.business_id)
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to load business context for %s: %s", item.business_id, exc)
@@ -357,7 +373,7 @@ class SubmissionPipeline:
             )
 
         # Build diagnostic formatting_trace
-        ev_cands = [c for c in candidates if c.execution_success and c.result_set is not None]
+        ev_cands = [c for c in candidates if c.execution_success and has_evidence(c.result_set)]
         sig_groups: dict[Any, int] = {}
         for c in ev_cands:
             s = answer_signature(c)
@@ -432,11 +448,32 @@ class SubmissionPipeline:
         submissions: list[QuestionSubmission] = []
         with open(self.output_path, "w", encoding="utf-8") as out_f:
             for item in questions:
-                sub = self.process_question(item)
+                try:
+                    sub = self.process_question(item)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Top-level exception on %s: %s", item.id, exc)
+                    sub = QuestionSubmission(
+                        id=item.id,
+                        type="abstain",
+                        answer=None,
+                        voting_status="abstain_fallback",
+                        selection_reason=f"abstain: Unhandled error ({exc})",
+                    )
                 submissions.append(sub)
 
-                # Line-by-line flush to submission.jsonl
-                out_line = json.dumps(sub.to_submission_dict(), ensure_ascii=False)
+                # Line-by-line flush to submission.jsonl with serialization guard
+                try:
+                    out_line = json.dumps(sub.to_submission_dict(), ensure_ascii=False)
+                except (TypeError, ValueError) as exc:
+                    logger.error(
+                        "Failed to serialize submission for %s: %s. Emitting safe abstain fallback.",
+                        item.id,
+                        exc,
+                    )
+                    sub.type = "abstain"
+                    sub.answer = None
+                    out_line = json.dumps(sub.to_submission_dict(), ensure_ascii=False)
+
                 out_f.write(out_line + "\n")
                 out_f.flush()
 

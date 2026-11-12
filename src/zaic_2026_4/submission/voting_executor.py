@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,25 @@ def normalize_cell(val: Any) -> Any:
         return round(val, 4)
     if isinstance(val, str):
         return val.strip()
+    return val
+
+
+def canonical_cell(val: Any) -> Any:
+    """Canonicalize a scalar cell value according to scorer matching semantics."""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        if math.isfinite(val):
+            if abs(val - round(val)) <= 1e-6:
+                return round(val)
+            return round(float(val), 4)
+        return str(val)
+    if isinstance(val, str):
+        return normalize_contract_string(val)
+    if isinstance(val, (bytes, bytearray)):
+        return None
     return val
 
 
@@ -53,34 +73,79 @@ def answer_signature(cand: CandidateQuery) -> tuple[str, str] | None:
     if not cand.execution_success or not has_evidence(cand.result_set):
         return None
 
-    raw_rows = cand.raw_result
-    if raw_rows is None and cand.result_set is not None:
-        raw_rows = list(cand.result_set)
-
-    if not raw_rows:
+    # Never synthesize arbitrary row order from an unordered set; require raw_result
+    if cand.raw_result is None or not cand.raw_result:
         return None
 
-    ans_type, ans_val = ResultFormatter.format_result(
-        raw_rows,
-        cand.predicted_type,
-        raw_columns=cand.result_columns,
-        sql=cand.final_sql,
-    )
+    raw_rows = cand.raw_result
+
+    try:
+        ans_type, ans_val = ResultFormatter.format_result(
+            raw_rows,
+            cand.predicted_type,
+            raw_columns=cand.result_columns,
+            sql=cand.final_sql,
+        )
+    except Exception:  # noqa: BLE001
+        return None
 
     if ans_type in ("abstain", "unanswerable") or ans_val is None:
         return None
 
-    if ans_type == "table" and isinstance(ans_val, dict):
-        cols = [normalize_contract_string(c) for c in ans_val.get("columns", [])]
-        rows = sorted(json.dumps(r, ensure_ascii=False) for r in ans_val.get("rows", []))
-        canon_str = json.dumps({"columns": cols, "rows": rows}, ensure_ascii=False, sort_keys=True)
-    elif ans_type == "string":
-        canon_str = json.dumps(normalize_contract_string(ans_val), ensure_ascii=False)
-    else:
-        # number, percent, date, boolean, list (keeps list position order)
-        canon_str = json.dumps(ans_val, ensure_ascii=False, sort_keys=True)
+    try:
+        if ans_type == "table" and isinstance(ans_val, dict):
+            raw_cols = ans_val.get("columns", [])
+            norm_cols = [normalize_contract_string(c) for c in raw_cols]
+            rows_data = ans_val.get("rows", [])
 
-    return ans_type, canon_str
+            # If column names are unique, align rows to alphabetically sorted normalized column names
+            if len(set(norm_cols)) == len(norm_cols) and len(norm_cols) > 0:
+                col_order = sorted(range(len(norm_cols)), key=lambda i: norm_cols[i])
+                cols = [norm_cols[i] for i in col_order]
+                aligned_rows = [
+                    [canonical_cell(r[i]) if i < len(r) else None for i in col_order]
+                    for r in rows_data
+                    if isinstance(r, (list, tuple))
+                ]
+            else:
+                cols = norm_cols
+                aligned_rows = [
+                    [canonical_cell(cell) for cell in r]
+                    for r in rows_data
+                    if isinstance(r, (list, tuple))
+                ]
+
+            rows = sorted(json.dumps(r, ensure_ascii=False) for r in aligned_rows)
+            canon_str = json.dumps({"columns": cols, "rows": rows}, ensure_ascii=False, sort_keys=True)
+
+        elif ans_type == "list" and isinstance(ans_val, list):
+            # Preserves list element position order, normalizes each element per scorer rules
+            canon_list = [canonical_cell(item) for item in ans_val]
+            canon_str = json.dumps(canon_list, ensure_ascii=False)
+
+        elif ans_type == "string":
+            canon_str = json.dumps(normalize_contract_string(ans_val), ensure_ascii=False)
+
+        elif ans_type == "percent":
+            # Per scorer match_percent: rounded to 2 decimal places
+            canon_str = json.dumps(round(float(ans_val), 2))
+
+        elif ans_type == "number":
+            canon_str = json.dumps(canonical_cell(ans_val))
+
+        elif ans_type == "date":
+            canon_str = json.dumps(str(ans_val).strip())
+
+        elif ans_type == "boolean":
+            canon_str = json.dumps(bool(ans_val))
+
+        else:
+            canon_str = json.dumps(ans_val, ensure_ascii=False, sort_keys=True)
+
+        return ans_type, canon_str
+
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 class VotingExecutor:
@@ -236,6 +301,7 @@ class VotingExecutor:
 __all__ = [
     "VotingExecutor",
     "answer_signature",
+    "canonical_cell",
     "has_evidence",
     "normalize_cell",
     "summarize_result_set",

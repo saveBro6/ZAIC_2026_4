@@ -47,6 +47,7 @@ from zaic_2026_4.submission.sql_validator import (
 from zaic_2026_4.submission.voting_executor import (
     VotingExecutor,
     answer_signature,
+    canonical_cell,
     has_evidence,
     normalize_cell,
     summarize_result_set,
@@ -75,6 +76,7 @@ __all__ = [
     "answer_signature",
     "build_sql_correction_prompt",
     "build_sql_generation_prompt",
+    "canonical_cell",
     "clean_sql_string",
     "derive_table_columns",
     "detect_percent_scale",

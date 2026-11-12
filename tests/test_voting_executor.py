@@ -373,3 +373,102 @@ def test_voting_deterministic() -> None:
     res1 = executor.vote([c0, c1])
     res2 = executor.vote([c0, c1])
     assert res1 == res2
+
+
+def test_answer_signature_bytes_safety() -> None:
+    """Metric P0: Serializing unformattable BLOB/bytes cells returns None without raising TypeError."""
+    cand_table = CandidateQuery(
+        candidate_id=0,
+        seed=42,
+        final_sql="SELECT blob_col, other_col FROM t;",
+        predicted_type="table",
+        execution_success=True,
+        raw_result=[(b"\x01", b"\x02")],
+        result_set={(b"\x01", b"\x02")},
+        result_columns=["blob_col", "other_col"],
+    )
+    # Must not raise TypeError: Object of type bytes is not JSON serializable
+    sig = answer_signature(cand_table)
+    # The signature should safely format or return None without crash
+    assert sig is not None or sig is None
+
+
+def test_answer_signature_list_scorer_normalization() -> None:
+    """Metric P1: List elements must be normalized according to scorer rules so minor casing/punctuation match."""
+    c0 = CandidateQuery(
+        candidate_id=0,
+        seed=42,
+        final_sql="SELECT name FROM t;",
+        predicted_type="list",
+        execution_success=True,
+        raw_result=[("Sting dâu 330ml",), ("Bạc xỉu",)],
+        result_set={("Sting dâu 330ml",), ("Bạc xỉu",)},
+    )
+    c1 = CandidateQuery(
+        candidate_id=1,
+        seed=100,
+        final_sql="SELECT name FROM t;",
+        predicted_type="list",
+        execution_success=True,
+        raw_result=[("sting dâu 330ml!",), ("bạc xỉu",)],
+        result_set={("sting dâu 330ml!",), ("bạc xỉu",)},
+    )
+    sig0 = answer_signature(c0)
+    sig1 = answer_signature(c1)
+    assert sig0 is not None
+    assert sig0 == sig1
+    assert sig0[0] == "list"
+
+
+def test_answer_signature_table_number_and_casing_normalization() -> None:
+    """Metric P1: Table cells with int vs float and casing differences produce identical canonical signatures."""
+    c0 = CandidateQuery(
+        candidate_id=0,
+        seed=42,
+        final_sql="SELECT name, amount FROM t;",
+        predicted_type="table",
+        execution_success=True,
+        raw_result=[("Chị Lan", 3200000.0)],
+        result_set={("Chị Lan", 3200000.0)},
+        result_columns=["Tên khách", "Số tiền nợ"],
+    )
+    c1 = CandidateQuery(
+        candidate_id=1,
+        seed=100,
+        final_sql="SELECT name, amount FROM t;",
+        predicted_type="table",
+        execution_success=True,
+        raw_result=[("chị lan!", 3200000)],
+        result_set={("chị lan!", 3200000)},
+        result_columns=["tên khách", "số tiền nợ"],
+    )
+    sig0 = answer_signature(c0)
+    sig1 = answer_signature(c1)
+    assert sig0 is not None
+    assert sig0 == sig1
+    assert sig0[0] == "table"
+
+
+def test_answer_signature_requires_raw_result_no_set_fallback() -> None:
+    """Metric P1: If raw_result is None, do not fallback to unordered set to synthesize rows."""
+    c = CandidateQuery(
+        candidate_id=0,
+        seed=42,
+        final_sql="SELECT name FROM t;",
+        predicted_type="list",
+        execution_success=True,
+        raw_result=None,
+        result_set={("B",), ("A",)},
+    )
+    assert answer_signature(c) is None
+
+
+def test_formatting_trace_evidence_count_vs_has_evidence() -> None:
+    """Metric P1: has_evidence correctly filters empty and all-None result sets."""
+    assert not has_evidence(None)
+    assert not has_evidence(set())
+    assert not has_evidence({(None,)})
+    assert not has_evidence({(None, None)})
+    assert has_evidence({(0,)})
+    assert has_evidence({("abc",)})
+

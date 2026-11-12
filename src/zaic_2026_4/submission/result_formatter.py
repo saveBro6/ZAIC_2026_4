@@ -101,7 +101,7 @@ def derive_table_columns(
                 parsed
                 and hasattr(parsed, "selects")
                 and len(parsed.selects) == num_cols
-                and not any(isinstance(s, exp.Star) for s in parsed.selects)
+                and not any(isinstance(s, exp.Star) or getattr(s, "is_star", False) for s in parsed.selects)
             ):
                 for i, proj in enumerate(parsed.selects):
                     if isinstance(proj, exp.Alias) and proj.alias and proj.alias.strip():

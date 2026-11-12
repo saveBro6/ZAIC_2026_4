@@ -336,6 +336,76 @@ def test_cli_quantize_and_gpu_embed_flags(
         constants.DEFAULT_EMBED_GPU_UTIL = original_util
 
 
+def test_pipeline_formatting_trace_has_evidence(mock_dataset_env: dict[str, Path]) -> None:
+    """Metric P1: formatting_trace evidence_candidates must align with has_evidence."""
+    llm = MockLLMEngine()
+    embedder = MockEmbedder()
+
+    pipeline = SubmissionPipeline(
+        data_dir=mock_dataset_env["data_dir"],
+        rulebook_path=mock_dataset_env["rulebook_path"],
+        llm_engine=llm,
+        embedder=embedder,
+        vector_model_path="mock",
+        calendar_path=mock_dataset_env["calendar_path"],
+        output_path=mock_dataset_env["output_path"],
+        logs_dir=mock_dataset_env["logs_dir"],
+        cache_base_dir=mock_dataset_env["cache_dir"],
+        seeds=(42, 100, 2026),
+    )
+
+    from zaic_2026_4.submission.models import QuestionItem
+    q = QuestionItem(id="q_trace_test", business_id="biz_test", question="Doanh thu?", as_of_date="2026-05-25")
+    sub = pipeline.process_question(q)
+
+    assert sub.formatting_trace is not None
+    trace = sub.formatting_trace
+    assert "answer_type" in trace
+    assert "final_answer" in trace
+    assert "percent_scale" in trace
+    assert "percent_scaled" in trace
+    assert "raw_value" in trace
+    assert "result_columns" in trace
+    assert "evidence_candidates" in trace
+    assert "cluster_sizes" in trace
+    # trace evidence_candidates must equal number of evidence candidates
+    assert trace["evidence_candidates"] == len([c for c in sub.candidates if c.execution_success and c.result_set and not all(all(cell is None for cell in row) for row in c.result_set)])
+
+
+def test_pipeline_catastrophic_guard_and_safe_flush(
+    mock_dataset_env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metric P0: Catastrophic error in process_question or serialization emits safe abstain line."""
+    llm = MockLLMEngine()
+    embedder = MockEmbedder()
+
+    pipeline = SubmissionPipeline(
+        data_dir=mock_dataset_env["data_dir"],
+        rulebook_path=mock_dataset_env["rulebook_path"],
+        llm_engine=llm,
+        embedder=embedder,
+        vector_model_path="mock",
+        calendar_path=mock_dataset_env["calendar_path"],
+        output_path=mock_dataset_env["output_path"],
+        logs_dir=mock_dataset_env["logs_dir"],
+        cache_base_dir=mock_dataset_env["cache_dir"],
+    )
+
+    # 1. Test top-level catastrophic exception guard in process_question
+    def mock_broken_impl(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("Simulated runtime crash in voting or trace")
+
+    monkeypatch.setattr(pipeline, "_process_question_impl", mock_broken_impl)
+    from zaic_2026_4.submission.models import QuestionItem
+    broken_q = QuestionItem(id="q_crash", business_id="biz_test", question="Test crash?", as_of_date="2026-05-25")
+    sub_crash = pipeline.process_question(broken_q)
+    assert sub_crash.type == "abstain"
+    assert sub_crash.answer is None
+    assert "Unexpected execution error" in sub_crash.selection_reason
+
+
+
 
 
 
