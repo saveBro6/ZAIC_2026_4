@@ -5,11 +5,18 @@ Maximal Profiles via deterministic composition from raw statistics and join meta
 """
 
 import os
+import time
 from typing import Any, Protocol, runtime_checkable
 
 # Disable FlashInfer top-p/top-k sampler by default to prevent JIT compilation failures on NVCC < 12.2
 os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
+from zaic_2026_4.common.trace_logger import (
+    LLMCallRecord,
+    extract_llm_engine_call_traces,
+    make_llm_call_record,
+    sanitize_sampling_params,
+)
 from zaic_2026_4.constants import (
     DEFAULT_LLM_MAX_LENGTH,
     DEFAULT_LOCAL_GPU_UTIL,
@@ -98,6 +105,7 @@ class VLLMEngine:
             llm_kwargs["reasoning_config"] = reasoning_config
 
         self.llm = LLM(**llm_kwargs)
+        self.last_call_traces: list[dict[str, Any]] = []
 
     def generate(
         self,
@@ -114,10 +122,12 @@ class VLLMEngine:
 
         is_single = isinstance(prompts, str)
         if is_single and not prompts:
+            self.last_call_traces = []
             return ""
         prompt_list = [prompts] if is_single else prompts
 
         if not prompt_list:
+            self.last_call_traces = []
             return []
 
         default_stop = ["<|im_end|>", "<|endoftext|>", "</output>", "\n</output>"]
@@ -135,9 +145,34 @@ class VLLMEngine:
             sampling_kwargs["thinking_token_budget"] = thinking_token_budget
 
         sampling_params = SamplingParams(**sampling_kwargs)
+        clean_sampling = sanitize_sampling_params(sampling_kwargs)
 
+        t0 = time.perf_counter()
         outputs = self.llm.generate(prompt_list, sampling_params)
-        results = [output.outputs[0].text.strip() for output in outputs]
+        batch_latency_ms = (time.perf_counter() - t0) * 1000.0
+        per_item_latency_ms = batch_latency_ms / max(1, len(outputs))
+
+        results: list[str] = []
+        call_traces: list[dict[str, Any]] = []
+        for idx, output in enumerate(outputs):
+            comp = output.outputs[0]
+            text = comp.text.strip()
+            results.append(text)
+            prompt_token_ids = getattr(output, "prompt_token_ids", None)
+            comp_token_ids = getattr(comp, "token_ids", None)
+            call_traces.append({
+                "prompt": prompt_list[idx] if idx < len(prompt_list) else "",
+                "raw_output": text,
+                "prompt_tokens": len(prompt_token_ids) if prompt_token_ids is not None else None,
+                "completion_tokens": len(comp_token_ids) if comp_token_ids is not None else None,
+                "finish_reason": getattr(comp, "finish_reason", None),
+                "stop_reason": getattr(comp, "stop_reason", None),
+                "latency_ms": round(per_item_latency_ms, 3),
+                "batch_latency_ms": round(batch_latency_ms, 3),
+                "batch_size": len(outputs),
+                "sampling_params": clean_sampling,
+            })
+        self.last_call_traces = call_traces
 
         return results[0] if is_single else results
 
@@ -148,6 +183,7 @@ class MockLLMEngine:
     def __init__(self, **kwargs: Any) -> None:
         """Initialize MockLLMEngine."""
         self.kwargs = kwargs
+        self.last_call_traces: list[dict[str, Any]] = []
 
     def generate(
         self,
@@ -162,11 +198,24 @@ class MockLLMEngine:
         """Generate mock Vietnamese metadata summaries from prompt hints."""
         is_single = isinstance(prompts, str)
         if is_single and not prompts:
+            self.last_call_traces = []
             return ""
         prompt_list = [prompts] if is_single else prompts
 
         if not prompt_list:
+            self.last_call_traces = []
             return []
+
+        t0 = time.perf_counter()
+        sampling_kwargs: dict[str, Any] = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stop": stop,
+            "seed": seed,
+            "thinking_token_budget": thinking_token_budget,
+            **kwargs,
+        }
+        clean_sampling = sanitize_sampling_params(sampling_kwargs)
 
         results: list[str] = []
         for prompt in prompt_list:
@@ -278,6 +327,24 @@ class MockLLMEngine:
 
             results.append(summary)
 
+        batch_latency_ms = (time.perf_counter() - t0) * 1000.0
+        per_item_latency_ms = batch_latency_ms / max(1, len(results))
+        self.last_call_traces = [
+            {
+                "prompt": prompt_list[idx],
+                "raw_output": results[idx],
+                "prompt_tokens": None,
+                "completion_tokens": None,
+                "finish_reason": "stop",
+                "stop_reason": None,
+                "latency_ms": round(per_item_latency_ms, 3),
+                "batch_latency_ms": round(batch_latency_ms, 3),
+                "batch_size": len(results),
+                "sampling_params": clean_sampling,
+            }
+            for idx in range(len(results))
+        ]
+
         return results[0] if is_single else results
 
 
@@ -331,6 +398,8 @@ class ProfileLLMSummarizer:
         """Initialize ProfileLLMSummarizer with an LLM engine."""
         self.llm = llm_engine
         self.batch_size = batch_size
+        self.last_profiling_trace: list[dict[str, Any]] = []
+        self.last_llm_call_records: list[LLMCallRecord] = []
 
     def build_minimal_prompt(
         self,
@@ -397,11 +466,14 @@ class ProfileLLMSummarizer:
                 })
 
         if not work_items:
+            self.last_profiling_trace = []
+            self.last_llm_call_records = []
             return {}
 
         # Phase 2: Batch inference for minimal prompts
         all_min_prompts = [item["min_prompt"] for item in work_items]
         min_summaries: list[str] = []
+        chunk_engine_traces: list[dict[str, Any]] = []
         for i in range(0, len(all_min_prompts), self.batch_size):
             chunk = all_min_prompts[i : i + self.batch_size]
             chunk_outs = self.llm.generate(
@@ -412,6 +484,9 @@ class ProfileLLMSummarizer:
             if isinstance(chunk_outs, str):
                 chunk_outs = [chunk_outs]
             min_summaries.extend(chunk_outs)
+            traces = extract_llm_engine_call_traces(self.llm)
+            for j in range(len(chunk)):
+                chunk_engine_traces.append(traces[j] if j < len(traces) else {})
 
         # Phase 3: Deterministic Maximal Profile Composition & Structural Indexing
         table_ctx_map = build_table_context(db_profile)
@@ -419,10 +494,41 @@ class ProfileLLMSummarizer:
 
         # Phase 4: Construct the final processed_metadata dictionary
         processed_metadata: dict[str, Any] = {}
+        profiling_trace: list[dict[str, Any]] = []
+        llm_call_records: list[LLMCallRecord] = []
         for idx, item in enumerate(work_items):
             col_key = item["col_key"]
             col_stats = item["col_stats"]
-            short_summary = min_summaries[idx].strip()
+            raw_out = min_summaries[idx] if idx < len(min_summaries) else ""
+            short_summary = raw_out.strip()
+            eng_trace = chunk_engine_traces[idx] if idx < len(chunk_engine_traces) else {}
+            profiling_trace.append({
+                "col_key": col_key,
+                "table_name": item["table_name"],
+                "col_name": item["col_name"],
+                "prompt": item["min_prompt"],
+                "raw_output": raw_out,
+                "minimal_profile": short_summary,
+                "prompt_tokens": eng_trace.get("prompt_tokens"),
+                "completion_tokens": eng_trace.get("completion_tokens"),
+                "finish_reason": eng_trace.get("finish_reason"),
+                "stop_reason": eng_trace.get("stop_reason"),
+                "latency_ms": eng_trace.get("latency_ms"),
+                "sampling_params": eng_trace.get("sampling_params") or {},
+            })
+            llm_call_records.append(
+                make_llm_call_record(
+                    stage="minimal_profile",
+                    prompt=item["min_prompt"],
+                    raw_output=raw_out,
+                    engine_trace=eng_trace,
+                    metadata={
+                        "col_key": col_key,
+                        "table_name": item["table_name"],
+                        "col_name": item["col_name"],
+                    },
+                )
+            )
             tbl_name = item["table_name"]
             c_name = item["col_name"]
             tbl_ctx = table_ctx_map.get(tbl_name)
@@ -469,6 +575,8 @@ class ProfileLLMSummarizer:
                 ],
             }
 
+        self.last_profiling_trace = profiling_trace
+        self.last_llm_call_records = llm_call_records
         return processed_metadata
 
     def summarize_calendar(

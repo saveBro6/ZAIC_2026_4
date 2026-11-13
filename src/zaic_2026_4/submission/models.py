@@ -110,6 +110,16 @@ class CandidateQuery:
     deliberate_abstain: bool = False
     unresolved_zero: bool = False
     repair_stop_reason: str | None = None
+    rulebook_xml: str = ""
+    grounded_literals_injected: list[dict[str, Any]] = field(default_factory=list)
+    initial_prompt: str = ""
+    initial_raw_output: str = ""
+    initial_reasoning: str = ""
+    initial_thinking: str = ""
+    final_reasoning: str = ""
+    final_thinking: str = ""
+    best_attempt_idx: int | None = None
+    attempts_history: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Ensure total_retry_count dictionary is synchronized with granular retry counts."""
@@ -151,6 +161,24 @@ class CandidateQuery:
             "repair_stop_reason": self.repair_stop_reason,
         }
 
+    def to_full_trace_dict(self) -> dict[str, Any]:
+        """Convert candidate trace with full prompts, reasoning, and repair attempt history."""
+        base = self.to_dict()
+        base.update({
+            "schema_permutation": list(self.schema_permutation),
+            "rulebook_xml": self.rulebook_xml,
+            "grounded_literals_injected": self.grounded_literals_injected,
+            "initial_prompt": self.initial_prompt,
+            "initial_raw_output": self.initial_raw_output,
+            "initial_reasoning": self.initial_reasoning,
+            "initial_thinking": self.initial_thinking,
+            "final_reasoning": self.final_reasoning,
+            "final_thinking": self.final_thinking,
+            "best_attempt_idx": self.best_attempt_idx,
+            "attempts_history": self.attempts_history,
+        })
+        return base
+
 
 @dataclass
 class QuestionSubmission:
@@ -166,6 +194,10 @@ class QuestionSubmission:
     voting_status: str = "abstain_fallback"
     selection_reason: str = ""
     formatting_trace: dict[str, Any] = field(default_factory=dict)
+    schema_linking_trace: dict[str, Any] = field(default_factory=dict)
+    stage_timings_sec: dict[str, float] = field(default_factory=dict)
+    llm_usage_summary: dict[str, Any] = field(default_factory=dict)
+    candidate_signatures: list[dict[str, Any]] = field(default_factory=list)
 
     def to_submission_dict(self) -> dict[str, Any]:
         """Format strictly according to problem contract specification for submission.jsonl."""
@@ -203,6 +235,43 @@ class QuestionSubmission:
         if self.reason:
             log["reason"] = self.reason
         return log
+
+    def to_full_cache_trace(self, question_item: QuestionItem | None = None) -> dict[str, Any]:
+        """Format complete pipeline trace for cache_dir/question_trace_<id>.json."""
+        winner_raw_preview: list[list[Any]] | None = None
+        if self.winning_candidate_id is not None:
+            for cand in self.candidates:
+                if cand.candidate_id == self.winning_candidate_id and cand.raw_result is not None:
+                    winner_raw_preview = [
+                        list(row) if isinstance(row, (list, tuple)) else [row]
+                        for row in cand.raw_result[:10]
+                    ]
+                    break
+
+        trace: dict[str, Any] = {
+            "question_id": self.id,
+            "business_id": question_item.business_id if question_item else None,
+            "as_of_date": question_item.as_of_date if question_item else None,
+            "question": question_item.question if question_item else None,
+            "final_predicted_type": self.type,
+            "final_predicted_answer": self.answer,
+            "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "stage_timings_sec": self.stage_timings_sec,
+            "llm_usage_summary": self.llm_usage_summary,
+            "selection_reason": self.selection_reason,
+            "voting_status": self.voting_status,
+            "winning_candidate_id": self.winning_candidate_id,
+            "candidate_signatures": self.candidate_signatures,
+            "formatting_trace": {
+                **self.formatting_trace,
+                "raw_result_preview": winner_raw_preview,
+            },
+            "schema_linking_trace": self.schema_linking_trace,
+            "candidates": [c.to_full_trace_dict() for c in self.candidates],
+        }
+        if self.reason:
+            trace["reason"] = self.reason
+        return trace
 
 
 __all__ = [

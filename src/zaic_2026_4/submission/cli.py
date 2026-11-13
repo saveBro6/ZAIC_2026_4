@@ -98,6 +98,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Limit number of questions to process (for testing).",
     )
+    parser.add_argument(
+        "--no-trace",
+        action="store_false",
+        dest="trace_enabled",
+        default=True,
+        help="Disable detailed pipeline trace output in cache_dir.",
+    )
     return parser
 
 
@@ -155,6 +162,7 @@ def main(argv: list[str] | None = None) -> None:
         max_retries=args.max_retries,
         rulebook_mode=args.rulebook_mode,
         cases=args.cases,
+        trace_enabled=args.trace_enabled,
     )
 
     t0 = time.perf_counter()

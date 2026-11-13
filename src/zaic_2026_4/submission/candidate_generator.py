@@ -5,12 +5,18 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import sqlglot
 
+from zaic_2026_4.common.trace_logger import (
+    LLMCallRecord,
+    append_llm_calls,
+    extract_llm_engine_call_traces,
+    make_llm_call_record,
+)
 from zaic_2026_4.constants import (
     DEFAULT_CANDIDATE_SEEDS,
     DEFAULT_EXECUTION_MAX_RETRIES,
@@ -35,7 +41,7 @@ from zaic_2026_4.submission.prompt_template import (
 from zaic_2026_4.submission.rules import ValidationIssue
 from zaic_2026_4.submission.sql_validator import (
     SQLValidator,
-    parse_structured_sql_output,
+    parse_structured_sql_output_with_reasoning,
 )
 from zaic_2026_4.submission.voting_executor import normalize_cell
 
@@ -57,6 +63,69 @@ class Attempt:
     result_set: set[tuple[Any, ...]] | None = None
     raw_columns: tuple[str, ...] = ()
     raw_str: str = ""
+    attempt_idx: int = 0
+    phase: str = "initial"
+    prompt: str = ""
+    reasoning: str = ""
+    thinking: str = ""
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    latency_ms: float | None = None
+    sampling_params: dict[str, Any] = field(default_factory=dict)
+
+
+def _serialize_issue(issue: ValidationIssue | str) -> dict[str, Any]:
+    """Serialize a validation issue into a structured dictionary."""
+    if isinstance(issue, ValidationIssue):
+        out: dict[str, Any] = {
+            "code": issue.code,
+            "message": issue.message,
+            "severity": issue.severity,
+        }
+        if issue.hint:
+            out["hint"] = issue.hint
+        return out
+    return {
+        "code": getattr(issue, "code", "STRING_ISSUE"),
+        "message": str(issue),
+        "severity": getattr(issue, "severity", "blocking"),
+    }
+
+
+def _serialize_attempt(attempt: Attempt, is_best: bool) -> dict[str, Any]:
+    """Serialize a single generation/repair Attempt for full trace persistence."""
+    raw_preview: list[list[Any]] | None = None
+    if attempt.raw_rows is not None:
+        raw_preview = [
+            list(row) if isinstance(row, (list, tuple)) else [row]
+            for row in attempt.raw_rows[:10]
+        ]
+
+    return {
+        "attempt_idx": attempt.attempt_idx,
+        "phase": attempt.phase,
+        "prompt": attempt.prompt,
+        "raw_output": attempt.raw_str,
+        "reasoning": attempt.reasoning,
+        "thinking": attempt.thinking,
+        "sql": attempt.sql,
+        "target_type": attempt.target_type,
+        "issues": [_serialize_issue(i) for i in attempt.issues],
+        "executed": attempt.executed,
+        "shape_ok": attempt.shape_ok,
+        "has_evidence": attempt.has_evidence,
+        "has_non_zero_evidence": attempt.has_non_zero_evidence,
+        "rank_tuple": list(rank(attempt)),
+        "raw_columns": list(attempt.raw_columns[:20]),
+        "raw_rows_preview": raw_preview,
+        "finish_reason": attempt.finish_reason,
+        "prompt_tokens": attempt.prompt_tokens,
+        "completion_tokens": attempt.completion_tokens,
+        "latency_ms": attempt.latency_ms,
+        "sampling_params": attempt.sampling_params,
+        "is_best_selected": is_best,
+    }
 
 
 def rank(a: Attempt) -> tuple[bool, bool, bool, bool, bool, int]:
@@ -199,6 +268,9 @@ class CandidateGenerator:
         vector_indexer: Any | None = None,
         db_path: Path | str | None = None,
         grounded_literals: list[dict[str, Any]] | None = None,
+        cache_dir: Path | str | None = None,
+        question_id: str | None = None,
+        trace_enabled: bool = True,
     ) -> CandidateQuery:
         """Generate a single candidate query using the unified self-correction state machine."""
         target_db = Path(db_path).resolve() if db_path else self.db_path
@@ -251,21 +323,46 @@ class CandidateGenerator:
 
         raw_output = self.llm_engine.generate(prompt, **gen_kwargs)
         raw_str = raw_output if isinstance(raw_output, str) else raw_output[0]
+        init_eng_traces = extract_llm_engine_call_traces(self.llm_engine)
+        curr_eng_trace: dict[str, Any] = init_eng_traces[0] if init_eng_traces else {}
+
+        llm_call_records: list[LLMCallRecord] = []
+        if trace_enabled:
+            llm_call_records.append(
+                make_llm_call_record(
+                    stage="sql_init",
+                    prompt=prompt,
+                    raw_output=raw_str,
+                    engine_trace=curr_eng_trace,
+                    metadata={
+                        "question_id": question_id,
+                        "candidate_id": candidate_id,
+                        "seed": seed,
+                        "turn": 0,
+                    },
+                )
+            )
 
         # State machine variables
         history: list[Attempt] = []
         best: Attempt | None = None
+        best_attempt_idx: int = 0
         sql_retries = 0
         execution_retries = 0
         max_total_retries = self.sql_max_retries + self.execution_max_retries
         stop_reason = "clean"
         curr_raw_str = raw_str
+        curr_prompt = prompt
+        turn_idx = 0
+        turn_phase = "initial"
         initial_sql = ""
         current_phase = "sql"
 
         while True:
-            curr_sql, curr_type, parse_issues = parse_structured_sql_output(
-                curr_raw_str, default_type="number"
+            curr_sql, curr_type, curr_reasoning, curr_thinking, parse_issues = (
+                parse_structured_sql_output_with_reasoning(
+                    curr_raw_str, default_type="number"
+                )
             )
             if not initial_sql:
                 initial_sql = curr_sql
@@ -273,7 +370,7 @@ class CandidateGenerator:
             # Check deliberate abstain
             if curr_type in ("unanswerable", "abstain") and not curr_sql.strip():
                 stop_reason = "deliberate_abstain"
-                best = Attempt(
+                abstain_attempt = Attempt(
                     sql="",
                     target_type=curr_type,
                     executed=True,
@@ -282,7 +379,20 @@ class CandidateGenerator:
                     has_evidence=False,
                     issues=(),
                     raw_str=curr_raw_str,
+                    attempt_idx=turn_idx,
+                    phase=turn_phase,
+                    prompt=curr_prompt if trace_enabled else "",
+                    reasoning=curr_reasoning,
+                    thinking=curr_thinking,
+                    finish_reason=curr_eng_trace.get("finish_reason"),
+                    prompt_tokens=curr_eng_trace.get("prompt_tokens"),
+                    completion_tokens=curr_eng_trace.get("completion_tokens"),
+                    latency_ms=curr_eng_trace.get("latency_ms"),
+                    sampling_params=dict(curr_eng_trace.get("sampling_params") or {}),
                 )
+                history.append(abstain_attempt)
+                best = abstain_attempt
+                best_attempt_idx = len(history) - 1
                 break
 
             # Validate static AST and schema rules
@@ -378,12 +488,23 @@ class CandidateGenerator:
                 result_set=r_set,
                 raw_columns=tuple(raw_cols),
                 raw_str=curr_raw_str,
+                attempt_idx=turn_idx,
+                phase=turn_phase,
+                prompt=curr_prompt if trace_enabled else "",
+                reasoning=curr_reasoning,
+                thinking=curr_thinking,
+                finish_reason=curr_eng_trace.get("finish_reason"),
+                prompt_tokens=curr_eng_trace.get("prompt_tokens"),
+                completion_tokens=curr_eng_trace.get("completion_tokens"),
+                latency_ms=curr_eng_trace.get("latency_ms"),
+                sampling_params=dict(curr_eng_trace.get("sampling_params") or {}),
             )
             history.append(curr_attempt)
 
             # Update best attempt: only replace if current attempt is strictly better
             if best is None or rank(curr_attempt) > rank(best):
                 best = curr_attempt
+                best_attempt_idx = len(history) - 1
 
             # Stop conditions
             curr_blocking = [i for i in all_issues if getattr(i, "severity", "blocking") == "blocking"]
@@ -488,9 +609,34 @@ class CandidateGenerator:
             else:
                 sql_retries += 1
             curr_raw_str = corr_output if isinstance(corr_output, str) else corr_output[0]
+            curr_prompt = corr_prompt
+            turn_idx += 1
+            turn_phase = f"{current_phase}_repair"
+            corr_eng_traces = extract_llm_engine_call_traces(self.llm_engine)
+            curr_eng_trace = corr_eng_traces[0] if corr_eng_traces else {}
+            if trace_enabled:
+                llm_call_records.append(
+                    make_llm_call_record(
+                        stage="sql_repair",
+                        prompt=corr_prompt,
+                        raw_output=curr_raw_str,
+                        engine_trace=curr_eng_trace,
+                        metadata={
+                            "question_id": question_id,
+                            "candidate_id": candidate_id,
+                            "seed": seed,
+                            "turn": turn_idx,
+                            "repair_phase": current_phase,
+                        },
+                    )
+                )
 
         if best is None:
             best = history[-1]
+            best_attempt_idx = len(history) - 1
+
+        if trace_enabled and cache_dir is not None and llm_call_records:
+            append_llm_calls(cache_dir, llm_call_records)
 
         final_sql = best.sql
         predicted_type = best.target_type
@@ -500,6 +646,13 @@ class CandidateGenerator:
         is_valid_syntax = not any(getattr(i, "severity", "blocking") == "blocking" for i in best.issues)
         is_deliberate_abstain = (predicted_type in ("unanswerable", "abstain") and not final_sql.strip())
         is_unresolved_zero = (stop_reason in ("budget_exhausted", "stagnation") and not best.has_non_zero_evidence)
+
+        attempts_serialized = (
+            [_serialize_attempt(att, is_best=(idx == best_attempt_idx)) for idx, att in enumerate(history)]
+            if trace_enabled
+            else []
+        )
+        init_attempt = history[0] if history else best
 
         return CandidateQuery(
             candidate_id=candidate_id,
@@ -524,6 +677,16 @@ class CandidateGenerator:
             deliberate_abstain=is_deliberate_abstain,
             unresolved_zero=is_unresolved_zero,
             repair_stop_reason=stop_reason,
+            rulebook_xml=rulebook_xml if trace_enabled else "",
+            grounded_literals_injected=list(grounded_literals or []) if trace_enabled else [],
+            initial_prompt=prompt if trace_enabled else "",
+            initial_raw_output=raw_str if trace_enabled else "",
+            initial_reasoning=init_attempt.reasoning if trace_enabled else "",
+            initial_thinking=init_attempt.thinking if trace_enabled else "",
+            final_reasoning=best.reasoning if trace_enabled else "",
+            final_thinking=best.thinking if trace_enabled else "",
+            best_attempt_idx=best_attempt_idx if trace_enabled else None,
+            attempts_history=attempts_serialized,
         )
 
     def generate_all_candidates(
@@ -536,6 +699,9 @@ class CandidateGenerator:
         vector_indexer: Any | None = None,
         db_path: Path | str | None = None,
         grounded_literals: list[dict[str, Any]] | None = None,
+        cache_dir: Path | str | None = None,
+        question_id: str | None = None,
+        trace_enabled: bool = True,
     ) -> list[CandidateQuery]:
         """Generate all candidate queries across configured seeds."""
         candidates: list[CandidateQuery] = []
@@ -551,6 +717,9 @@ class CandidateGenerator:
                 vector_indexer=vector_indexer,
                 db_path=db_path,
                 grounded_literals=grounded_literals,
+                cache_dir=cache_dir,
+                question_id=question_id,
+                trace_enabled=trace_enabled,
             )
             candidates.append(cand)
         return candidates

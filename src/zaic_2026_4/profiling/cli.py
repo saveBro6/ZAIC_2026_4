@@ -56,6 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use deterministic offline MockLLMEngine and MockEmbedder without loading GPU weights.",
     )
+    parser.add_argument(
+        "--no-trace",
+        action="store_false",
+        dest="trace_enabled",
+        default=True,
+        help="Disable detailed profiling trace output in cache_dir.",
+    )
     return parser
 
 
@@ -235,6 +242,7 @@ def main() -> None:
             embedder=embedder,
             cache_dir=b_cache,
             calendar_path=cal_path if (cal_path and cal_path.is_file()) else None,
+            trace_enabled=args.trace_enabled,
         )
         pipe = orchestrator.run_pipeline(force_rebuild=True)
         if embedder is None and "vector_indexer" in pipe and pipe["vector_indexer"] is not None:

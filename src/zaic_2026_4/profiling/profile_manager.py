@@ -13,6 +13,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from zaic_2026_4.common.trace_logger import (
+    append_llm_calls,
+    utc_now_iso,
+    write_json_trace,
+)
 from zaic_2026_4.ingestion import ingest_business, resolve_split_paths
 from zaic_2026_4.profiling.lsh_indexer import VietnameseLSHIndexer
 from zaic_2026_4.profiling.profile_summarizer import (
@@ -44,6 +49,7 @@ class ProfilingOrchestrator:
         cache_dir: str | Path | None = None,
         calendar_path: str | Path | None = None,
         calendar_cache_path: str | Path | None = None,
+        trace_enabled: bool = True,
     ) -> None:
         """Initialize ProfilingOrchestrator.
 
@@ -81,6 +87,7 @@ class ProfilingOrchestrator:
             self.cache_dir = Path(f"/tmp/cache_{biz_name}").resolve()
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.trace_enabled = trace_enabled
         self.db_path: Path | None = None
         self._pipeline_result: dict[str, Any] | None = None
 
@@ -205,6 +212,28 @@ class ProfilingOrchestrator:
         # Persist updated metadata JSON
         with open(profile_json_path, "w", encoding="utf-8") as f:
             json.dump(processed_metadata, f, ensure_ascii=False, indent=2)
+
+        # Persist profiling LLM traces in cache_dir when enabled
+        if self.trace_enabled:
+            cols_trace = summarizer.last_profiling_trace
+            total_ptok = sum(c["prompt_tokens"] for c in cols_trace if isinstance(c.get("prompt_tokens"), int))
+            total_ctok = sum(c["completion_tokens"] for c in cols_trace if isinstance(c.get("completion_tokens"), int))
+            total_lat = round(sum(float(c.get("latency_ms") or 0.0) for c in cols_trace), 3)
+            write_json_trace(
+                self.cache_dir / "profiling_trace.json",
+                {
+                    "business_id": self.business_dir.name,
+                    "generated_at": utc_now_iso(),
+                    "total_columns": len(cols_trace),
+                    "total_prompt_tokens": total_ptok,
+                    "total_completion_tokens": total_ctok,
+                    "total_latency_ms": total_lat,
+                    "columns": cols_trace,
+                },
+            )
+            for rec in summarizer.last_llm_call_records:
+                rec.metadata["business_id"] = self.business_dir.name
+            append_llm_calls(self.cache_dir, summarizer.last_llm_call_records)
 
         # Step 3: Vietnamese LSH Indexing
         lsh_indexer = VietnameseLSHIndexer()
@@ -419,6 +448,13 @@ def main() -> None:
         default=DEFAULT_EMBED_MODEL_PATH,
         help="Embedding model path for FAISS indexer.",
     )
+    parser.add_argument(
+        "--no-trace",
+        action="store_false",
+        dest="trace_enabled",
+        default=True,
+        help="Disable detailed profiling trace output in cache_dir.",
+    )
 
     args = parser.parse_args()
 
@@ -490,6 +526,7 @@ def main() -> None:
             vector_model_path=args.vector_model_path,
             cache_dir=b_cache,
             calendar_path=cal_path if (cal_path and cal_path.is_file()) else None,
+            trace_enabled=args.trace_enabled,
         )
         pipe = orchestrator.run_pipeline(force_rebuild=True)
         if embedder is None and "vector_indexer" in pipe and pipe["vector_indexer"] is not None:

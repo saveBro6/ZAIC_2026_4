@@ -13,6 +13,7 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 from sqlglot.optimizer.scope import traverse_scope
 
+from zaic_2026_4.common.trace_logger import extract_thinking_trace
 from zaic_2026_4.submission.models import VALID_DATAMATE_TYPES, ValidationResult
 from zaic_2026_4.submission.rules import ValidationIssue
 
@@ -32,14 +33,15 @@ def clean_sql_string(raw_sql: str) -> str:
     return sql
 
 
-def parse_structured_sql_output(
+def parse_structured_sql_output_with_reasoning(
     raw_output: str,
     default_type: str = "number",
-) -> tuple[str, str, list[ValidationIssue]]:
-    """Parse JSON Structured Output from LLM into (sql, target_type, validation_issues).
+) -> tuple[str, str, str, str, list[ValidationIssue]]:
+    """Parse JSON Structured Output into (sql, target_type, reasoning, thinking, issues).
 
     Emits ValidationIssue with canonical codes OUTPUT_EMPTY, OUTPUT_UNPARSEABLE, or TYPE_INVALID.
     """
+    thinking = extract_thinking_trace(raw_output)
     text = raw_output.strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -75,6 +77,9 @@ def parse_structured_sql_output(
     if parsed_dict is not None and isinstance(parsed_dict, dict):
         raw_sql = str(parsed_dict.get("sql", ""))
         raw_type = str(parsed_dict.get("type", default_type)).strip().lower()
+        reasoning = str(parsed_dict.get("reasoning", "") or "").strip()
+        if not thinking and reasoning:
+            thinking = extract_thinking_trace(reasoning)
         clean_sql = clean_sql_string(raw_sql)
 
         if raw_type not in VALID_DATAMATE_TYPES:
@@ -89,7 +94,7 @@ def parse_structured_sql_output(
                 )
             )
 
-        return clean_sql, raw_type, issues
+        return clean_sql, raw_type, reasoning, thinking, issues
 
     cleaned = clean_sql_string(raw_output)
     if not cleaned:
@@ -100,7 +105,19 @@ def parse_structured_sql_output(
                 severity="blocking",
             )
         )
-    return cleaned, default_type, issues
+    return cleaned, default_type, "", thinking, issues
+
+
+def parse_structured_sql_output(
+    raw_output: str,
+    default_type: str = "number",
+) -> tuple[str, str, list[ValidationIssue]]:
+    """Parse JSON Structured Output from LLM into (sql, target_type, validation_issues)."""
+    clean_sql, raw_type, _reasoning, _thinking, issues = parse_structured_sql_output_with_reasoning(
+        raw_output=raw_output,
+        default_type=default_type,
+    )
+    return clean_sql, raw_type, issues
 
 
 def _extract_column_name(node: Any) -> str:
@@ -849,4 +866,5 @@ __all__ = [
     "SQLValidator",
     "clean_sql_string",
     "parse_structured_sql_output",
+    "parse_structured_sql_output_with_reasoning",
 ]

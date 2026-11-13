@@ -15,6 +15,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from zaic_2026_4.common.trace_logger import (
+    LLMCallRecord,
+    append_llm_calls,
+    extract_llm_engine_call_traces,
+    make_llm_call_record,
+)
 from zaic_2026_4.schema_linking.ast_parser import SQLASTExtractor
 from zaic_2026_4.schema_linking.context_builder import (
     SchemaContextBuilder,
@@ -39,6 +45,12 @@ class VariantExecutionTrace:
     fields_harvested: set[str]
     literals_extracted: set[str]
     mismatches_detected: list[tuple[str, list[str]]] = field(default_factory=list)
+    formatted_prompt: str = ""
+    raw_initial_output: str = ""
+    sme_context_used: str = ""
+    rulebook_context_used: str = ""
+    initial_llm_metrics: dict[str, Any] = field(default_factory=dict)
+    repair_turns: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -52,6 +64,7 @@ class SchemaLinkingResult:
     all_harvested_fields: set[str] = field(default_factory=set)
     preserved_keys: set[str] = field(default_factory=set)
     grounded_literals: list[dict[str, Any]] = field(default_factory=list)
+    llm_usage_summary: dict[str, Any] = field(default_factory=dict)
 
     def format_for_sql_generation(self, processed_metadata: dict[str, Any]) -> str:
         """Format quoted schema into clean XML context for downstream Phase 04 SQL Generation."""
@@ -61,27 +74,43 @@ class SchemaLinkingResult:
         self,
         question: str | None = None,
         question_id: str | None = None,
+        include_detailed_traces: bool = True,
     ) -> dict[str, Any]:
         """Convert linking result into serializable JSON dictionary."""
+        variant_items: list[dict[str, Any]] = []
+        for t in self.variant_traces:
+            entry: dict[str, Any] = {
+                "case_name": t.case_name,
+                "profile_type": t.profile_type,
+                "retry_count": t.retry_count,
+                "fields": sorted(t.fields_harvested),
+                "literals": sorted(t.literals_extracted),
+                "mismatches": t.mismatches_detected,
+                "final_sql": t.final_sql,
+            }
+            if include_detailed_traces:
+                entry.update({
+                    "initial_sql": t.initial_sql,
+                    "formatted_prompt": t.formatted_prompt,
+                    "raw_initial_output": t.raw_initial_output,
+                    "sme_context_used": t.sme_context_used,
+                    "rulebook_context_used": t.rulebook_context_used,
+                    "initial_llm_metrics": t.initial_llm_metrics,
+                    "repair_turns": t.repair_turns,
+                })
+            variant_items.append(entry)
+
         data: dict[str, Any] = {
             "final_linked_schema": sorted(self.final_linked_schema),
             "canonical_schema": sorted(self.canonical_schema),
             "preserved_keys": sorted(self.preserved_keys),
             "grounded_literals": self.grounded_literals,
             "total_retries": self.total_retries,
-            "variant_traces": [
-                {
-                    "case_name": t.case_name,
-                    "profile_type": t.profile_type,
-                    "retry_count": t.retry_count,
-                    "fields": sorted(t.fields_harvested),
-                    "literals": sorted(t.literals_extracted),
-                    "mismatches": t.mismatches_detected,
-                    "final_sql": t.final_sql,
-                }
-                for t in self.variant_traces
-            ],
+            "variant_traces": variant_items,
         }
+        if include_detailed_traces:
+            data["all_harvested_fields"] = sorted(self.all_harvested_fields)
+            data["llm_usage_summary"] = self.llm_usage_summary
         if question is not None:
             data["question"] = question
         if question_id is not None:
@@ -297,6 +326,7 @@ class TaskAlignedSchemaLinker:
         cases: str | list[str] | set[str] | None = None,
         cache_dir: Path | str | None = None,
         question_id: str | None = None,
+        trace_enabled: bool = True,
     ) -> SchemaLinkingResult:
         """Execute Task-Aligned Schema Linking across specified context variants.
 
@@ -329,6 +359,7 @@ class TaskAlignedSchemaLinker:
 
         # Step 2: Generate initial trial SQL queries
         prompts = [v.formatted_prompt for v in variants]
+        init_engine_traces: list[dict[str, Any]] = []
         if batch_generate and hasattr(self.llm_engine, "generate"):
             try:
                 initial_sqls = self.llm_engine.generate(
@@ -338,36 +369,63 @@ class TaskAlignedSchemaLinker:
                 )
                 if isinstance(initial_sqls, str):
                     initial_sqls = [initial_sqls]
+                batch_traces = extract_llm_engine_call_traces(self.llm_engine)
+                init_engine_traces = [
+                    batch_traces[i] if i < len(batch_traces) else {}
+                    for i in range(len(prompts))
+                ]
             except (RuntimeError, ValueError, TypeError, AttributeError) as e:
                 logger.warning("Batch generation failed (%s), falling back to sequential: %s", type(e).__name__, e)
-                initial_sqls = [
-                    self.llm_engine.generate(
+                initial_sqls = []
+                init_engine_traces = []
+                for p in prompts:
+                    out = self.llm_engine.generate(
                         p, max_tokens=256, stop=["</output>", "\n\n\n", "<|im_end|>"]
                     )
-                    for p in prompts
-                ]
+                    initial_sqls.append(out[0] if isinstance(out, list) else out)
+                    seq_traces = extract_llm_engine_call_traces(self.llm_engine)
+                    init_engine_traces.append(seq_traces[0] if seq_traces else {})
         else:
-            initial_sqls = [
-                self.llm_engine.generate(
+            initial_sqls = []
+            for p in prompts:
+                out = self.llm_engine.generate(
                     p, max_tokens=256, stop=["</output>", "\n\n\n", "<|im_end|>"]
                 )
-                for p in prompts
-            ]
+                initial_sqls.append(out[0] if isinstance(out, list) else out)
+                seq_traces = extract_llm_engine_call_traces(self.llm_engine)
+                init_engine_traces.append(seq_traces[0] if seq_traces else {})
 
         linked_fields: set[str] = set()
         traces: list[VariantExecutionTrace] = []
         total_retries = 0
         grounded_candidates: list[dict[str, Any]] = []
+        llm_call_records: list[LLMCallRecord] = []
 
         # Step 3: Process each variant with AST extraction & LSH re-prompting loop
         for idx, variant in enumerate(variants):
-            raw_sql = initial_sqls[idx] if idx < len(initial_sqls) else ""
-            test_sql = self.ast_parser.clean_sql(str(raw_sql))
+            raw_sql = str(initial_sqls[idx]) if idx < len(initial_sqls) else ""
+            init_eng_trace = init_engine_traces[idx] if idx < len(init_engine_traces) else {}
+            if trace_enabled:
+                llm_call_records.append(
+                    make_llm_call_record(
+                        stage="schema_linking_init",
+                        prompt=variant.formatted_prompt,
+                        raw_output=raw_sql,
+                        engine_trace=init_eng_trace,
+                        metadata={
+                            "question_id": question_id,
+                            "case_name": variant.case_name,
+                            "profile_type": variant.profile_type,
+                        },
+                    )
+                )
+            test_sql = self.ast_parser.clean_sql(raw_sql)
 
             initial_sql_saved = test_sql
             retry_count = 0
             current_schema = set(variant.schema_cols)
             variant_mismatches: list[tuple[str, list[str]]] = []
+            repair_turns: list[dict[str, Any]] = []
 
             while retry_count <= retries_limit:
                 # b. AST parsing to extract fields and literals
@@ -432,17 +490,67 @@ class TaskAlignedSchemaLinker:
                     )
                     if isinstance(revised_res, list):
                         revised_res = revised_res[0]
+                    raw_revised = str(revised_res)
+                    rev_traces = extract_llm_engine_call_traces(self.llm_engine)
+                    rev_eng_trace = rev_traces[0] if rev_traces else {}
 
-                    test_sql = self.ast_parser.clean_sql(str(revised_res))
+                    test_sql = self.ast_parser.clean_sql(raw_revised)
 
                     retry_count += 1
                     total_retries += 1
+
+                    if trace_enabled:
+                        rev_metrics = {
+                            "prompt_tokens": rev_eng_trace.get("prompt_tokens"),
+                            "completion_tokens": rev_eng_trace.get("completion_tokens"),
+                            "finish_reason": rev_eng_trace.get("finish_reason"),
+                            "stop_reason": rev_eng_trace.get("stop_reason"),
+                            "latency_ms": rev_eng_trace.get("latency_ms"),
+                            "sampling_params": rev_eng_trace.get("sampling_params") or {},
+                        }
+                        repair_turns.append({
+                            "retry_idx": retry_count,
+                            "mismatches": missing_lits,
+                            "added_columns": sorted(lit_fields_q),
+                            "reprompt_guidance": reprompt_guidance,
+                            "revised_prompt": revised_prompt,
+                            "raw_output": raw_revised,
+                            "cleaned_sql": test_sql,
+                            "llm_metrics": rev_metrics,
+                        })
+                        llm_call_records.append(
+                            make_llm_call_record(
+                                stage="schema_linking_repair",
+                                prompt=revised_prompt,
+                                raw_output=raw_revised,
+                                engine_trace=rev_eng_trace,
+                                metadata={
+                                    "question_id": question_id,
+                                    "case_name": variant.case_name,
+                                    "profile_type": variant.profile_type,
+                                    "retry_idx": retry_count,
+                                },
+                            )
+                        )
                 else:
                     # No mismatches or max retries reached
                     break
 
             # f. Union harvested fields from this variant
             linked_fields.update(fields_q)
+
+            init_metrics = (
+                {
+                    "prompt_tokens": init_eng_trace.get("prompt_tokens"),
+                    "completion_tokens": init_eng_trace.get("completion_tokens"),
+                    "finish_reason": init_eng_trace.get("finish_reason"),
+                    "stop_reason": init_eng_trace.get("stop_reason"),
+                    "latency_ms": init_eng_trace.get("latency_ms"),
+                    "sampling_params": init_eng_trace.get("sampling_params") or {},
+                }
+                if trace_enabled
+                else {}
+            )
 
             traces.append(
                 VariantExecutionTrace(
@@ -454,6 +562,12 @@ class TaskAlignedSchemaLinker:
                     fields_harvested=fields_q,
                     literals_extracted=lits_q,
                     mismatches_detected=variant_mismatches,
+                    formatted_prompt=variant.formatted_prompt if trace_enabled else "",
+                    raw_initial_output=raw_sql if trace_enabled else "",
+                    sme_context_used=variant.sme_context if trace_enabled else "",
+                    rulebook_context_used=variant.rulebook_context if trace_enabled else "",
+                    initial_llm_metrics=init_metrics,
+                    repair_turns=repair_turns,
                 )
             )
 
@@ -488,6 +602,18 @@ class TaskAlignedSchemaLinker:
 
         final_grounded = self.deduplicate_grounded_literals(grounded_candidates)
 
+        usage_summary = {
+            "llm_calls": len(llm_call_records),
+            "total_prompt_tokens": sum(
+                r.prompt_tokens for r in llm_call_records if isinstance(r.prompt_tokens, int)
+            ),
+            "total_completion_tokens": sum(
+                r.completion_tokens for r in llm_call_records if isinstance(r.completion_tokens, int)
+            ),
+            "total_latency_ms": round(sum(float(r.latency_ms or 0.0) for r in llm_call_records), 3),
+            "truncated_calls": sum(1 for r in llm_call_records if r.finish_reason == "length"),
+        }
+
         result = SchemaLinkingResult(
             final_linked_schema=quoted_schema,
             canonical_schema=canonical_schema,
@@ -496,6 +622,7 @@ class TaskAlignedSchemaLinker:
             all_harvested_fields=linked_fields,
             preserved_keys=preserved,
             grounded_literals=final_grounded,
+            llm_usage_summary=usage_summary,
         )
 
         # Automatically persist schema_linking_result.json to cache_dir if provided
@@ -503,7 +630,11 @@ class TaskAlignedSchemaLinker:
             c_dir = Path(cache_dir)
             try:
                 c_dir.mkdir(parents=True, exist_ok=True)
-                out_dict = result.to_dict(question=question, question_id=question_id)
+                out_dict = result.to_dict(
+                    question=question,
+                    question_id=question_id,
+                    include_detailed_traces=trace_enabled,
+                )
                 res_file = c_dir / "schema_linking_result.json"
                 with open(res_file, "w", encoding="utf-8") as f:
                     json.dump(out_dict, f, ensure_ascii=False, indent=2)
@@ -514,6 +645,9 @@ class TaskAlignedSchemaLinker:
                         json.dump(out_dict, f, ensure_ascii=False, indent=2)
             except (OSError, TypeError, ValueError) as exc:
                 logger.warning("Failed to save schema_linking_result.json in %s: %s", c_dir, exc)
+
+            if trace_enabled and llm_call_records:
+                append_llm_calls(c_dir, llm_call_records)
 
         return result
 

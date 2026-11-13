@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from zaic_2026_4.common.trace_logger import write_json_trace
 from zaic_2026_4.constants import (
     DEFAULT_CANDIDATE_SEEDS,
     DEFAULT_EXECUTION_MAX_RETRIES,
@@ -69,6 +70,7 @@ class SubmissionPipeline:
         max_retries: int | None = None,
         rulebook_mode: str = "hybrid",
         cases: str | list[str] | set[str] | None = "abcde",
+        trace_enabled: bool = True,
     ) -> None:
         """Initialize submission pipeline.
 
@@ -104,6 +106,7 @@ class SubmissionPipeline:
         self.max_retries = self.sql_max_retries
         self.rulebook_mode = rulebook_mode
         self.cases = cases
+        self.trace_enabled = trace_enabled
 
         try:
             self.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,6 +144,7 @@ class SubmissionPipeline:
         max_retries: int | None = None,
         rulebook_mode: str = "hybrid",
         cases: str | list[str] | set[str] | None = "abcde",
+        trace_enabled: bool = True,
     ) -> tuple[SubmissionPipeline, Path]:
         """Create a SubmissionPipeline from a dataset split.
 
@@ -164,6 +168,7 @@ class SubmissionPipeline:
             max_retries=max_retries,
             rulebook_mode=rulebook_mode,
             cases=cases,
+            trace_enabled=trace_enabled,
         )
         return pipeline, paths["questions_path"]
 
@@ -195,6 +200,7 @@ class SubmissionPipeline:
             vector_model_path=self.vector_model_path,
             cache_dir=biz_cache_dir,
             calendar_path=self.calendar_path,
+            trace_enabled=self.trace_enabled,
         )
 
         pipeline_res = orchestrator.run_pipeline()
@@ -252,6 +258,7 @@ class SubmissionPipeline:
 
     def _process_question_impl(self, item: QuestionItem, t0: float) -> QuestionSubmission:
         """Internal implementation of question processing."""
+        t_biz0 = time.perf_counter()
         try:
             biz_ctx = self.get_or_load_business(item.business_id)
         except Exception as exc:  # noqa: BLE001
@@ -263,8 +270,12 @@ class SubmissionPipeline:
                 voting_status="abstain_fallback",
                 selection_reason=f"abstain: Failed to load business data ({exc})",
             )
+        t_biz_sec = time.perf_counter() - t_biz0
 
         # 1. Run Task-Aligned Schema Linking
+        t_sl0 = time.perf_counter()
+        schema_linking_trace: dict[str, Any] = {}
+        sl_usage: dict[str, Any] = {}
         try:
             linking_res = biz_ctx.linker.link_schema(
                 question=item.question,
@@ -275,13 +286,24 @@ class SubmissionPipeline:
                 cases=self.cases,
                 cache_dir=biz_ctx.cache_dir,
                 question_id=item.id,
+                trace_enabled=self.trace_enabled,
             )
             reduced_schema = linking_res.final_linked_schema
             grounded_literals = linking_res.grounded_literals
+            sl_usage = dict(linking_res.llm_usage_summary or {})
+            if self.trace_enabled:
+                schema_linking_trace = linking_res.to_dict(
+                    question=item.question,
+                    question_id=item.id,
+                    include_detailed_traces=True,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Schema linking error on %s: %s", item.id, exc)
             reduced_schema = set()
             grounded_literals = []
+            if self.trace_enabled:
+                schema_linking_trace = {"error": str(exc)}
+        t_sl_sec = time.perf_counter() - t_sl0
 
         # Fallback if reduced schema is empty: collect all columns from metadata
         if not reduced_schema:
@@ -289,6 +311,7 @@ class SubmissionPipeline:
             reduced_schema = {k for k in target_dict if "." in k}
 
         # 2. Candidate Diversity Generation (3 candidates with seeds & schema permutation)
+        t_cg0 = time.perf_counter()
         cand_gen = CandidateGenerator(
             llm_engine=self.llm_engine,
             seeds=self.seeds,
@@ -306,15 +329,20 @@ class SubmissionPipeline:
             vector_indexer=biz_ctx.vector_indexer,
             db_path=biz_ctx.db_path,
             grounded_literals=grounded_literals,
+            cache_dir=biz_ctx.cache_dir,
+            question_id=item.id,
+            trace_enabled=self.trace_enabled,
         )
+        t_cg_sec = time.perf_counter() - t_cg0
 
         # 3. Candidate Execution & Majority Voting
+        t_vt0 = time.perf_counter()
         biz_ctx.voting_executor.execute_candidates(candidates)
         winner, status, reason = biz_ctx.voting_executor.vote(candidates)
-
-        elapsed = time.perf_counter() - t0
+        t_vt_sec = time.perf_counter() - t_vt0
 
         # 4. Result Formatting
+        t_fmt0 = time.perf_counter()
         final_type = "abstain"
         final_ans = None
 
@@ -323,7 +351,7 @@ class SubmissionPipeline:
                 id=item.id,
                 type="abstain",
                 answer=None,
-                elapsed_seconds=elapsed,
+                elapsed_seconds=0.0,
                 candidates=candidates,
                 winning_candidate_id=None,
                 voting_status=status,
@@ -335,7 +363,7 @@ class SubmissionPipeline:
                 id=item.id,
                 type="unanswerable",
                 answer=None,
-                elapsed_seconds=elapsed,
+                elapsed_seconds=0.0,
                 candidates=candidates,
                 winning_candidate_id=winner.candidate_id,
                 voting_status=status,
@@ -346,7 +374,7 @@ class SubmissionPipeline:
                 id=item.id,
                 type="abstain",
                 answer=None,
-                elapsed_seconds=elapsed,
+                elapsed_seconds=0.0,
                 candidates=candidates,
                 winning_candidate_id=winner.candidate_id,
                 voting_status=status,
@@ -365,7 +393,7 @@ class SubmissionPipeline:
                 id=item.id,
                 type=ans_type,
                 answer=ans_val,
-                elapsed_seconds=elapsed,
+                elapsed_seconds=0.0,
                 candidates=candidates,
                 winning_candidate_id=winner.candidate_id,
                 voting_status=status,
@@ -375,10 +403,19 @@ class SubmissionPipeline:
         # Build diagnostic formatting_trace
         ev_cands = [c for c in candidates if c.execution_success and has_evidence(c.result_set)]
         sig_groups: dict[Any, int] = {}
-        for c in ev_cands:
+        candidate_signatures: list[dict[str, Any]] = []
+        for c in candidates:
             s = answer_signature(c)
-            if s is not None:
+            if c in ev_cands and s is not None:
                 sig_groups[s] = sig_groups.get(s, 0) + 1
+            candidate_signatures.append({
+                "candidate_id": c.candidate_id,
+                "seed": c.seed,
+                "predicted_type": c.predicted_type,
+                "execution_success": c.execution_success,
+                "has_evidence": has_evidence(c.result_set),
+                "answer_signature": list(s) if s is not None else None,
+            })
         cluster_sizes = sorted(sig_groups.values(), reverse=True)
 
         raw_val_preview = None
@@ -411,8 +448,55 @@ class SubmissionPipeline:
             "evidence_candidates": len(ev_cands),
             "cluster_sizes": cluster_sizes,
         }
+        t_fmt_sec = time.perf_counter() - t_fmt0
+        elapsed = time.perf_counter() - t0
+        submission.elapsed_seconds = elapsed
 
-        # 5. Flush diagnostic log to /result/logs/<id>.json
+        if self.trace_enabled:
+            cand_attempts = [att for c in candidates for att in c.attempts_history]
+            cand_calls = len(cand_attempts)
+            cand_ptok = sum(
+                a["prompt_tokens"] for a in cand_attempts if isinstance(a.get("prompt_tokens"), int)
+            )
+            cand_ctok = sum(
+                a["completion_tokens"] for a in cand_attempts if isinstance(a.get("completion_tokens"), int)
+            )
+            cand_lat = round(sum(float(a.get("latency_ms") or 0.0) for a in cand_attempts), 3)
+            cand_trunc = sum(1 for a in cand_attempts if a.get("finish_reason") == "length")
+
+            submission.schema_linking_trace = schema_linking_trace
+            submission.stage_timings_sec = {
+                "business_load": round(t_biz_sec, 4),
+                "schema_linking": round(t_sl_sec, 4),
+                "candidate_generation": round(t_cg_sec, 4),
+                "voting": round(t_vt_sec, 4),
+                "formatting": round(t_fmt_sec, 4),
+                "total": round(elapsed, 4),
+            }
+            submission.candidate_signatures = candidate_signatures
+            submission.llm_usage_summary = {
+                "schema_linking": sl_usage,
+                "candidate_generation": {
+                    "llm_calls": cand_calls,
+                    "total_prompt_tokens": cand_ptok,
+                    "total_completion_tokens": cand_ctok,
+                    "total_latency_ms": cand_lat,
+                    "truncated_calls": cand_trunc,
+                },
+                "total_llm_calls": int(sl_usage.get("llm_calls", 0)) + cand_calls,
+                "total_prompt_tokens": int(sl_usage.get("total_prompt_tokens", 0)) + cand_ptok,
+                "total_completion_tokens": int(sl_usage.get("total_completion_tokens", 0)) + cand_ctok,
+                "total_latency_ms": round(float(sl_usage.get("total_latency_ms", 0.0)) + cand_lat, 3),
+                "total_truncated_calls": int(sl_usage.get("truncated_calls", 0)) + cand_trunc,
+            }
+
+            if biz_ctx.cache_dir is not None:
+                write_json_trace(
+                    biz_ctx.cache_dir / f"question_trace_{item.id}.json",
+                    submission.to_full_cache_trace(item),
+                )
+
+        # 5. Flush diagnostic log to /result/logs/<id>.json (unchanged)
         log_file = self.logs_dir / f"{item.id}.json"
         try:
             with open(log_file, "w", encoding="utf-8") as f:
