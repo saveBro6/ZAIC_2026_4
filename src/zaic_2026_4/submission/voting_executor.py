@@ -71,6 +71,60 @@ def is_abstain_claim(cand: CandidateQuery) -> bool:
     return not cand.final_sql.strip() and cand.predicted_type == "abstain"
 
 
+# Warning codes that signal a mechanically suspicious query. A zero-like answer produced
+# by such a query is far more likely a filter typo than a real zero, so it must not be
+# submitted: abstaining scores 0, submitting a wrong zero scores -1.
+ZERO_SUSPICION_CODES: frozenset[str] = frozenset({
+    "LITERAL_NOT_IN_ENUM",
+    "DATE_FORMAT_MISMATCH",
+    "MONEY_SCALE_RISK",
+    "CURRENCY_SEPARATOR_MISMATCH",
+    "LITERAL_PARTIAL_MATCH",
+})
+
+
+def candidate_issue_codes(cand: CandidateQuery) -> set[str]:
+    """Issue codes recorded for the attempt that produced the candidate's SQL."""
+    attempts = getattr(cand, "attempts_history", None) or []
+    best_idx = getattr(cand, "best_attempt_idx", None)
+    issues: list[Any] = []
+    if isinstance(best_idx, int) and 0 <= best_idx < len(attempts):
+        issues = attempts[best_idx].get("issues") or []
+    if not issues:
+        issues = list(cand.construction_issues or [])
+    codes: set[str] = set()
+    for issue in issues:
+        # Attempt history serializes issues to dicts; live validation keeps objects.
+        if isinstance(issue, dict):
+            code = issue.get("code")
+        else:
+            code = getattr(issue, "code", None)
+        if code:
+            codes.add(str(code))
+        elif isinstance(issue, str) and issue:
+            codes.add(issue)
+    return codes
+
+
+def is_zero_like_answer(ans_type: str, ans_val: Any) -> bool:
+    """True when a formatted answer carries no usable positive evidence."""
+    if ans_val is None:
+        return True
+    if ans_type == "number":
+        try:
+            return float(ans_val) == 0.0
+        except (TypeError, ValueError):
+            return False
+    if ans_type == "percent":
+        try:
+            return float(ans_val) == 0.0
+        except (TypeError, ValueError):
+            return False
+    if ans_type == "string":
+        return str(ans_val).strip() in ("", "-", "0")
+    return False
+
+
 def has_evidence(res_set: set[tuple[Any, ...]] | frozenset[tuple[Any, ...]] | None) -> bool:
     """Check whether result set contains at least one non-None cell in at least one row."""
     if res_set is None or len(res_set) == 0:
@@ -166,11 +220,22 @@ class VotingExecutor:
         db_path: Path | str,
         timeout_seconds: float = DEFAULT_SQL_TIMEOUT_SECONDS,
         min_agreement: float = 0.5,
+        min_support: int = 2,
     ) -> None:
-        """Initialize VotingExecutor."""
+        """Initialize VotingExecutor.
+
+        Args:
+            db_path: SQLite database the candidates run against.
+            timeout_seconds: Per-query timeout.
+            min_agreement: Minimum share of *all* candidates that must agree before an
+                answer is submitted, so one surviving candidate cannot outvote two
+                candidates that failed for unrelated mechanical reasons.
+            min_support: Minimum absolute number of agreeing candidates.
+        """
         self.db_path = Path(db_path).resolve()
         self.timeout_seconds = timeout_seconds
         self.min_agreement = min_agreement
+        self.min_support = max(int(min_support), 1)
 
     def execute_query(
         self,
@@ -293,10 +358,12 @@ class VotingExecutor:
 
         # 3. Group candidates by canonical answer signature
         groups: dict[tuple[str, str], list[CandidateQuery]] = {}
+        signature_by_id: dict[int, tuple[str, str]] = {}
         for c in evidence_cands:
             sig = answer_signature(c)
             if sig is not None:
                 groups.setdefault(sig, []).append(c)
+                signature_by_id[c.candidate_id] = sig
 
         if not groups:
             reason = "insufficient_evidence: Executed candidate queries produced unformattable or empty answers."
@@ -312,14 +379,32 @@ class VotingExecutor:
         cluster_dist = "/".join(str(len(g)) for g in sorted_groups)
         cand_ids = [c.candidate_id for c in evidence_cands]
 
-        agreement_ratio = len(best_group) / len(evidence_cands)
+        # The denominator is every generated candidate, not only the ones that happen to
+        # have evidence: a query that failed to execute is still a contradicting vote.
+        agreement_ratio = len(best_group) / total_candidates
 
-        # 4. Strict agreement gate (> min_agreement)
-        if agreement_ratio > self.min_agreement:
+        # 4. Strict agreement gate (> min_agreement and enough absolute support)
+        if agreement_ratio > self.min_agreement and len(best_group) >= self.min_support:
             winner = best_group[0]
             agreeing_ids = [c.candidate_id for c in best_group]
             prefix = "unanimous" if len(best_group) == len(candidates) else "majority"
             status = f"{prefix}_{len(best_group)}_of_{len(candidates)}"
+
+            # Zero-suspicion rule: a zero answer backed by a query that already tripped a
+            # grounding warning is more likely a filter typo than a real zero.
+            suspicious = candidate_issue_codes(winner) & ZERO_SUSPICION_CODES
+            ans_type, ans_canon = signature_by_id.get(winner.candidate_id, ("", ""))
+            try:
+                ans_value = json.loads(ans_canon) if ans_canon else None
+            except (TypeError, ValueError):
+                ans_value = None
+            if suspicious and is_zero_like_answer(ans_type, ans_value):
+                reason = (
+                    f"abstain_zero_suspicion: Candidate {winner.candidate_id} produced a zero-like "
+                    f"answer while its query carries grounding warnings ({sorted(suspicious)})."
+                )
+                return None, "abstain_zero_suspicion", reason
+
             summary = summarize_result_set(winner.result_set)
             reason = (
                 f"majority: Candidate {winner.candidate_id} chosen as winning candidate because candidates {agreeing_ids} "
@@ -328,20 +413,32 @@ class VotingExecutor:
             return winner, status, reason
 
         # 5. Abstain on split / low agreement (EV <= 0)
+        if len(best_group) < self.min_support:
+            reason = (
+                f"abstain_insufficient_support: Only {len(best_group)} of {total_candidates} "
+                f"candidates agree on an answer (minimum support {self.min_support}); "
+                f"clusters: {cluster_dist}."
+            )
+            return None, "abstain_insufficient_support", reason
+
         reason = (
             f"abstain_low_agreement: Insufficient agreement ({cluster_dist}) "
-            f"among {len(evidence_cands)} evidence candidates {cand_ids}."
+            f"among {len(evidence_cands)} evidence candidates {cand_ids} "
+            f"out of {total_candidates} generated candidates."
         )
         return None, "abstain_low_agreement", reason
 
 
 __all__ = [
+    "ZERO_SUSPICION_CODES",
     "VotingExecutor",
     "answer_signature",
+    "candidate_issue_codes",
     "canonical_cell",
     "has_evidence",
     "is_abstain_claim",
     "is_unanswerable_claim",
+    "is_zero_like_answer",
     "normalize_cell",
     "summarize_result_set",
 ]

@@ -186,8 +186,12 @@ def test_few_shot_sql_examples_structure() -> None:
         assert set(parsed) == {"reasoning", "sql", "type"}
 
 
-def test_format_permuted_schema_xml_with_hint() -> None:
-    """Verify format_permuted_schema_xml includes llm_hint when present."""
+def test_format_permuted_schema_xml_with_factual_attributes() -> None:
+    """Verify the schema XML carries samples/enum attributes instead of a prose hint.
+
+    Factual column attributes stay in their own attributes so no description truncation
+    can cut an enumeration in half.
+    """
     from zaic_2026_4.submission.prompt_template import format_permuted_schema_xml
 
     metadata = {
@@ -207,8 +211,10 @@ def test_format_permuted_schema_xml_with_hint() -> None:
     assert '<table name="orders">' in xml_output
     assert 'type="CURRENCY"' in xml_output
     assert "Cột lưu giá tiền" in xml_output
-    assert "Hint: Formatted VND currency." in xml_output
-    assert "Hint: Vietnamese date (D/M/YYYY)." in xml_output
+    assert 'samples="10,000 | 20,000"' in xml_output
+    # The generic per-format llm_hint is no longer rendered: the canonical normalization
+    # rules and the factual attributes carry that guidance without duplication.
+    assert "Hint:" not in xml_output
 
 
 def test_build_sql_generation_prompt_vietnamese() -> None:

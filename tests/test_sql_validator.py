@@ -365,3 +365,219 @@ def test_parse_structured_sql_output() -> None:
     # Empty string
     sql, target_type, issues = parse_structured_sql_output("")
     assert any(i.code == "OUTPUT_EMPTY" for i in issues)
+
+
+MIXED_DATE_METADATA = {
+    "HoaDon.Ngày": {
+        "data_format": "DATE_MIXED",
+        "date_subtype": "EXCEL_SERIAL, SLASH_DATE",
+        "sample_values": ["01/03/2025", "45658"],
+        "null_count": 0,
+    },
+    "HoaDon.Tổng tiền": {
+        "data_format": "CURRENCY",
+        "sample_values": ["1,600", "2,000"],
+        "null_count": 0,
+    },
+    "HoaDon.Trạng thái": {
+        "data_format": "STRING",
+        "distinct_count": 3,
+        "top_10_samples": {"Đã giao": 10, "Đã hủy": 2, "Đang giao": 1},
+        "sample_values": ["Đã giao", "Đã hủy", "Đang giao"],
+        "null_count": 0,
+    },
+    "HoaDon.Mã hóa đơn": {
+        "data_format": "FIXED_CODE",
+        "sample_values": ["HD0001"],
+        "null_count": 0,
+    },
+}
+
+
+def test_mixed_date_column_with_single_branch_is_blocked() -> None:
+    """One SUBSTR for a mixed-format column silently drops the other representations."""
+    sql = (
+        'SELECT SUM(CAST(REPLACE(T1."Tổng tiền", \',\', \'\') AS INTEGER)) FROM "HoaDon" AS T1 '
+        "WHERE (SUBSTR(T1.\"Ngày\",7,4)||'-'||SUBSTR(T1.\"Ngày\",4,2)||'-'||SUBSTR(T1.\"Ngày\",1,2)) "
+        "BETWEEN '2025-01-01' AND '2025-01-31';"
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=MIXED_DATE_METADATA)
+    partial = [i for i in res.issues if "một nhánh" in str(i)]
+    assert len(partial) == 1
+    assert not res.is_valid
+    # The hint is derived from the profiled formats, never a hardcoded column layout.
+    assert "Excel serial" in partial[0].hint
+    assert 'SUBSTR("cột"' not in partial[0].hint
+
+
+def test_mixed_date_column_with_all_branches_passes() -> None:
+    """Handling every profiled representation satisfies the format-coverage rule."""
+    sql = (
+        'SELECT SUM(CAST(REPLACE(T1."Tổng tiền", \',\', \'\') AS INTEGER)) FROM "HoaDon" AS T1 WHERE '
+        "CASE WHEN T1.\"Ngày\" GLOB '[0-9][0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9]' "
+        "THEN SUBSTR(T1.\"Ngày\",7,4)||'-'||SUBSTR(T1.\"Ngày\",4,2)||'-'||SUBSTR(T1.\"Ngày\",1,2) "
+        "WHEN T1.\"Ngày\" GLOB '[0-9][0-9][0-9][0-9][0-9]' "
+        "THEN date('1899-12-30','+'||T1.\"Ngày\"||' days') END BETWEEN '2025-01-01' AND '2025-01-31';"
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=MIXED_DATE_METADATA)
+    assert res.is_valid, res.issue_texts
+
+
+def test_currency_guard_and_projection_do_not_raise_false_positives() -> None:
+    """A currency column only used in a NOT NULL guard or projection needs no cleaning."""
+    sql = (
+        'SELECT T1."Tổng tiền" FROM "HoaDon" AS T1 '
+        'WHERE T1."Tổng tiền" IS NOT NULL ORDER BY T1."Tổng tiền" ASC LIMIT 1;'
+    )
+    res = SQLValidator.validate(sql, target_type="string", metadata=MIXED_DATE_METADATA)
+    assert "CURRENCY_SEPARATOR_MISMATCH" not in res.codes()
+    assert "MONEY_SCALE_RISK" not in res.codes()
+    assert res.is_valid, res.issue_texts
+
+
+def test_currency_measure_without_cleaning_is_blocking() -> None:
+    """Summing a thousands-separated string without REPLACE truncates the value."""
+    sql = 'SELECT SUM(T1."Tổng tiền") FROM "HoaDon" AS T1;'
+    res = SQLValidator.validate(sql, target_type="number", metadata=MIXED_DATE_METADATA)
+    assert "CURRENCY_SEPARATOR_MISMATCH" in res.codes()
+    assert not res.is_valid
+
+
+def test_currency_cleaned_once_is_enough() -> None:
+    """Cleaning the column in one arithmetic branch is accepted for the whole column."""
+    sql = (
+        'SELECT SUM(CAST(REPLACE(T1."Tổng tiền", \',\', \'\') AS INTEGER)) FROM "HoaDon" AS T1 '
+        'WHERE T1."Tổng tiền" IS NOT NULL;'
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=MIXED_DATE_METADATA)
+    assert "CURRENCY_SEPARATOR_MISMATCH" not in res.codes()
+
+
+def test_date_literal_placeholder_is_blocked() -> None:
+    """Template placeholders must never reach execution."""
+    sql = (
+        'SELECT COUNT(*) FROM "HoaDon" AS T1 '
+        "WHERE T1.\"Ngày\" BETWEEN 'YYYY-MM-01' AND 'YYYY-MM-31';"
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=MIXED_DATE_METADATA)
+    assert "DATE_LITERAL_PLACEHOLDER" in res.codes()
+    assert not res.is_valid
+
+
+def test_aggregate_in_where_is_blocked_but_having_is_allowed() -> None:
+    """An aggregate in WHERE is a structural bug; the same aggregate in HAVING is legal."""
+    bad = (
+        'SELECT T1."Trạng thái" FROM "HoaDon" AS T1 '
+        'WHERE SUM(CAST(REPLACE(T1."Tổng tiền", \',\', \'\') AS INTEGER)) > 100;'
+    )
+    res_bad = SQLValidator.validate(bad, target_type="table", metadata=MIXED_DATE_METADATA)
+    assert "AGGREGATE_IN_PREDICATE" in res_bad.codes()
+
+    good = (
+        'SELECT T1."Trạng thái" FROM "HoaDon" AS T1 GROUP BY T1."Trạng thái" '
+        'HAVING COUNT(1) > 5;'
+    )
+    res_good = SQLValidator.validate(good, target_type="table", metadata=MIXED_DATE_METADATA)
+    assert "AGGREGATE_IN_PREDICATE" not in res_good.codes()
+
+
+def test_key_column_compared_to_date_is_blocked() -> None:
+    """An identifier compared to a date means the wrong column was used."""
+    sql = 'SELECT COUNT(*) FROM "HoaDon" AS T1 WHERE T1."Mã hóa đơn" >= \'2025-01-01\';'
+    res = SQLValidator.validate(sql, target_type="number", metadata=MIXED_DATE_METADATA)
+    assert "KEY_COMPARED_TO_DATE" in res.codes()
+
+
+def test_literal_not_in_enum_blocks_aggregates_only() -> None:
+    """A non-existent status value silently zeroes an aggregate, so it must block."""
+    sql = (
+        'SELECT SUM(CAST(REPLACE(T1."Tổng tiền", \',\', \'\') AS INTEGER)) FROM "HoaDon" AS T1 '
+        "WHERE T1.\"Trạng thái\" = 'khong ton tai';"
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=MIXED_DATE_METADATA)
+    codes = {i.code: i for i in res.issues if hasattr(i, "code")}
+    assert "LITERAL_NOT_IN_ENUM" in codes
+    assert codes["LITERAL_NOT_IN_ENUM"].severity == "blocking"
+
+
+def test_mixed_date_or_disjuncts_are_accepted() -> None:
+    """OR-ed branches cover several representations and must not be blocked."""
+    sql = (
+        'SELECT SUM(CAST(REPLACE(T1."Tổng tiền", \',\', \'\') AS INTEGER)) FROM "HoaDon" AS T1 WHERE '
+        "(SUBSTR(T1.\"Ngày\",7,4)||'-'||SUBSTR(T1.\"Ngày\",4,2)||'-'||SUBSTR(T1.\"Ngày\",1,2)) "
+        "BETWEEN '2025-01-01' AND '2025-01-31' OR "
+        "date('1899-12-30','+'||T1.\"Ngày\"||' days') BETWEEN '2025-01-01' AND '2025-01-31';"
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=MIXED_DATE_METADATA)
+    assert res.is_valid, res.issue_texts
+
+
+def test_mixed_date_column_wrapped_in_cast_is_still_blocked() -> None:
+    """CAST is not a second normalization branch: it must not excuse a single SUBSTR."""
+    sql = (
+        'SELECT SUM(CAST(REPLACE(T1."Tổng tiền", \',\', \'\') AS INTEGER)) FROM "HoaDon" AS T1 WHERE '
+        'CAST(SUBSTR(T1."Ngày", 7, 4) AS INTEGER) = 2025;'
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=MIXED_DATE_METADATA)
+    assert not res.is_valid
+    assert "DATE_FORMAT_MISMATCH" in res.codes()
+
+
+def test_aliased_column_resolves_its_profile() -> None:
+    """A table alias must still find the profiled column, even with duplicate names."""
+    metadata = {
+        **MIXED_DATE_METADATA,
+        "KhachHang.Ngày": {
+            "data_format": "ISO_DATE",
+            "sample_values": ["2025-01-05"],
+            "null_count": 0,
+        },
+    }
+    sql = (
+        'SELECT COUNT(*) FROM "HoaDon" AS T1 JOIN "KhachHang" AS T2 ON T1."Mã hóa đơn" = T2."Mã hóa đơn" '
+        "WHERE SUBSTR(T1.\"Ngày\",7,4)||'-'||SUBSTR(T1.\"Ngày\",4,2)||'-'||SUBSTR(T1.\"Ngày\",1,2) "
+        "BETWEEN '2025-01-01' AND '2025-01-31';"
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=metadata)
+    # The alias T1 resolves to HoaDon, whose column is DATE_MIXED and only partly handled.
+    assert not res.is_valid
+    assert "DATE_FORMAT_MISMATCH" in res.codes()
+
+
+def test_qualifier_cannot_borrow_another_table_profile() -> None:
+    """The alias decides which profile applies; the sibling table must not lend its own."""
+    metadata = {
+        **MIXED_DATE_METADATA,
+        "KhachHang.Ngày": {
+            "data_format": "ISO_DATE",
+            "sample_values": ["2025-01-05"],
+            "null_count": 0,
+        },
+    }
+    sql = (
+        'SELECT COUNT(*) FROM "HoaDon" AS T1 JOIN "KhachHang" AS T2 ON T1."Mã hóa đơn" = T2."Mã hóa đơn" '
+        'WHERE T2."Ngày" BETWEEN \'2025-01-01\' AND \'2025-01-31\';'
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=metadata)
+    # T2 is ISO_DATE, so a plain ISO range comparison is correct here.
+    assert "DATE_FORMAT_MISMATCH" not in res.codes()
+
+
+def test_unrelated_branch_does_not_excuse_missing_coverage() -> None:
+    """A parser applied to a different column must not count as format coverage."""
+    metadata = {
+        **MIXED_DATE_METADATA,
+        "HoaDon.Ngày giao": {
+            "data_format": "ISO_DATE",
+            "sample_values": ["2025-01-05"],
+            "null_count": 0,
+        },
+    }
+    sql = (
+        'SELECT SUM(CAST(REPLACE(T1."Tổng tiền", \',\', \'\') AS INTEGER)) FROM "HoaDon" AS T1 WHERE '
+        "(SUBSTR(T1.\"Ngày\",7,4)||'-'||SUBSTR(T1.\"Ngày\",4,2)||'-'||SUBSTR(T1.\"Ngày\",1,2)) "
+        "BETWEEN '2025-01-01' AND '2025-01-31' AND date(T1.\"Ngày giao\") IS NOT NULL;"
+    )
+    res = SQLValidator.validate(sql, target_type="number", metadata=metadata)
+    assert not res.is_valid
+    assert "DATE_FORMAT_MISMATCH" in res.codes()

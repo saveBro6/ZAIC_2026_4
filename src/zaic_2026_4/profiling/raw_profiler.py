@@ -33,6 +33,10 @@ from zaic_2026_4.constants import (
     VND_SYMBOL_REGEX,
     VND_TEXT_REGEX,
 )
+from zaic_2026_4.ingestion.canonical import (
+    canonical_base_of,
+    is_side_table,
+)
 
 
 class ColumnProfile(TypedDict):
@@ -178,11 +182,21 @@ class RawDatabaseProfiler:
 
         for name, typ, sql in entities:
             if typ == "view" and sql:
+                if canonical_base_of(name) is not None:
+                    # Canonical views are mirrors of one base table plus a side table, never
+                    # a consolidation of partitions: treating them as unified views would
+                    # hide the base table from profiling entirely.
+                    view_info[name] = []
+                    continue
                 matches = VIEW_FROM_REGEX.findall(sql)
                 sources = []
                 for m in matches:
                     matched_name = m[0] or m[1] or m[2] or m[3]
-                    if matched_name and matched_name in table_names:
+                    if (
+                        matched_name
+                        and matched_name in table_names
+                        and not is_side_table(matched_name)
+                    ):
                         sources.append(matched_name)
                 view_info[name] = sources
 
@@ -197,6 +211,11 @@ class RawDatabaseProfiler:
         targets_to_profile: list[tuple[str, str, bool, list[str]]] = []
         has_calendar_entity = False
         for name, typ, _ in entities:
+            # Canonical side tables only store derived ``_date``/``_amount``/``_status``
+            # values; they are an implementation detail of the canonical views and must
+            # never be offered to the model as business entities.
+            if is_side_table(name):
+                continue
             if typ == "view":
                 if not self.include_views:
                     continue
@@ -292,7 +311,15 @@ class RawDatabaseProfiler:
         is_view = entity_type == "view"
 
         note = None
-        if is_unified and sources:
+        canonical_base = canonical_base_of(entity_name)
+        if canonical_base is not None:
+            note = (
+                f"Canonical normalized VIEW of table '{canonical_base}'. It exposes the same "
+                "columns plus derived '_date' (ISO YYYY-MM-DD), '_amount' (clean numeric money) "
+                "and '_status' (rulebook status family). Prefer this view whenever the question "
+                "needs a date, a money total or an order-status filter."
+            )
+        elif is_unified and sources:
             note = (
                 f"Unified VIEW consolidating {len(sources)} partition tables: "
                 f"{', '.join(sources[:5])}{'...' if len(sources) > 5 else ''}. "
@@ -926,6 +953,15 @@ class RawDatabaseProfiler:
                     t1 = k1.split(".", 1)[0]
                     t2 = k2.split(".", 1)[0]
                     if t1 == t2:
+                        continue
+                    # A canonical view mirrors its base table column for column, so their
+                    # perfect resemblance is an artifact, not a join.
+                    base_of_1 = canonical_base_of(t1)
+                    base_of_2 = canonical_base_of(t2)
+                    is_canonical_pair = (
+                        base_of_1 == t2 or base_of_2 == t1 or base_of_1 == base_of_2
+                    ) and (base_of_1 is not None or base_of_2 is not None)
+                    if is_canonical_pair:
                         continue
 
                 score = float(minhashes[k1].jaccard(minhashes[k2]))

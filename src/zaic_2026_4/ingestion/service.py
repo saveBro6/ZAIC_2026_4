@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -97,7 +98,8 @@ def ingest_business(
     output_path = target_dir / f"{business_id}.db"
 
     # Extract all tabular data preserving raw types and schemas
-    tables = discover_and_extract_business(biz_path)
+    group_fill_reports: dict[str, Any] = {}
+    tables = discover_and_extract_business(biz_path, group_fill_reports=group_fill_reports)
 
     # Static competition structure: <split>/data/<biz_id> -> <split>/calendar.csv
     cal_file = (
@@ -111,8 +113,29 @@ def ingest_business(
             tables["calendar"] = df
             break
 
-    # Persist tables to SQLite with view generation
-    write_tables_to_sqlite(tables, output_path, create_views=create_views)
+    # Persist tables to SQLite with unified and canonical view generation
+    canonical_reports: dict[str, Any] = {}
+    write_tables_to_sqlite(
+        tables,
+        output_path,
+        create_views=create_views,
+        create_canonical_views=create_views,
+        canonical_reports=canonical_reports,
+    )
+
+    report = {
+        "business_id": business_id,
+        "grouped_row_fill": group_fill_reports,
+        "canonical_specs": canonical_reports.get("specs", {}),
+        "canonical_detections": canonical_reports.get("detections", {}),
+    }
+    report_path = output_path.parent / f"{business_id}.ingestion.json"
+    try:
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
 
     return output_path
 

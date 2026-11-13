@@ -1,10 +1,12 @@
 """Raw tabular data extractors with zero pattern mutations."""
 
-from pathlib import Path
 import sqlite3
+from pathlib import Path
+
 import fastexcel
 import polars as pl
 
+from zaic_2026_4.ingestion.forward_fill import forward_fill_grouped_rows
 from zaic_2026_4.ingestion.header_detector import detect_header_row
 
 
@@ -124,8 +126,22 @@ def extract_sqlite(path: Path | str) -> dict[str, pl.DataFrame]:
     return tables
 
 
-def discover_and_extract_business(business_dir: Path) -> dict[str, pl.DataFrame]:
-    """Discover and extract all tabular files in a business folder."""
+def discover_and_extract_business(
+    business_dir: Path,
+    apply_grouped_row_rule: bool = True,
+    group_fill_reports: dict[str, dict] | None = None,
+) -> dict[str, pl.DataFrame]:
+    """Discover and extract all tabular files in a business folder.
+
+    Args:
+        business_dir: Business data directory.
+        apply_grouped_row_rule: Apply the rulebook grouped-row rule (identifier written
+            once per group, blanks on the following detail rows) to every extracted table.
+        group_fill_reports: Optional sink filled with per-table fill detail for tracing.
+
+    Returns:
+        Mapping of table name to extracted DataFrame.
+    """
     biz_dir = Path(business_dir)
     if not biz_dir.is_dir():
         raise NotADirectoryError(f"Business directory not found: {biz_dir}")
@@ -151,6 +167,10 @@ def discover_and_extract_business(business_dir: Path) -> dict[str, pl.DataFrame]
             while final_name in all_tables:
                 final_name = f"{tbl_name}_{counter}"
                 counter += 1
+            if apply_grouped_row_rule:
+                df, fill_report = forward_fill_grouped_rows(df)
+                if group_fill_reports is not None and fill_report.get("applied"):
+                    group_fill_reports[final_name] = fill_report
             all_tables[final_name] = df
 
     return all_tables

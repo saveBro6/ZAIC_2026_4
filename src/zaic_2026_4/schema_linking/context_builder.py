@@ -20,7 +20,10 @@ from zaic_2026_4.common.query_intent import (
     format_intent_hint_xml,
 )
 from zaic_2026_4.common.temporal_resolver import format_temporal_anchor_xml
-from zaic_2026_4.common.xml_sanitizer import format_schema_table_elements
+from zaic_2026_4.common.xml_sanitizer import (
+    build_column_attributes,
+    format_schema_table_elements,
+)
 from zaic_2026_4.constants import FEW_SHOT_SQL_EXAMPLES
 
 
@@ -207,11 +210,13 @@ class SchemaContextBuilder:
                 # maximal_profile or full_profile
                 desc = col_meta.get("maximal_profile", "")
 
-            table_groups.setdefault(tbl, []).append({
+            payload: dict[str, Any] = {
                 "col_name": col,
                 "data_format": data_format,
                 "description": desc,
-            })
+            }
+            payload.update(build_column_attributes(col_meta))
+            table_groups.setdefault(tbl, []).append(payload)
 
         lines = ["<database_schema>"]
         for tbl_name, cols in sorted(table_groups.items()):

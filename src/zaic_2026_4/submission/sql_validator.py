@@ -282,6 +282,179 @@ def _is_date_normalization_node(node: exp.Expression) -> bool:
     return False
 
 
+MIXED_DATE_FORMATS: frozenset[str] = frozenset({"DATE_MIXED", "EXCEL_SERIAL"})
+
+DATE_HINT_BY_FORMAT: dict[str, str] = {
+    "SLASH_DATE": "(SUBSTR(col, 7, 4) || '-' || SUBSTR(col, 4, 2) || '-' || SUBSTR(col, 1, 2)) cho dd/mm/yyyy",
+    "SLASH_DATE_SHORT": "chuẩn hóa dd/mm/yy (năm 2 chữ số) trước khi so sánh",
+    "VN_DATE_ABBR": "parse dạng 'd thg m yyyy' (REPLACE ' thg ' thành '/') trước khi so sánh",
+    "EXCEL_SERIAL": "date('1899-12-30', '+' || CAST(col AS INTEGER) || ' days') cho Excel serial",
+    "ISO_DATE": "giữ nguyên chuỗi ISO YYYY-MM-DD",
+}
+
+
+def _date_normalization_hint(col_name: str, col_meta: dict[str, Any]) -> str:
+    """Build a normalization hint from the profiled formats of this very column.
+
+    The hint is data-derived: it lists the representations actually observed in the
+    column instead of assuming one hardcoded layout.
+    """
+    canonical = col_meta.get("canonical_view")
+    canonical_date = col_meta.get("canonical_date_column")
+    if canonical and canonical_date:
+        return (
+            f"Dùng trực tiếp cột chuẩn hóa \"{canonical}\".\"{canonical_date}\" "
+            "thay vì tự parse cột gốc."
+        )
+    data_format = str(col_meta.get("data_format", "")).upper()
+    if data_format in MIXED_DATE_FORMATS:
+        formats = str(col_meta.get("date_subtype") or "").split(", ")
+        options = [DATE_HINT_BY_FORMAT[f] for f in formats if f in DATE_HINT_BY_FORMAT]
+        detail = "; ".join(options) if options else "chuẩn hóa từng biểu diễn đã profile"
+        return (
+            f"Cột \"{col_name}\" chứa nhiều biểu diễn ngày ({col_meta.get('date_subtype') or 'mixed'}); "
+            f"phải xử lý đủ mọi nhánh: {detail}."
+        )
+    single = DATE_HINT_BY_FORMAT.get(data_format)
+    if single:
+        return f"Chuẩn hóa cột ngày về ISO YYYY-MM-DD bằng {single} trước khi so sánh."
+    return "Chuẩn hóa cột ngày về ISO YYYY-MM-DD trước khi so sánh."
+
+
+DATE_PARSER_FUNCTIONS: frozenset[str] = frozenset({
+    "date",
+    "datetime",
+    "julianday",
+    "strftime",
+    "unixepoch",
+    "printf",
+})
+
+
+def _references_column(node: exp.Expression, col_name: str) -> bool:
+    """True when the subtree references the given column name."""
+    target = col_name.lower()
+    return any(column.name.lower() == target for column in node.find_all(exp.Column))
+
+
+def _date_normalization_strategies(col_node: exp.Column) -> set[str]:
+    """Collect the distinct normalization strategies applied to one date column.
+
+    Two strategies on the same column mean the query really covers more than one
+    representation, whether they are written as a CASE/WHEN chain or as OR-ed
+    disjuncts. Constructs that reference a *different* column are ignored so an
+    unrelated branch elsewhere in the WHERE cannot inflate the count.
+
+    A bare CAST is deliberately *not* counted: ``CAST(SUBSTR(col, 7, 4) AS INTEGER)``
+    only ever looks at one substring layout, so treating the cast as a second branch
+    would hide the very bug this check exists to catch.
+    """
+    col_name = col_node.name
+    strategies: set[str] = set()
+
+    current: exp.Expression | None = col_node
+    while current is not None and not isinstance(current, exp.Select):
+        if isinstance(current, (exp.Substring, exp.TimeToStr, exp.TsOrDsToDate)):
+            strategies.add("substr")
+        if isinstance(current, (exp.Like, exp.Glob)):
+            strategies.add("pattern")
+        if isinstance(current, exp.Anonymous):
+            name = current.name.lower()
+            if name == "glob":
+                strategies.add("pattern")
+            elif name == "substr":
+                strategies.add("substr")
+            elif name in DATE_PARSER_FUNCTIONS:
+                strategies.add(f"parser:{name}")
+            elif name == "replace":
+                for literal in current.find_all(exp.Literal):
+                    text = str(literal.this or "").lower()
+                    if "thg" in text or "thang" in text:
+                        strategies.add("textmonth")
+        current = current.parent
+
+    # Pattern tests (GLOB/LIKE) are usually siblings of the branch they guard, e.g.
+    # CASE WHEN col GLOB ... THEN SUBSTR(col, ...), so scan the enclosing predicate.
+    scope: exp.Expression | None = col_node
+    while scope is not None and not isinstance(scope, (exp.Where, exp.Having, exp.Select)):
+        scope = scope.parent
+    if scope is not None:
+        for pattern_node in scope.find_all(exp.Like, exp.Glob):
+            if _references_column(pattern_node, col_name):
+                strategies.add("pattern")
+        for anon in scope.find_all(exp.Anonymous):
+            name = anon.name.lower()
+            if name == "glob" and _references_column(anon, col_name):
+                strategies.add("pattern")
+            elif name in DATE_PARSER_FUNCTIONS and _references_column(anon, col_name):
+                strategies.add(f"parser:{name}")
+        for func in scope.find_all(exp.Date, exp.Datetime):
+            # sqlglot parses date('1899-12-30', '+N days') into a dedicated node.
+            if _references_column(func, col_name):
+                strategies.add("parser:date")
+    return strategies
+
+
+def build_alias_table_map(parsed: exp.Expression) -> dict[str, str]:
+    """Map every table alias (and bare table name) to its lowercase physical table name.
+
+    Profile metadata is keyed by physical table name, while the generated SQL qualifies
+    columns with whatever alias it introduced. Without this map a query such as
+    ``SELECT "Ngày" FROM "Đơn hàng" AS t1`` never finds the column profile, so every
+    metadata-driven check silently degrades to a no-op.
+    """
+    alias_map: dict[str, str] = {}
+    for table in parsed.find_all(exp.Table):
+        name = table.name
+        if not name:
+            continue
+        alias_map[name.lower()] = name.lower()
+        alias = table.alias
+        if alias:
+            alias_map[alias.lower()] = name.lower()
+    return alias_map
+
+
+def resolve_table_qualifier(qualifier: str, alias_map: dict[str, str] | None) -> str:
+    """Resolve a SQL qualifier to its physical table name, falling back to the input."""
+    key = qualifier.lower()
+    if alias_map:
+        return alias_map.get(key, key)
+    return key
+
+
+def lookup_column_meta(
+    col_node: exp.Column,
+    col_info: dict[str, dict[str, Any]],
+    alias_map: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Resolve the profile entry of a column node, honouring table aliases.
+
+    An unqualified reference is accepted only when the metadata is unambiguous: either a
+    single key carries that column name, or every table exposing it profiled the same
+    ``data_format``, in which case any of them describes the column faithfully.
+    """
+    col_name = col_node.name.lower()
+    qualifier = col_node.table
+    if qualifier:
+        table = resolve_table_qualifier(qualifier, alias_map)
+        direct = col_info.get(f"{table}.{col_name}")
+        if direct is not None:
+            return direct
+
+    candidates = [
+        value for key, value in col_info.items()
+        if key == col_name or key.endswith(f".{col_name}")
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        formats = {str(candidate.get("data_format", "")).upper() for candidate in candidates}
+        if len(formats) == 1:
+            return candidates[0]
+    return None
+
+
 def _get_column_samples(col_meta: dict[str, Any]) -> set[str]:
     """Aggregate known sample values from sample_values, top_10_samples, and raw_samples."""
     samples: set[str] = set()
@@ -507,6 +680,7 @@ class SQLValidator:
                     aggregate_aliases.add(s.alias.lower())
 
         tables_meta, col_info, all_cols_meta = _extract_schema_lookup(metadata)
+        alias_map = build_alias_table_map(parsed)
 
         for order_expr in parsed.find_all(exp.Order):
             for ordered in order_expr.find_all(exp.Ordered):
@@ -603,6 +777,19 @@ class SQLValidator:
                 for t, cols in tables_meta.items()
             }
 
+            flagged_partial_date_columns: set[tuple[str, str]] = set()
+            # A column may be normalized by several expressions (CASE branches, OR-ed
+            # disjuncts), so strategies are unioned per column before judging coverage.
+            # Keying by (table, column) keeps two different date columns that happen to
+            # share a name from lending each other the branches they were given.
+            date_strategies_by_column: dict[tuple[str, str], set[str]] = {}
+            for column_node in parsed.find_all(exp.Column):
+                strategy_key = (
+                    resolve_table_qualifier(column_node.table, alias_map) if column_node.table else "",
+                    column_node.name.lower(),
+                )
+                bucket = date_strategies_by_column.setdefault(strategy_key, set())
+                bucket.update(_date_normalization_strategies(column_node))
             try:
                 for scope in traverse_scope(parsed):
                     # Collect CTE names visible in this scope
@@ -746,18 +933,7 @@ class SQLValidator:
                 if not col_name or col_name == "*":
                     continue
 
-                qualifier = col_node.table
-                matched_meta: dict[str, Any] | None = None
-                if qualifier:
-                    matched_meta = col_info.get(f"{qualifier.lower()}.{col_name.lower()}")
-                if matched_meta is None:
-                    candidates = [
-                        v for k, v in col_info.items()
-                        if k.endswith(f".{col_name.lower()}") or k == col_name.lower()
-                    ]
-                    if len(candidates) == 1:
-                        matched_meta = candidates[0]
-
+                matched_meta = lookup_column_meta(col_node, col_info, alias_map)
                 if not matched_meta:
                     continue
 
@@ -796,11 +972,7 @@ class SQLValidator:
                                     ),
                                     severity="blocking",
                                     column=col_name,
-                                    hint=(
-                                        "Chuẩn hóa cột ngày về ISO YYYY-MM-DD bằng "
-                                        "(SUBSTR(\"cột\", 7, 4) || '-' || SUBSTR(\"cột\", 4, 2) || '-' || SUBSTR(\"cột\", 1, 2)) "
-                                        "trước khi so sánh khoảng."
-                                    ),
+                                    hint=_date_normalization_hint(col_name, matched_meta),
                                 )
                             )
                         else:
@@ -831,11 +1003,7 @@ class SQLValidator:
                                         ),
                                         severity="blocking",
                                         column=col_name,
-                                        hint=(
-                                            "Bắt buộc chuẩn hóa cột ngày về ISO YYYY-MM-DD bằng "
-                                            "(SUBSTR(\"cột\", 7, 4) || '-' || SUBSTR(\"cột\", 4, 2) || '-' || SUBSTR(\"cột\", 1, 2)) "
-                                            "trước khi so sánh."
-                                        ),
+                                        hint=_date_normalization_hint(col_name, matched_meta),
                                     )
                                 )
                             elif data_format == "ISO_DATE" and re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", lit):
@@ -848,6 +1016,38 @@ class SQLValidator:
                                         hint="Dùng định dạng literal 'YYYY-MM-DD' khi so sánh với ISO_DATE.",
                                     )
                                 )
+
+                # A2. Partial normalization: a mixed-format column handled by a single branch
+                # (the classic "one SUBSTR for every row" bug) silently nulls the other rows.
+                date_key = (
+                    resolve_table_qualifier(col_node.table, alias_map) if col_node.table else "",
+                    col_name.lower(),
+                )
+                covered_strategies = date_strategies_by_column.get(date_key)
+                if covered_strategies is None:
+                    # Unqualified references are registered under an empty table name; fall
+                    # back to that bucket so a plain WHERE col GLOB ... is still judged.
+                    covered_strategies = date_strategies_by_column.get(("", col_name.lower()), set())
+                if (
+                    is_date
+                    and data_format in MIXED_DATE_FORMATS
+                    and _is_date_normalization_node(col_node)
+                    and len(covered_strategies) < 2
+                    and date_key not in flagged_partial_date_columns
+                ):
+                    flagged_partial_date_columns.add(date_key)
+                    issues.append(
+                        ValidationIssue(
+                            code="DATE_FORMAT_MISMATCH",
+                            message=(
+                                f"Cột ngày '{col_name}' có nhiều biểu diễn ({data_format}) "
+                                "nhưng biểu thức chỉ xử lý một nhánh, các dòng khác sẽ bị loại khỏi kết quả."
+                            ),
+                            severity="blocking",
+                            column=col_name,
+                            hint=_date_normalization_hint(col_name, matched_meta),
+                        )
+                    )
 
                 # B. LITERAL_NOT_IN_ENUM (warning)
                 distinct_count = matched_meta.get("distinct_count")
@@ -863,13 +1063,16 @@ class SQLValidator:
                             literals = _extract_comparison_strings(parent)
                             for lit in literals:
                                 if _normalize_text(lit) not in norm_samples:
+                                    # A filter literal that cannot exist silently turns an
+                                    # aggregate into 0/empty, so it blocks aggregates.
+                                    aggregate_query = bool(list(parsed.find_all(exp.AggFunc)))
                                     issues.append(
                                         ValidationIssue(
                                             code="LITERAL_NOT_IN_ENUM",
                                             message=f"Giá trị so sánh '{lit}' không có trong tập giá trị mẫu của cột '{col_name}'.",
-                                            severity="warning",
+                                            severity="blocking" if aggregate_query else "warning",
                                             column=col_name,
-                                            hint=f"Các giá trị mẫu hợp lệ: {sorted(samples)[:5]}",
+                                            hint=f"Các giá trị hợp lệ (theo profile): {sorted(samples)[:8]}",
                                         )
                                     )
 
@@ -983,14 +1186,20 @@ class SQLValidator:
             )
         )
 
-        # 10. Currency separator checks and categorical exact-match hints.
+        # 10. Currency separator checks, structural mistakes and categorical hints.
         if col_info:
-            issues.extend(cls._check_currency_usage(parsed=parsed, col_info=col_info))
+            issues.extend(
+                cls._check_structural_rules(parsed=parsed, col_info=col_info, alias_map=alias_map)
+            )
+            issues.extend(
+                cls._check_currency_usage(parsed=parsed, col_info=col_info, alias_map=alias_map)
+            )
             issues.extend(
                 cls._check_categorical_exact_match(
                     parsed=parsed,
                     col_info=col_info,
                     strict=bool(getattr(intent, "wants_exact_match", False)),
+                    alias_map=alias_map,
                 )
             )
 
@@ -1115,70 +1324,182 @@ class SQLValidator:
         return issues
 
     @classmethod
+    def _check_structural_rules(
+        cls,
+        parsed: exp.Expression,
+        col_info: dict[str, dict[str, Any]],
+        alias_map: dict[str, str] | None = None,
+    ) -> list[ValidationIssue]:
+        """Catch structural mistakes that always change the answer.
+
+        * a date literal still carrying a template placeholder,
+        * an aggregate used inside a predicate (SQLite silently mis-evaluates it),
+        * an identifier/code column compared against a date.
+        """
+        issues: list[ValidationIssue] = []
+
+        for literal in parsed.find_all(exp.Literal):
+            if not literal.is_string:
+                continue
+            text = str(literal.this or "")
+            if re.search(r"YYYY|MM-DD|DD/MM|thg\s+M", text, re.IGNORECASE):
+                issues.append(
+                    ValidationIssue(
+                        code="DATE_LITERAL_PLACEHOLDER",
+                        message=f"Literal ngày '{text}' vẫn là mẫu giữ chỗ, không phải giá trị thật.",
+                        severity="blocking",
+                        hint="Thay bằng ngày cụ thể theo <temporal_anchor> (YYYY-MM-DD).",
+                    )
+                )
+
+        for agg_node in parsed.find_all(exp.AggFunc):
+            current: exp.Expression | None = agg_node.parent
+            inside_predicate = False
+            while current is not None and not isinstance(current, exp.Select):
+                # HAVING is the legal place for an aggregate condition; only WHERE is a bug.
+                if isinstance(current, exp.Where):
+                    inside_predicate = True
+                    break
+                current = current.parent
+            if inside_predicate:
+                issues.append(
+                    ValidationIssue(
+                        code="AGGREGATE_IN_PREDICATE",
+                        message=(
+                            "Hàm tổng hợp được dùng trực tiếp trong mệnh đề lọc, SQLite sẽ đánh giá sai "
+                            "phạm vi tổng hợp."
+                        ),
+                        severity="blocking",
+                        hint="Tính tổng hợp ở subquery/CTE rồi lọc ở truy vấn ngoài, hoặc dùng HAVING đúng cấp.",
+                    )
+                )
+                break
+
+        date_literal = re.compile(r"^\d{4}-\d{2}-\d{2}$|^\d{1,2}/\d{1,2}/\d{2,4}$")
+        for col_node in parsed.find_all(exp.Column):
+            matched_meta = cls._match_column_meta(col_node, col_info, alias_map)
+            if not matched_meta:
+                continue
+            data_format = str(matched_meta.get("data_format", "")).upper()
+            if data_format not in ("FIXED_CODE", "NUMERIC", "INTEGER", "REAL"):
+                continue
+            parent = col_node.parent
+            while parent is not None and not isinstance(parent, (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.In, exp.Between)):
+                parent = parent.parent
+            if parent is None:
+                continue
+            for literal in parent.find_all(exp.Literal):
+                if literal.is_string and date_literal.match(str(literal.this or "")):
+                    issues.append(
+                        ValidationIssue(
+                            code="KEY_COMPARED_TO_DATE",
+                            message=(
+                                f"Cột '{col_node.name}' là mã/số ({data_format}) nhưng bị so sánh với "
+                                f"ngày '{literal.this}'."
+                            ),
+                            severity="blocking",
+                            column=col_node.name,
+                            hint="Chỉ so sánh cột ngày với literal ngày; kiểm tra lại cột đang dùng.",
+                        )
+                    )
+                    break
+        return issues
+
+    @staticmethod
+    def _is_measure_context(col_node: exp.Column) -> bool:
+        """True when a column value actually feeds an arithmetic or aggregate computation.
+
+        A column that only appears in ``IS NULL`` / ``IS NOT NULL`` guards or in a plain
+        projection never needs its thousands separator stripped, so demanding REPLACE
+        there produced nothing but false positives.
+        """
+        current: exp.Expression | None = col_node.parent
+        while current is not None:
+            if isinstance(current, exp.Is):
+                return False
+            if isinstance(current, exp.Not) and isinstance(current.this, exp.Is):
+                return False
+            if isinstance(current, (exp.AggFunc, exp.Cast)):
+                return True
+            if isinstance(current, (exp.Add, exp.Sub, exp.Mul, exp.Div, exp.Mod, exp.Pow)):
+                return True
+            if isinstance(current, (exp.Select, exp.Where, exp.Having, exp.Order)):
+                return False
+            current = current.parent
+        return False
+
+    @classmethod
     def _check_currency_usage(
         cls,
         parsed: exp.Expression,
         col_info: dict[str, dict[str, Any]],
+        alias_map: dict[str, str] | None = None,
     ) -> list[ValidationIssue]:
-        """Detect currency cleaning expressions that keep the real thousands separator."""
+        """Detect currency cleaning expressions that keep the real thousands separator.
+
+        The check is grouped per (table qualifier, column) and only fires when no usage of
+        that column strips the separator, so cleaning the column once is enough even when
+        it is also referenced in guards or projections.
+        """
         issues: list[ValidationIssue] = []
+        grouped: dict[tuple[str, str], list[exp.Column]] = {}
         for col_node in parsed.find_all(exp.Column):
             col_name = col_node.name
             if not col_name or col_name == "*":
                 continue
-            matched_meta = cls._match_column_meta(col_node, col_info)
+            matched_meta = cls._match_column_meta(col_node, col_info, alias_map)
             if not matched_meta:
                 continue
             if str(matched_meta.get("data_format", "")).upper() != "CURRENCY":
                 continue
+            table_key = resolve_table_qualifier(col_node.table, alias_map) if col_node.table else ""
+            grouped.setdefault((table_key, col_name.lower()), []).append(col_node)
 
+        for nodes in grouped.values():
+            matched_meta = cls._match_column_meta(nodes[0], col_info, alias_map) or {}
+            col_name = nodes[0].name
             samples = _get_column_samples(matched_meta)
             thousand, decimal = infer_currency_separators(samples)
-            replaced = _collect_replaced_chars(col_node)
 
-            if replaced is None:
-                if thousand is not None:
-                    issues.append(
-                        ValidationIssue(
-                            code="CURRENCY_SEPARATOR_MISMATCH",
-                            message=(
-                                f"Cột tiền tệ '{col_name}' là chuỗi có dấu phân cách nghìn "
-                                f"'{thousand}' nhưng không được làm sạch trước khi tính toán."
-                            ),
-                            severity="warning",
-                            column=col_name,
-                            hint=(
-                                f"Bọc giá trị trong CAST(REPLACE(REPLACE(\"{col_name}\", '{thousand}', ''), "
-                                "'đ', '') AS INTEGER)."
-                            ),
-                        )
-                    )
+            measure_nodes = [node for node in nodes if cls._is_measure_context(node)]
+            if not measure_nodes:
                 continue
 
-            if thousand is not None and thousand not in replaced:
+            cleaned_anywhere = False
+            for node in measure_nodes:
+                replaced = _collect_replaced_chars(node)
+                if replaced is None:
+                    continue
+                if thousand is None or thousand in replaced:
+                    cleaned_anywhere = True
+                    if decimal is not None and decimal in replaced and thousand is not None:
+                        issues.append(
+                            ValidationIssue(
+                                code="MONEY_SCALE_RISK",
+                                message=(
+                                    f"Cột tiền tệ '{col_name}' có phần thập phân với dấu '{decimal}' "
+                                    "nhưng SQL xóa cả phần thập phân lẫn phần nghìn."
+                                ),
+                                severity="blocking",
+                                column=col_name,
+                                hint="Chỉ làm sạch dấu phân cách nghìn, xử lý phần thập phân riêng.",
+                            )
+                        )
+                    break
+
+            if cleaned_anywhere:
+                continue
+            if thousand is not None:
                 issues.append(
                     ValidationIssue(
                         code="CURRENCY_SEPARATOR_MISMATCH",
                         message=(
                             f"Cột tiền tệ '{col_name}' dùng '{thousand}' làm dấu phân cách nghìn "
-                            f"nhưng SQL không REPLACE ký tự này, nên giá trị sau CAST bị sai quy mô."
+                            "nhưng SQL không REPLACE ký tự này ở phép tính nào, nên giá trị sau CAST bị sai quy mô."
                         ),
                         severity="blocking",
                         column=col_name,
                         hint=f"Thêm REPLACE(\"{col_name}\", '{thousand}', '') trước khi CAST.",
-                    )
-                )
-            if decimal is not None and decimal in replaced and thousand is not None:
-                issues.append(
-                    ValidationIssue(
-                        code="MONEY_SCALE_RISK",
-                        message=(
-                            f"Cột tiền tệ '{col_name}' có phần thập phân với dấu '{decimal}' "
-                            "nhưng SQL xóa cả phần thập phân lẫn phần nghìn."
-                        ),
-                        severity="warning",
-                        column=col_name,
-                        hint="Chỉ làm sạch dấu phân cách nghìn, xử lý phần thập phân riêng.",
                     )
                 )
         return issues
@@ -1189,6 +1510,7 @@ class SQLValidator:
         parsed: exp.Expression,
         col_info: dict[str, dict[str, Any]],
         strict: bool = False,
+        alias_map: dict[str, str] | None = None,
     ) -> list[ValidationIssue]:
         """Require equality instead of LIKE when the searched value exists verbatim.
 
@@ -1209,7 +1531,7 @@ class SQLValidator:
             if not stripped or "%" in stripped:
                 continue
 
-            matched_meta = cls._match_column_meta(col_node, col_info)
+            matched_meta = cls._match_column_meta(col_node, col_info, alias_map)
             if not matched_meta:
                 continue
             if str(matched_meta.get("data_format", "")).upper() != "STRING":
@@ -1238,19 +1560,10 @@ class SQLValidator:
     def _match_column_meta(
         col_node: exp.Column,
         col_info: dict[str, dict[str, Any]],
+        alias_map: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Resolve the metadata entry of a column node, preferring its table qualifier."""
-        qualifier = col_node.table
-        col_name = col_node.name
-        if qualifier:
-            direct = col_info.get(f"{qualifier.lower()}.{col_name.lower()}")
-            if direct is not None:
-                return direct
-        candidates = [
-            v for k, v in col_info.items()
-            if k.endswith(f".{col_name.lower()}") or k == col_name.lower()
-        ]
-        return candidates[0] if len(candidates) == 1 else None
+        return lookup_column_meta(col_node, col_info, alias_map)
 
 
 __all__ = [

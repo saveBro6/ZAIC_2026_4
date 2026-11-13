@@ -12,6 +12,7 @@ from zaic_2026_4.common.query_intent import detect_query_intent, format_intent_h
 from zaic_2026_4.common.temporal_resolver import format_temporal_anchor_xml
 from zaic_2026_4.common.xml_sanitizer import (
     DATA_INSTRUCTION_SEPARATION_DIRECTIVE,
+    build_column_attributes,
     format_schema_table_elements,
     sanitize_cdata,
     sanitize_text,
@@ -102,15 +103,22 @@ def format_permuted_schema_xml(
         col_meta = target_dict.get(meta_key, {})
 
         data_format = col_meta.get("data_format", "STRING")
-        desc = col_meta.get("maximal_profile", "")
-        llm_hint = col_meta.get("llm_hint")
-        hint_str = f" | Hint: {llm_hint}" if llm_hint else ""
-
-        table_groups.setdefault(tbl, []).append({
+        # The short semantic sentence plus factual attributes; the long maximal profile was
+        # truncated mid-enumeration and is now represented by explicit attributes instead.
+        desc = (
+            col_meta.get("minimal_profile")
+            or col_meta.get("maximal_profile")
+            or col_meta.get("desc")
+            or ""
+        )
+        payload: dict[str, Any] = {
             "col_name": col_clean,
             "data_format": data_format,
-            "desc": f"{desc}{hint_str}".strip(),
-        })
+            "desc": desc,
+        }
+        payload.update(build_column_attributes(col_meta))
+
+        table_groups.setdefault(tbl, []).append(payload)
 
     lines = ["<selected_schema>"]
     for tbl_name, cols in table_groups.items():
@@ -251,7 +259,7 @@ def _build_prompt_prefix(
         "",
         "[QUY TẮC ĐỊNH DẠNG ĐẦU RA JSON & KIỂU DỮ LIỆU DATAMATE]",
         '1. Trường "reasoning": BẮT BUỘC mở đầu bằng <think> và kết thúc bằng </think>. Thực hiện lập kế hoạch Chain-of-Thought ngắn gọn và có cấu trúc trước khi viết câu truy vấn SQL:',
-        '   - Kiểm tra Schema Metadata & Mẫu dữ liệu (Samples): Quan sát data_format, llm_hint và Samples thực tế của các cột liên quan.',
+        '   - Kiểm tra Schema Metadata: đọc data_format, thuộc tính enum/range/distinct và samples thực tế của các cột liên quan.',
         '   - Chuẩn hóa Ngày tháng về ISO DATE: Nếu cột ngày lưu dạng chuỗi chưa chuẩn ISO (ví dụ DD/MM/YYYY, văn bản hoặc timestamp), dựa vào mẫu thực tế để áp dụng biểu thức biến đổi phù hợp (như SUBSTR, date, strftime) đưa về chuỗi ISO YYYY-MM-DD (hoặc YYYY-MM theo tháng) trước khi lọc hoặc so sánh với as_of_date.',
         '   - Làm sạch & Ép kiểu Tiền tệ về INTEGER: Nếu cột tiền tệ là chuỗi có chứa ký tự phân cách nghìn (., ,), ký hiệu đơn vị (đ, VND), làm sạch và ép kiểu về INTEGER để đảm bảo kết quả đúng từng đồng theo quy định DataMate. Với trung bình tiền bọc ROUND(AVG(...), 0). Chỉ dùng REAL cho số lượng có phần lẻ hoặc tỷ lệ chia.',
         '   - Bảng, JOIN & Bộ lọc: Xác định bảng chính/phụ, dùng LEFT JOIN cho bảng danh mục, lọc loại trừ đơn hủy/trả theo rulebook, IS NOT NULL cho ORDER BY ... ASC.',
@@ -282,7 +290,19 @@ def _build_prompt_prefix(
         "   - TUYỆT ĐỐI KHÔNG dùng subquery lồng nhau để tìm min/max; ưu tiên cấu trúc phẳng: ORDER BY <metric> DESC/ASC LIMIT 1.",
         "   - Khi xếp hạng (ranking/top-k), BẮT BUỘC thêm khóa chính hoặc mã định danh vào mệnh đề sắp xếp để phá vỡ đồng hạng: ORDER BY <metric> DESC, <primary_key_or_code> ASC.",
         "   - Trả về các cột riêng biệt; KHÔNG dùng toán tử nối chuỗi '||' trong mệnh đề SELECT trừ khi có yêu cầu cụ thể.",
-        "4. Ép kiểu & Khớp chuỗi theo <selected_schema> tham khảo Hint được cung cấp.",
+        (
+            "4. Cột chuẩn hóa (BẮT BUỘC ưu tiên): bảng có hậu tố __c là bảng chuẩn hóa của bảng gốc cùng tên; "
+            "các cột _date (ISO YYYY-MM-DD), _amount (số tiền đã làm sạch) và _status (nhóm trạng thái chuẩn) "
+            "đã được tính sẵn. Khi bảng được chọn có các cột này, BẮT BUỘC dùng trực tiếp chúng để lọc/sắp xếp/tính tổng; "
+            "TUYỆT ĐỐI KHÔNG dùng SUBSTR/REPLACE/CAST để parse lại cột ngày hoặc cột tiền gốc."
+        ),
+        (
+            "5. Giá trị của _status theo rulebook: 'completed' (đã giao/thành công), 'shipping' (đang vận chuyển/đã lấy), "
+            "'cancelled' (hủy), 'returned' (trả hàng/hoàn tiền), 'pending' (chờ xử lý), 'other'. "
+            "Doanh thu hợp lệ dùng _status NOT IN ('cancelled','returned'); tỷ lệ hủy dùng _status = 'cancelled'. "
+            "Khi chỉ có cột trạng thái gốc, PHẢI đối chiếu tập giá trị trong thuộc tính enum của cột trước khi so sánh."
+        ),
+        "6. Ép kiểu & Khớp chuỗi theo <selected_schema>: dựa vào type, thuộc tính enum/range và samples của từng cột.",
         "   - Khi câu hỏi đề cập đến thực thể có trong <grounded_entities>, BẮT BUỘC sử dụng đúng 'Giá trị chuẩn trong DB' và tên cột tương ứng; tuyệt đối không dùng chuỗi không dấu hoặc viết tắt từ câu hỏi.",
         "   - Tìm kiếm chuỗi tiếng Việt có dấu khác: luôn dùng LOWER(\"col\") LIKE LOWER('%...%') để đảm bảo không phân biệt hoa/thường.",
         "",

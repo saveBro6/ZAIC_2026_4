@@ -21,6 +21,11 @@ from typing import Any
 
 from zaic_2026_4.common.query_intent import QueryIntent, fold_text
 from zaic_2026_4.constants import DATE_FORMATS
+from zaic_2026_4.ingestion.canonical import (
+    CANONICAL_COLUMNS,
+    canonical_view_name,
+    is_canonical_view,
+)
 
 DATE_FORMAT_TOKENS = frozenset({"DATE", "TIME", "DATETIME"})
 NUMERIC_FORMAT_TOKENS = frozenset({"CURRENCY", "NUMERIC", "INTEGER", "REAL", "FLOAT", "DECIMAL", "NUMBER"})
@@ -189,6 +194,68 @@ def _related_tables(
     return related
 
 
+def _table_adjacency(edges: list[tuple[str, str]]) -> dict[str, list[tuple[str, str, str]]]:
+    """Build an undirected table graph: table -> [(neighbour, col_here, col_there)]."""
+    graph: dict[str, list[tuple[str, str, str]]] = {}
+    for src, tgt in edges:
+        src_tbl, tgt_tbl = _table_of(src), _table_of(tgt)
+        if src_tbl == tgt_tbl:
+            continue
+        graph.setdefault(src_tbl, []).append((tgt_tbl, src, tgt))
+        graph.setdefault(tgt_tbl, []).append((src_tbl, tgt, src))
+    return graph
+
+
+def _shortest_table_path(
+    graph: dict[str, list[tuple[str, str, str]]],
+    start: str,
+    goal: str,
+    max_depth: int = 3,
+) -> list[tuple[str, str, str]] | None:
+    """Breadth-first path between two tables, or None when they are disconnected.
+
+    Returns the hop list ``[(next_table, col_from_current, col_in_next), ...]``.
+    """
+    if start == goal:
+        return []
+    queue: list[tuple[str, list[tuple[str, str, str]]]] = [(start, [])]
+    visited: set[str] = {start}
+    while queue:
+        current, path = queue.pop(0)
+        if len(path) >= max_depth:
+            continue
+        for neighbour, col_here, col_there in graph.get(current, []):
+            if neighbour in visited:
+                continue
+            hop = (neighbour, col_here, col_there)
+            if neighbour == goal:
+                return [*path, hop]
+            visited.add(neighbour)
+            queue.append((neighbour, [*path, hop]))
+    return None
+
+
+def _canonical_projection_columns(
+    referenced_tables: set[str],
+    flat_meta: dict[str, Any],
+    already_selected: set[str],
+) -> list[str]:
+    """Columns of the canonical view of each referenced table, when that view exists."""
+    available_tables = {_table_of(col) for col in flat_meta}
+    added: list[str] = []
+    for table in sorted(referenced_tables):
+        if is_canonical_view(table):
+            continue
+        view = canonical_view_name(table)
+        if view not in available_tables:
+            continue
+        for column in CANONICAL_COLUMNS:
+            key = f"{view}.{column}"
+            if key in flat_meta and key not in already_selected:
+                added.append(key)
+    return added
+
+
 def validate_schema_coverage(
     schema_cols: set[str],
     processed_metadata: dict[str, Any] | None,
@@ -323,21 +390,88 @@ def validate_schema_coverage(
             else:
                 report.missing_aspects.append("aggregate_measure_column")
 
-    # Aspect 3: referenced tables must carry both sides of every join edge in the schema.
+    # Aspect 3: every referenced table pair must be connected by a real join path.
+    # When the profiler knows a path only through an intermediate table (a bridge table),
+    # that table is added instead of declaring the pair unjoinable.
     report.required_aspects.append("join_key_closure")
     closure_added: list[str] = []
-    current_tables = {_table_of(c) for c in expanded}
-    for src, tgt in edges:
-        src_tbl, tgt_tbl = _table_of(src), _table_of(tgt)
-        if src_tbl in current_tables and tgt_tbl in current_tables:
-            for col in (src, tgt):
-                if col in flat_meta and col not in expanded:
-                    expanded.add(col)
-                    closure_added.append(col)
+    graph = _table_adjacency(edges)
+    # Work on a snapshot: bridge tables are appended while the pairs are enumerated.
+    initial_tables = sorted({_table_of(c) for c in expanded})
+    unreachable: list[str] = []
+    for idx, left in enumerate(initial_tables):
+        for right in initial_tables[idx + 1:]:
+            direct = any(
+                _table_of(src) == left and _table_of(tgt) == right
+                or _table_of(src) == right and _table_of(tgt) == left
+                for src, tgt in edges
+            )
+            if direct:
+                for src, tgt in edges:
+                    if {_table_of(src), _table_of(tgt)} == {left, right}:
+                        for col in (src, tgt):
+                            if col in flat_meta and col not in expanded:
+                                expanded.add(col)
+                                closure_added.append(col)
+                continue
+
+            path = _shortest_table_path(graph, left, right)
+            if path is None:
+                unreachable.append(f"{left}<->{right}")
+                continue
+            for bridge_table, col_here, col_there in path:
+                if len(path) == 1:
+                    # A single hop is a direct edge; only its key columns matter.
+                    for col in (col_here, col_there):
+                        if col in flat_meta and col not in expanded:
+                            expanded.add(col)
+                            closure_added.append(col)
+                    continue
+                if bridge_table in report.added_tables:
+                    continue
+                if len(report.added_tables) >= max_extra_tables:
+                    unreachable.append(f"{left}<->{right}")
+                    break
+                for col in (col_here, col_there):
+                    if col in flat_meta and col not in expanded:
+                        expanded.add(col)
+                        closure_added.append(col)
+                report.added_tables.append(bridge_table)
+                report.notes.append(
+                    f"join_bridge_added: {bridge_table} connects {left} and {right}"
+                )
+
     if closure_added:
         report.added_columns.extend(sorted(closure_added))
         report.notes.append(f"join_key_closure_added: {sorted(closure_added)}")
-    report.satisfied_aspects.append("join_key_closure")
+    if unreachable:
+        # No profiled join path means "unanswerable" cannot be proven: the linking step
+        # may simply have missed the table that makes the question answerable.
+        report.missing_aspects.append("join_key_closure")
+    else:
+        report.satisfied_aspects.append("join_key_closure")
+
+    # Aspect 4: expose the canonical (normalized) projection of every referenced table.
+    # The aspect is only declared when at least one referenced table has a canonical view,
+    # so no consumer can read a phantom "required but unsatisfied" gap.
+    referenced = {_table_of(c) for c in expanded}
+    available_tables = {_table_of(col) for col in flat_meta}
+    has_canonical_view = any(
+        not is_canonical_view(table) and canonical_view_name(table) in available_tables
+        for table in referenced
+    )
+    if has_canonical_view:
+        report.required_aspects.append("canonical_projection")
+        canonical_cols = _canonical_projection_columns(referenced, flat_meta, expanded)
+        if canonical_cols:
+            expanded.update(canonical_cols)
+            report.added_columns.extend(sorted(canonical_cols))
+            report.notes.append(f"canonical_projection_added: {sorted(canonical_cols)}")
+            report.satisfied_aspects.append("canonical_projection")
+        else:
+            # The view exists but carries no derived column we can use (or all of them are
+            # already selected); nothing to add, so the aspect is considered covered.
+            report.satisfied_aspects.append("canonical_projection")
 
     report.added_columns = sorted(set(report.added_columns))
     report.added_tables = sorted(set(report.added_tables))

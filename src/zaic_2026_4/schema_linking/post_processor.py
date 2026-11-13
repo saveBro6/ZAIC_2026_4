@@ -12,7 +12,10 @@ import re
 import unicodedata
 from typing import Any
 
-from zaic_2026_4.common.xml_sanitizer import format_schema_table_elements
+from zaic_2026_4.common.xml_sanitizer import (
+    build_column_attributes,
+    format_schema_table_elements,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -256,11 +259,13 @@ class SchemaPostProcessor:
             data_type = col_meta.get("data_format", "STRING")
             desc = col_meta.get("maximal_profile", "")
 
-            tables.setdefault(tbl, []).append({
+            payload: dict[str, Any] = {
                 "col_name": raw_col,
                 "data_format": data_type,
                 "desc": desc,
-            })
+            }
+            payload.update(build_column_attributes(col_meta))
+            tables.setdefault(tbl, []).append(payload)
 
         lines = ["<selected_schema>"]
         for tbl, cols in sorted(tables.items()):

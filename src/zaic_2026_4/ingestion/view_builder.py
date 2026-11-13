@@ -22,6 +22,17 @@ def token_common_prefix(names: list[str]) -> str:
     return "".join(common_tokens).rstrip(" _-.")
 
 
+def group_tables_by_schema(tables: dict[str, pl.DataFrame]) -> list[list[str]]:
+    """Group table names that share an identical column set (candidate partitions)."""
+    schema_groups: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for tname, df in tables.items():
+        if df.is_empty() and len(df.columns) == 0:
+            continue
+        col_key = tuple(sorted(df.columns))
+        schema_groups[col_key].append(tname)
+    return [members for members in schema_groups.values() if len(members) >= 2]
+
+
 def generate_unified_views(
     tables: dict[str, pl.DataFrame],
 ) -> list[tuple[str, str]]:

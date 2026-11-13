@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from zaic_2026_4.ingestion.canonical import is_side_table
 from zaic_2026_4.ingestion.extractors import extract_csv, extract_excel, extract_sqlite
 from zaic_2026_4.ingestion.service import ingest_business
 
@@ -40,7 +41,9 @@ def test_reconciliation_zero_unnamed_and_schema_integrity(tmp_path: Path, train_
         entities = cur.fetchall()
         assert len(entities) > 0
 
-        tables = [name for name, typ in entities if typ == "table"]
+        tables = [
+            name for name, typ in entities if typ == "table" and not is_side_table(name)
+        ]
         views = [name for name, typ in entities if typ == "view"]
 
         # Check every table for UNNAMED columns
@@ -82,9 +85,11 @@ def test_reconciliation_exact_row_counts(tmp_path: Path, train_data_dir: Path):
 
         assert "calendar" in tables, f"[{biz_id}] Expected auto-ingested 'calendar' table in DB"
 
+        # Canonical side tables mirror derived _date/_amount/_status values, so they are
+        # excluded: this test proves that source rows are ingested 1:1 into business tables.
         db_total_rows = 0
         for tname in tables:
-            if tname == "calendar":
+            if tname == "calendar" or is_side_table(tname):
                 continue
             cur.execute(f'SELECT COUNT(*) FROM "{tname}";')
             db_total_rows += cur.fetchone()[0]

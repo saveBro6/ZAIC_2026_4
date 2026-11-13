@@ -31,6 +31,14 @@ from zaic_2026_4.constants import (
     DEFAULT_REASONING_START_STR,
     MINIMAL_PROFILE_PROMPT,
 )
+from zaic_2026_4.ingestion.canonical import (
+    AMOUNT_COLUMN,
+    DATE_COLUMN,
+    STATUS_COLUMN,
+    canonical_base_of,
+    describe_canonical_column,
+    is_canonical_view,
+)
 from zaic_2026_4.profiling.maximal_composer import (
     build_join_index,
     build_table_context,
@@ -450,14 +458,20 @@ class ProfileLLMSummarizer:
 
             for col_name, col_stats in columns.items():
                 sibling_cols = [c for c in all_cols if c != col_name]
-                min_prompt = self.build_minimal_prompt(
-                    table_name=table_name,
-                    col_name=col_name,
-                    col_stats=col_stats,
-                    sibling_cols=sibling_cols,
-                    total_rows=total_rows,
-                    business_readme=readme_clean,
-                )
+                # Derived canonical columns carry a fact about the ingestion step, not a
+                # semantic guess: their profile is rendered deterministically and no LLM
+                # call is spent on them.
+                fixed_summary = describe_canonical_column(table_name, col_name)
+                min_prompt = ""
+                if fixed_summary is None:
+                    min_prompt = self.build_minimal_prompt(
+                        table_name=table_name,
+                        col_name=col_name,
+                        col_stats=col_stats,
+                        sibling_cols=sibling_cols,
+                        total_rows=total_rows,
+                        business_readme=readme_clean,
+                    )
                 work_items.append({
                     "col_key": f"{table_name}.{col_name}",
                     "table_name": table_name,
@@ -466,6 +480,7 @@ class ProfileLLMSummarizer:
                     "total_rows": total_rows,
                     "col_stats": col_stats,
                     "min_prompt": min_prompt,
+                    "fixed_summary": fixed_summary,
                 })
 
         if not work_items:
@@ -478,7 +493,8 @@ class ProfileLLMSummarizer:
         # blank line, and 160 tokens left no headroom, which is why a share of the profiles
         # came back empty. Both are corrected here, with one retry and a deterministic
         # fallback for anything the model still leaves blank.
-        all_min_prompts = [item["min_prompt"] for item in work_items]
+        llm_items = [item for item in work_items if item.get("fixed_summary") is None]
+        all_min_prompts = [item["min_prompt"] for item in llm_items]
         min_summaries: list[str] = []
         chunk_engine_traces: list[dict[str, Any]] = []
         profile_sources: list[str] = ["llm"] * len(all_min_prompts)
@@ -525,7 +541,7 @@ class ProfileLLMSummarizer:
         for idx, text in enumerate(min_summaries):
             if str(text).strip():
                 continue
-            item = work_items[idx]
+            item = llm_items[idx]
             data_format = str(item["col_stats"].get("data_format", "STRING") or "STRING")
             min_summaries[idx] = (
                 f'Cột "{item["col_name"]}" thuộc bảng "{item["table_name"]}" '
@@ -534,6 +550,11 @@ class ProfileLLMSummarizer:
             profile_sources[idx] = "fallback"
 
         # Phase 3: Deterministic Maximal Profile Composition & Structural Indexing
+        canonical_by_base = {
+            canonical_base_of(table): table
+            for table in db_profile.get("tables", {})
+            if is_canonical_view(table)
+        }
         table_ctx_map = build_table_context(db_profile)
         join_index = build_join_index(db_profile)
 
@@ -541,40 +562,47 @@ class ProfileLLMSummarizer:
         processed_metadata: dict[str, Any] = {}
         profiling_trace: list[dict[str, Any]] = []
         llm_call_records: list[LLMCallRecord] = []
-        for idx, item in enumerate(work_items):
+        llm_slot = {item["col_key"]: pos for pos, item in enumerate(llm_items)}
+        for item in work_items:
             col_key = item["col_key"]
             col_stats = item["col_stats"]
-            raw_out = min_summaries[idx] if idx < len(min_summaries) else ""
-            short_summary = raw_out.strip()
-            eng_trace = chunk_engine_traces[idx] if idx < len(chunk_engine_traces) else {}
-            profiling_trace.append({
-                "col_key": col_key,
-                "table_name": item["table_name"],
-                "col_name": item["col_name"],
-                "prompt": item["min_prompt"],
-                "raw_output": raw_out,
-                "minimal_profile": short_summary,
-                "profile_source": profile_sources[idx] if idx < len(profile_sources) else "llm",
-                "prompt_tokens": eng_trace.get("prompt_tokens"),
-                "completion_tokens": eng_trace.get("completion_tokens"),
-                "finish_reason": eng_trace.get("finish_reason"),
-                "stop_reason": eng_trace.get("stop_reason"),
-                "latency_ms": eng_trace.get("latency_ms"),
-                "sampling_params": eng_trace.get("sampling_params") or {},
-            })
-            llm_call_records.append(
-                make_llm_call_record(
-                    stage="minimal_profile",
-                    prompt=item["min_prompt"],
-                    raw_output=raw_out,
-                    engine_trace=eng_trace,
-                    metadata={
-                        "col_key": col_key,
-                        "table_name": item["table_name"],
-                        "col_name": item["col_name"],
-                    },
+            slot = llm_slot.get(col_key)
+            if slot is None:
+                short_summary = str(item.get("fixed_summary") or "")
+                raw_out = short_summary
+                eng_trace: dict[str, Any] = {}
+            else:
+                raw_out = min_summaries[slot] if slot < len(min_summaries) else ""
+                short_summary = raw_out.strip()
+                eng_trace = chunk_engine_traces[slot] if slot < len(chunk_engine_traces) else {}
+                profiling_trace.append({
+                    "col_key": col_key,
+                    "table_name": item["table_name"],
+                    "col_name": item["col_name"],
+                    "prompt": item["min_prompt"],
+                    "raw_output": raw_out,
+                    "minimal_profile": short_summary,
+                    "profile_source": profile_sources[slot] if slot < len(profile_sources) else "llm",
+                    "prompt_tokens": eng_trace.get("prompt_tokens"),
+                    "completion_tokens": eng_trace.get("completion_tokens"),
+                    "finish_reason": eng_trace.get("finish_reason"),
+                    "stop_reason": eng_trace.get("stop_reason"),
+                    "latency_ms": eng_trace.get("latency_ms"),
+                    "sampling_params": eng_trace.get("sampling_params") or {},
+                })
+                llm_call_records.append(
+                    make_llm_call_record(
+                        stage="minimal_profile",
+                        prompt=item["min_prompt"],
+                        raw_output=raw_out,
+                        engine_trace=eng_trace,
+                        metadata={
+                            "col_key": col_key,
+                            "table_name": item["table_name"],
+                            "col_name": item["col_name"],
+                        },
+                    )
                 )
-            )
             tbl_name = item["table_name"]
             c_name = item["col_name"]
             tbl_ctx = table_ctx_map.get(tbl_name)
@@ -598,6 +626,7 @@ class ProfileLLMSummarizer:
                 "minimal_profile": short_summary,
                 "maximal_profile": maximal_profile,
                 "sample_values": col_stats.get("sample_values") or [],
+                "canonical_derived": item.get("fixed_summary") is not None,
                 # Enriched attributes preserved for downstream vector and schema operations
                 "table_name": tbl_name,
                 "col_name": c_name,
@@ -611,6 +640,18 @@ class ProfileLLMSummarizer:
                 "min_val": col_stats.get("min_val"),
                 "max_val": col_stats.get("max_val"),
                 "is_unique": is_unique,
+                "canonical_view": canonical_by_base.get(tbl_name),
+                **{
+                    key: column
+                    for key, column in (
+                        ("canonical_date_column", DATE_COLUMN),
+                        ("canonical_amount_column", AMOUNT_COLUMN),
+                        ("canonical_status_column", STATUS_COLUMN),
+                    )
+                    if canonical_by_base.get(tbl_name)
+                    and column
+                    in db_profile["tables"][canonical_by_base[tbl_name]]["columns"]
+                },
                 "join_candidates": [
                     {
                         "target": j.target_col,

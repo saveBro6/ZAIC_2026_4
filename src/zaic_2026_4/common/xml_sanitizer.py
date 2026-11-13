@@ -95,23 +95,94 @@ def sanitize_cdata(val: Any, max_len: int = 4000) -> str:
     return s
 
 
+# Factual attributes are rendered as their own attributes instead of being stuffed into a
+# prose description that then has to be truncated mid-sentence (which is how enum members
+# used to be cut to "'xo..."). The description keeps only the short semantic sentence.
+SCHEMA_DESC_MAX_LEN = 120
+SCHEMA_ENUM_MAX_ITEMS = 12
+SCHEMA_SAMPLES_MAX_ITEMS = 6
+SCHEMA_SAMPLE_MAX_LEN = 40
+SCHEMA_ATTRIBUTE_KEYS: tuple[str, ...] = (
+    "enum",
+    "range",
+    "distinct",
+    "unique",
+    "samples",
+)
+
+
+def _render_attribute(name: str, value: Any) -> str:
+    """Render one optional schema attribute, skipping empty values."""
+    if value is None:
+        return ""
+    text = clean_c0_and_newlines(str(value))
+    if not text:
+        return ""
+    return f" {name}={quote_attr(text)}"
+
+
+def build_column_attributes(col_meta: dict[str, Any]) -> dict[str, str]:
+    """Derive the factual schema attributes of a column from its profiled metadata.
+
+    Enumerations, ranges and samples are facts the generator must be able to see in full;
+    they are rendered as attributes so no prose truncation can cut them in half.
+    """
+    if not col_meta:
+        return {}
+    attrs: dict[str, str] = {}
+
+    distinct = int(col_meta.get("distinct_count") or 0)
+    enum_source = col_meta.get("top_10_samples")
+    if (
+        isinstance(enum_source, dict)
+        and enum_source
+        and 0 < distinct <= SCHEMA_ENUM_MAX_ITEMS
+        # Only a complete enumeration is useful: a truncated list would make the model
+        # believe a valid value does not exist.
+        and len(enum_source) >= distinct
+    ):
+        attrs["enum"] = " | ".join(str(key) for key in list(enum_source)[:SCHEMA_ENUM_MAX_ITEMS])
+
+    min_val = col_meta.get("min_val")
+    max_val = col_meta.get("max_val")
+    if min_val is not None and max_val is not None and str(min_val) != str(max_val):
+        attrs["range"] = f"{min_val} .. {max_val}"
+
+    samples = sanitize_samples(list(col_meta.get("sample_values") or []),
+                               max_samples=SCHEMA_SAMPLES_MAX_ITEMS,
+                               max_sample_len=SCHEMA_SAMPLE_MAX_LEN)
+    if samples:
+        attrs["samples"] = " | ".join(samples)
+
+    if distinct:
+        attrs["distinct"] = str(distinct)
+    if col_meta.get("is_unique"):
+        attrs["unique"] = "true"
+    return attrs
+
+
 def format_schema_column_element(
     col_name: str,
     data_format: str,
     desc: str,
-    max_desc_len: int = 240,
+    max_desc_len: int = SCHEMA_DESC_MAX_LEN,
+    extra_attrs: dict[str, Any] | None = None,
 ) -> str:
     """Render a single <column> element with sanitized attributes and content."""
     attr_name = quote_attr(col_name)
     attr_type = quote_attr(data_format)
+    attrs = "".join(
+        _render_attribute(key, (extra_attrs or {}).get(key))
+        for key in SCHEMA_ATTRIBUTE_KEYS
+    )
     body = sanitize_text(desc, max_len=max_desc_len)
-    return f"    <column name={attr_name} type={attr_type}>{body}</column>"
+    return f"    <column name={attr_name} type={attr_type}{attrs}>{body}</column>"
 
 
 def format_schema_table_elements(
     tbl_name: str,
     cols: list[dict[str, Any]],
-    max_desc_len: int = 240,
+    max_desc_len: int = SCHEMA_DESC_MAX_LEN,
 ) -> list[str]:
     """Render <table> and nested <column> elements for schema formatters."""
     lines: list[str] = []
@@ -121,20 +192,39 @@ def format_schema_table_elements(
             col_name = str(c.get("col_name", ""))
             data_format = str(c.get("data_format", "STRING"))
             desc = str(c.get("desc") or c.get("description", ""))
-            lines.append(format_schema_column_element(col_name, data_format, desc, max_desc_len=max_desc_len))
+            lines.append(
+                format_schema_column_element(
+                    col_name,
+                    data_format,
+                    desc,
+                    max_desc_len=max_desc_len,
+                    extra_attrs=c,
+                )
+            )
         lines.append("  </table>")
     else:
         for c in cols:
             col_name = str(c.get("col_name", ""))
             data_format = str(c.get("data_format", "STRING"))
             desc = str(c.get("desc") or c.get("description", ""))
-            lines.append(f"  <column name={quote_attr(col_name)} type={quote_attr(data_format)}>{sanitize_text(desc, max_len=max_desc_len)}</column>")
+            attrs = "".join(
+                _render_attribute(key, c.get(key)) for key in SCHEMA_ATTRIBUTE_KEYS
+            )
+            lines.append(
+                f"  <column name={quote_attr(col_name)} type={quote_attr(data_format)}{attrs}>"
+                f"{sanitize_text(desc, max_len=max_desc_len)}</column>"
+            )
     return lines
 
 
 __all__ = [
     "C0_CONTROL_CHARS_REGEX",
     "DATA_INSTRUCTION_SEPARATION_DIRECTIVE",
+    "SCHEMA_DESC_MAX_LEN",
+    "SCHEMA_ENUM_MAX_ITEMS",
+    "SCHEMA_SAMPLES_MAX_ITEMS",
+    "SCHEMA_SAMPLE_MAX_LEN",
+    "build_column_attributes",
     "clean_c0_and_newlines",
     "defang_chatml",
     "format_schema_column_element",

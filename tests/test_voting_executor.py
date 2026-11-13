@@ -96,8 +96,10 @@ def test_voting_abstain_low_agreement_1_1_1(temp_db: Path) -> None:
 
     winner, status, reason = executor.vote(candidates)
     assert winner is None
-    assert status == "abstain_low_agreement"
-    assert "abstain_low_agreement:" in reason
+    # A 1/1/1 split cannot reach the absolute support floor, so the verdict names the
+    # missing support instead of a generic low-agreement ratio.
+    assert status == "abstain_insufficient_support"
+    assert "abstain_insufficient_support:" in reason
     assert "1/1/1" in reason
 
 
@@ -193,7 +195,7 @@ def test_voting_abstain_low_agreement_excludes_none(temp_db: Path) -> None:
 
     winner, status, _reason = executor.vote(candidates)
     assert winner is None
-    assert status == "abstain_low_agreement"
+    assert status == "abstain_insufficient_support"
 
 
 def test_voting_type_aware_separation() -> None:
@@ -224,7 +226,7 @@ def test_voting_type_aware_separation() -> None:
     # 1 vs 1 with different types -> 1/1 split -> abstain
     winner, status, _ = executor.vote([c0, c1])
     assert winner is None
-    assert status == "abstain_low_agreement"
+    assert status == "abstain_insufficient_support"
 
     # c2: percent 2.08
     c2 = CandidateQuery(
@@ -274,7 +276,7 @@ def test_voting_list_order_aware() -> None:
 
     winner, status, _ = executor.vote([c0, c1])
     assert winner is None
-    assert status == "abstain_low_agreement"
+    assert status == "abstain_insufficient_support"
 
 
 def test_voting_table_row_order_invariant() -> None:
@@ -311,8 +313,12 @@ def test_voting_table_row_order_invariant() -> None:
     assert status == "unanimous_2_of_2"
 
 
-def test_voting_single_survivor_allowed() -> None:
-    """1 survivor candidate (ratio 1.0 > 0.5) is allowed to win without abstaining."""
+def test_voting_single_survivor_abstains() -> None:
+    """A single surviving candidate out of 3 must abstain, not win on a 1/1 denominator.
+
+    Agreement is measured over every generated candidate: the two candidates that failed
+    are contradicting votes, so 1/3 support cannot justify submitting an answer.
+    """
     executor = VotingExecutor(db_path="/dummy/path.db")
 
     c0 = CandidateQuery(
@@ -342,9 +348,8 @@ def test_voting_single_survivor_allowed() -> None:
     )
 
     winner, status, _ = executor.vote([c0, c1, c2])
-    assert winner is not None
-    assert winner.candidate_id == 0
-    assert status == "majority_1_of_3"
+    assert winner is None
+    assert status == "abstain_insufficient_support"
 
 
 def test_voting_deterministic() -> None:
@@ -472,3 +477,85 @@ def test_formatting_trace_evidence_count_vs_has_evidence() -> None:
     assert has_evidence({(0,)})
     assert has_evidence({("abc",)})
 
+
+
+def test_voting_denominator_includes_failed_candidates() -> None:
+    """Two of three candidates agreeing is a majority; one of three is not.
+
+    The denominator is every generated candidate, so silently-failed candidates still
+    count against support.
+    """
+    executor = VotingExecutor(db_path="/dummy/path.db")
+
+    def _cand(cid: int, value: int | None) -> CandidateQuery:
+        if value is None:
+            return CandidateQuery(
+                candidate_id=cid,
+                seed=cid,
+                final_sql="SELECT bad;",
+                predicted_type="number",
+                execution_success=False,
+            )
+        return CandidateQuery(
+            candidate_id=cid,
+            seed=cid,
+            final_sql=f"SELECT {value};",
+            predicted_type="number",
+            execution_success=True,
+            raw_result=[(value,)],
+            result_set={(value,)},
+        )
+
+    winner, status, _ = executor.vote([_cand(0, 10), _cand(1, 10), _cand(2, None)])
+    assert winner is not None
+    assert status == "majority_2_of_3"
+
+
+def test_voting_abstains_on_suspicious_zero_answer() -> None:
+    """A zero answer from a query with grounding warnings abstains instead of submitting."""
+    executor = VotingExecutor(db_path="/dummy/path.db")
+
+    suspicious = {"issues": [{"code": "LITERAL_NOT_IN_ENUM", "severity": "blocking"}]}
+    candidates = []
+    for cid in (0, 1):
+        cand = CandidateQuery(
+            candidate_id=cid,
+            seed=cid,
+            final_sql="SELECT SUM(x) FROM t WHERE status = 'khong-ton-tai';",
+            predicted_type="number",
+            execution_success=True,
+            raw_result=[(0,)],
+            result_set={(0,)},
+        )
+        cand.attempts_history = [suspicious]
+        cand.best_attempt_idx = 0
+        candidates.append(cand)
+
+    winner, status, reason = executor.vote(candidates)
+    assert winner is None
+    assert status == "abstain_zero_suspicion"
+    assert "LITERAL_NOT_IN_ENUM" in reason
+
+
+def test_voting_submits_non_zero_answer_despite_warning() -> None:
+    """A non-zero answer keeps winning: suspicion only blocks zero-like output."""
+    executor = VotingExecutor(db_path="/dummy/path.db")
+
+    candidates = []
+    for cid in (0, 1):
+        cand = CandidateQuery(
+            candidate_id=cid,
+            seed=cid,
+            final_sql="SELECT SUM(x) FROM t;",
+            predicted_type="number",
+            execution_success=True,
+            raw_result=[(1234,)],
+            result_set={(1234,)},
+        )
+        cand.attempts_history = [{"issues": [{"code": "MONEY_SCALE_RISK", "severity": "blocking"}]}]
+        cand.best_attempt_idx = 0
+        candidates.append(cand)
+
+    winner, status, _ = executor.vote(candidates)
+    assert winner is not None
+    assert status == "unanimous_2_of_2"
