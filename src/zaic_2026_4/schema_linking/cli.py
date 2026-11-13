@@ -82,6 +82,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Random seed for deterministic question sampling (default: None).",
     )
+    parser.add_argument(
+        "--as-of-date",
+        type=str,
+        default=None,
+        help="Anchor date (YYYY-MM-DD) used for temporal resolution when the question file omits it.",
+    )
     return parser
 
 
@@ -131,6 +137,7 @@ def main() -> None:
     selected_q = random.choice(matching_questions)
     question_text = selected_q["question"]
     question_id = selected_q.get("id", "unknown")
+    as_of_date = args.as_of_date or selected_q.get("as_of_date")
     print(
         f"Selected question [{question_id}] for {biz_dir.name}: {question_text}",
         file=sys.stderr,
@@ -199,6 +206,7 @@ def main() -> None:
         cases=args.cases,
         cache_dir=orchestrator.cache_dir,
         question_id=question_id,
+        as_of_date=as_of_date,
     )
     elapsed = time.perf_counter() - t0
 

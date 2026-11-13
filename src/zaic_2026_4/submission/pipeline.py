@@ -5,15 +5,18 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from zaic_2026_4.common.trace_logger import write_json_trace
+from zaic_2026_4.common.trace_logger import build_call_id, write_json_trace
 from zaic_2026_4.constants import (
+    DEFAULT_BUSINESS_CACHE_MAX_ENTRIES,
     DEFAULT_CANDIDATE_SEEDS,
     DEFAULT_EXECUTION_MAX_RETRIES,
     DEFAULT_LOGS_DIR,
+    DEFAULT_RULEBOOK_MODE,
     DEFAULT_SQL_MAX_RETRIES,
     DEFAULT_SUBMISSION_PATH,
 )
@@ -35,6 +38,33 @@ from zaic_2026_4.submission.voting_executor import (
 logger = logging.getLogger(__name__)
 
 
+def _attempt_blocking_codes(candidate: Any) -> list[str]:
+    """Extract blocking issue codes of the candidate's selected attempt from its trace."""
+    attempts = getattr(candidate, "attempts_history", None) or []
+    if not attempts:
+        return []
+    best_idx = getattr(candidate, "best_attempt_idx", None)
+    if not isinstance(best_idx, int) or not 0 <= best_idx < len(attempts):
+        best_idx = len(attempts) - 1
+    codes = {
+        str(issue.get("code"))
+        for issue in (attempts[best_idx].get("issues") or [])
+        if isinstance(issue, dict)
+        and issue.get("code")
+        and issue.get("severity") == "blocking"
+    }
+    return sorted(codes)
+
+
+def compute_unanswerable_proof(coverage_report: Any | None) -> bool:
+    """Return True only when the linked schema covered every question-implied aspect.
+
+    A missing coverage report means schema linking failed, so the all-columns fallback is
+    in force and an "unanswerable" verdict cannot be trusted.
+    """
+    return coverage_report is not None and not coverage_report.has_unresolved_gaps
+
+
 @dataclass
 class BusinessContext:
     """Cached per-business profiling, database connection, and indexing artifacts."""
@@ -48,6 +78,7 @@ class BusinessContext:
     voting_executor: VotingExecutor
     linker: TaskAlignedSchemaLinker
     cache_dir: Path | None = None
+    load_timings: dict[str, float] = field(default_factory=dict)
 
 
 class SubmissionPipeline:
@@ -68,9 +99,10 @@ class SubmissionPipeline:
         sql_max_retries: int = DEFAULT_SQL_MAX_RETRIES,
         execution_max_retries: int = DEFAULT_EXECUTION_MAX_RETRIES,
         max_retries: int | None = None,
-        rulebook_mode: str = "hybrid",
+        rulebook_mode: str = DEFAULT_RULEBOOK_MODE,
         cases: str | list[str] | set[str] | None = "abcde",
         trace_enabled: bool = True,
+        business_cache_max_entries: int = DEFAULT_BUSINESS_CACHE_MAX_ENTRIES,
     ) -> None:
         """Initialize submission pipeline.
 
@@ -124,7 +156,11 @@ class SubmissionPipeline:
             self.logs_dir = fallback_dir / "logs"
             self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-        self._business_cache: dict[str, BusinessContext] = {}
+        # Bounded LRU: keeping every business DB and index resident does not fit in memory
+        # when a split spans many businesses, so the least recently used one is evicted.
+        self._business_cache: OrderedDict[str, BusinessContext] = OrderedDict()
+        self._business_cache_max_entries = max(1, int(business_cache_max_entries))
+        self.run_id = build_call_id()
         self._rulebook_text = self._read_text_file(self.rulebook_path)
 
     @classmethod
@@ -142,9 +178,10 @@ class SubmissionPipeline:
         sql_max_retries: int = DEFAULT_SQL_MAX_RETRIES,
         execution_max_retries: int = DEFAULT_EXECUTION_MAX_RETRIES,
         max_retries: int | None = None,
-        rulebook_mode: str = "hybrid",
+        rulebook_mode: str = DEFAULT_RULEBOOK_MODE,
         cases: str | list[str] | set[str] | None = "abcde",
         trace_enabled: bool = True,
+        business_cache_max_entries: int = DEFAULT_BUSINESS_CACHE_MAX_ENTRIES,
     ) -> tuple[SubmissionPipeline, Path]:
         """Create a SubmissionPipeline from a dataset split.
 
@@ -169,6 +206,7 @@ class SubmissionPipeline:
             rulebook_mode=rulebook_mode,
             cases=cases,
             trace_enabled=trace_enabled,
+            business_cache_max_entries=business_cache_max_entries,
         )
         return pipeline, paths["questions_path"]
 
@@ -185,6 +223,7 @@ class SubmissionPipeline:
     def get_or_load_business(self, business_id: str) -> BusinessContext:
         """Load or create cached business context including DB, profiles, and indexers."""
         if business_id in self._business_cache:
+            self._business_cache.move_to_end(business_id)
             return self._business_cache[business_id]
 
         biz_dir = self.data_dir / business_id
@@ -235,8 +274,12 @@ class SubmissionPipeline:
             voting_executor=voting_executor,
             linker=linker,
             cache_dir=biz_cache_dir,
+            load_timings=dict(getattr(orchestrator, "last_stage_timings", {}) or {}),
         )
         self._business_cache[business_id] = context
+        while len(self._business_cache) > self._business_cache_max_entries:
+            evicted_id, _ = self._business_cache.popitem(last=False)
+            logger.info("Evicted business context %s from the bounded LRU cache", evicted_id)
         return context
 
     def process_question(self, item: QuestionItem) -> QuestionSubmission:
@@ -259,6 +302,7 @@ class SubmissionPipeline:
     def _process_question_impl(self, item: QuestionItem, t0: float) -> QuestionSubmission:
         """Internal implementation of question processing."""
         t_biz0 = time.perf_counter()
+        business_was_cached = item.business_id in self._business_cache
         try:
             biz_ctx = self.get_or_load_business(item.business_id)
         except Exception as exc:  # noqa: BLE001
@@ -276,6 +320,8 @@ class SubmissionPipeline:
         t_sl0 = time.perf_counter()
         schema_linking_trace: dict[str, Any] = {}
         sl_usage: dict[str, Any] = {}
+        coverage_report = None
+        intent_summary: dict[str, Any] = {}
         try:
             linking_res = biz_ctx.linker.link_schema(
                 question=item.question,
@@ -287,9 +333,12 @@ class SubmissionPipeline:
                 cache_dir=biz_ctx.cache_dir,
                 question_id=item.id,
                 trace_enabled=self.trace_enabled,
+                as_of_date=item.as_of_date,
             )
             reduced_schema = linking_res.final_linked_schema
             grounded_literals = linking_res.grounded_literals
+            coverage_report = linking_res.coverage
+            intent_summary = linking_res.intent.to_dict() if linking_res.intent is not None else {}
             sl_usage = dict(linking_res.llm_usage_summary or {})
             if self.trace_enabled:
                 schema_linking_trace = linking_res.to_dict(
@@ -301,6 +350,8 @@ class SubmissionPipeline:
             logger.warning("Schema linking error on %s: %s", item.id, exc)
             reduced_schema = set()
             grounded_literals = []
+            coverage_report = None
+            intent_summary = {}
             if self.trace_enabled:
                 schema_linking_trace = {"error": str(exc)}
         t_sl_sec = time.perf_counter() - t_sl0
@@ -338,7 +389,12 @@ class SubmissionPipeline:
         # 3. Candidate Execution & Majority Voting
         t_vt0 = time.perf_counter()
         biz_ctx.voting_executor.execute_candidates(candidates)
-        winner, status, reason = biz_ctx.voting_executor.vote(candidates)
+        # A coverage gap means a table required by the question shape never reached the
+        # linked schema, so "unanswerable" could simply be a schema-linking miss.
+        unanswerable_proof = compute_unanswerable_proof(coverage_report)
+        winner, status, reason = biz_ctx.voting_executor.vote(
+            candidates, unanswerable_proof=unanswerable_proof
+        )
         t_vt_sec = time.perf_counter() - t_vt0
 
         # 4. Result Formatting
@@ -465,6 +521,12 @@ class SubmissionPipeline:
             cand_trunc = sum(1 for a in cand_attempts if a.get("finish_reason") == "length")
 
             submission.schema_linking_trace = schema_linking_trace
+            submission.run_id = self.run_id
+            submission.business_load_detail = (
+                {"memory_cache_hit": round(t_biz_sec, 4)}
+                if business_was_cached
+                else {k: round(float(v), 4) for k, v in biz_ctx.load_timings.items()}
+            )
             submission.stage_timings_sec = {
                 "business_load": round(t_biz_sec, 4),
                 "schema_linking": round(t_sl_sec, 4),
@@ -474,6 +536,21 @@ class SubmissionPipeline:
                 "total": round(elapsed, 4),
             }
             submission.candidate_signatures = candidate_signatures
+            submission.formatting_trace["coverage"] = (
+                coverage_report.to_dict() if coverage_report is not None else None
+            )
+            submission.formatting_trace["unanswerable_proof"] = unanswerable_proof
+            submission.formatting_trace["query_intent"] = intent_summary
+            submission.formatting_trace["candidate_diagnostics"] = [
+                {
+                    "candidate_id": c.candidate_id,
+                    "repair_stop_reason": c.repair_stop_reason,
+                    "syntax_valid": c.is_valid_syntax,
+                    "blocking_codes": _attempt_blocking_codes(c),
+                    "attempts": len(c.attempts_history),
+                }
+                for c in candidates
+            ]
             submission.llm_usage_summary = {
                 "schema_linking": sl_usage,
                 "candidate_generation": {

@@ -14,18 +14,29 @@ from pathlib import Path
 DEFAULT_BASE_OUTPUT_DIR: Path = Path(os.environ.get("ZAIC_OUTPUT_DIR", "/tmp/zaic_db"))
 
 # Profiling: MinHash and LSH indexer defaults
-DEFAULT_NUM_PERM: int = 128
+DEFAULT_NUM_PERM: int = 64
 DEFAULT_THRESHOLD: float = 0.4
 DEFAULT_SHINGLE_K: int = 3
-DEFAULT_MAX_SAMPLE_VALUES: int = 10000
+DEFAULT_MAX_SAMPLE_VALUES: int = 100
+
+# Profiling: LSH index guardrails (keeps the pickled index small and fast to load)
+DEFAULT_LSH_MAX_DISTINCT_VALUES: int = 1000
+DEFAULT_LSH_MAX_VALUE_CHARS: int = 120
+DEFAULT_LSH_CARDINALITY_SKIP_RATIO: float = 0.9
+DEFAULT_LSH_INDEX_VERSION: int = 2
 
 # Profiling: LLM summarization defaults
 DEFAULT_PROD_MODEL: str = "Qwen/Qwen3.5-9B"
 DEFAULT_LOCAL_MODEL: str = "Qwen/Qwen2.5-1.5B-Instruct"
 DEFAULT_PROD_GPU_UTIL: float = 0.70
 DEFAULT_LOCAL_GPU_UTIL: float = 0.60
-DEFAULT_LLM_MAX_LENGTH: int = 65536
+DEFAULT_LLM_MAX_LENGTH: int = 24576
 DEFAULT_QUANTIZATION: str | None = None
+
+# Profiling: minimal-profile generation guardrails
+DEFAULT_PROFILE_BATCH_SIZE: int = 64
+DEFAULT_PROFILE_MAX_TOKENS: int = 256
+DEFAULT_PROFILE_RETRY_ATTEMPTS: int = 1
 
 MINIMAL_PROFILE_PROMPT: str = """<system>
 Bạn là chuyên gia phân tích dữ liệu cho các cơ sở dữ liệu doanh nghiệp vừa và nhỏ (SMB) tại Việt Nam.
@@ -197,21 +208,29 @@ DEFAULT_MIN_CHUNK_CHARS: int = 150
 DEFAULT_EMBED_GPU_UTIL: float = 0.20
 MIN_TABLE_ROWS_FOR_SPLIT: int = 3
 
-# Schema linking: Context builder few-shot prompt examples
+# Schema linking: Context builder few-shot prompt examples.
+# The identifiers below are deliberately neutral placeholders: real table and column
+# names must always come from the retrieved <database_schema>, never from these examples.
 FEW_SHOT_SQL_EXAMPLES: str = (
     "<few_shot_examples>\n"
-    'SELECT SUM(T1."Thành tiền") AS "Tổng doanh thu"\n'
-    'FROM "ban_hang" AS T1\n'
-    "WHERE T1.\"Tên hàng\" LIKE '%Sữa tươi%'\n"
-    "  AND T1.\"Ngày tháng\" >= '2026-01-01'\n"
-    "  AND T1.\"Ngày tháng\" <= '2026-01-31';\n"
-    "\n"
-    'SELECT T2."Tên khách", SUM(T1."Số lượng") AS "Tổng số lượng"\n'
-    'FROM "hoa_don_chi_tiet" AS T1\n'
-    'JOIN "khach_hang" AS T2 ON T1."Mã khách" = T2."Mã khách"\n'
-    'GROUP BY T2."Mã khách", T2."Tên khách"\n'
-    'ORDER BY "Tổng số lượng" DESC\n'
+    "<!-- Vi du minh hoa DINH DANG cu phap. Ten bang/cot duoi day la gia dinh, "
+    "TUYET DOI khong dung lai; chi dung bang/cot co trong <database_schema>. -->\n"
+    "<example>\n"
+    'SELECT SUM(CAST(REPLACE(REPLACE(T1."CotTien", \'.\', \'\'), \',\', \'\') AS INTEGER))\n'
+    'FROM "BangGiaoDich" AS T1\n'
+    "WHERE T1.\"CotTrangThai\" NOT IN ('GiaTriLoai1', 'GiaTriLoai2')\n"
+    "  AND (SUBSTR(T1.\"CotNgay\", 7, 4) || '-' || SUBSTR(T1.\"CotNgay\", 4, 2) "
+    "|| '-' || SUBSTR(T1.\"CotNgay\", 1, 2)) BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD';\n"
+    "</example>\n"
+    "<example>\n"
+    'SELECT T2."CotTen", SUM(T1."CotSoLuong") AS "TongSoLuong"\n'
+    'FROM "BangChiTiet" AS T1\n'
+    'JOIN "BangDanhMuc" AS T2 ON T1."CotMa" = T2."CotMa"\n'
+    'WHERE T2."CotTen" IS NOT NULL\n'
+    'GROUP BY T2."CotMa", T2."CotTen"\n'
+    'ORDER BY "TongSoLuong" DESC, T2."CotMa" ASC\n'
     "LIMIT 5;\n"
+    "</example>\n"
     "</few_shot_examples>"
 )
 
@@ -221,8 +240,16 @@ DEFAULT_NUM_CANDIDATES: int = 3
 DEFAULT_SQL_MAX_RETRIES: int = 2
 DEFAULT_EXECUTION_MAX_RETRIES: int = 2
 DEFAULT_SQL_TIMEOUT_SECONDS: float = 10.0
-DEFAULT_SQL_MAX_TOKENS: int = 2048
-DEFAULT_THINKING_TOKEN_BUDGET: int = 1536
+DEFAULT_SQL_MAX_TOKENS: int = 1536
+DEFAULT_THINKING_TOKEN_BUDGET: int = 384
+DEFAULT_SQL_FINALIZE_MAX_TOKENS: int = 768
+DEFAULT_SQL_FINALIZE_THINKING_BUDGET: int = 128
+DEFAULT_RULEBOOK_MODE: str = "retrieval"
+DEFAULT_RULEBOOK_TOP_K: int = 3
+DEFAULT_BUSINESS_CACHE_MAX_ENTRIES: int = 2
+DEFAULT_GROUNDED_LITERAL_LIMIT: int = 8
+DEFAULT_GROUNDED_LITERAL_MIN_SCORE: float = 0.55
+DEFAULT_SCHEMA_LINK_MAX_TOKENS: int = 320
 DEFAULT_REASONING_START_STR: str = '{"reasoning": "<think>'
 DEFAULT_REASONING_END_STR: str = '</think>", "sql": "'
 
@@ -242,33 +269,44 @@ __all__ = [
     "ACCOUNTING_DASH_ZERO_REGEX",
     "ACCOUNTING_PARENTHESES_REGEX",
     "DATE_FORMATS",
-    # Ingestion
     "DEFAULT_BASE_OUTPUT_DIR",
     "DEFAULT_BATCH_SIZE",
-    # Submission
+    "DEFAULT_BUSINESS_CACHE_MAX_ENTRIES",
     "DEFAULT_CANDIDATE_SEEDS",
     "DEFAULT_EMBEDDING_DIM",
     "DEFAULT_EMBED_GPU_UTIL",
     "DEFAULT_EMBED_MAX_LENGTH",
     "DEFAULT_EMBED_MODEL_PATH",
     "DEFAULT_EXECUTION_MAX_RETRIES",
+    "DEFAULT_GROUNDED_LITERAL_LIMIT",
+    "DEFAULT_GROUNDED_LITERAL_MIN_SCORE",
     "DEFAULT_LLM_MAX_LENGTH",
     "DEFAULT_LOCAL_GPU_UTIL",
     "DEFAULT_LOCAL_MODEL",
     "DEFAULT_LOGS_DIR",
+    "DEFAULT_LSH_CARDINALITY_SKIP_RATIO",
+    "DEFAULT_LSH_INDEX_VERSION",
+    "DEFAULT_LSH_MAX_DISTINCT_VALUES",
+    "DEFAULT_LSH_MAX_VALUE_CHARS",
     "DEFAULT_MAX_CHUNK_CHARS",
     "DEFAULT_MAX_SAMPLE_VALUES",
     "DEFAULT_MIN_CHUNK_CHARS",
     "DEFAULT_NUM_CANDIDATES",
-    # LSH indexer
     "DEFAULT_NUM_PERM",
     "DEFAULT_PROD_GPU_UTIL",
-    # Profile summarizer
     "DEFAULT_PROD_MODEL",
+    "DEFAULT_PROFILE_BATCH_SIZE",
+    "DEFAULT_PROFILE_MAX_TOKENS",
+    "DEFAULT_PROFILE_RETRY_ATTEMPTS",
     "DEFAULT_QUANTIZATION",
     "DEFAULT_REASONING_END_STR",
     "DEFAULT_REASONING_START_STR",
+    "DEFAULT_RULEBOOK_MODE",
+    "DEFAULT_RULEBOOK_TOP_K",
+    "DEFAULT_SCHEMA_LINK_MAX_TOKENS",
     "DEFAULT_SHINGLE_K",
+    "DEFAULT_SQL_FINALIZE_MAX_TOKENS",
+    "DEFAULT_SQL_FINALIZE_THINKING_BUDGET",
     "DEFAULT_SQL_MAX_RETRIES",
     "DEFAULT_SQL_MAX_TOKENS",
     "DEFAULT_SQL_TIMEOUT_SECONDS",
@@ -280,10 +318,8 @@ __all__ = [
     "EN_DATE_FULL_REGEX",
     "EN_DATE_WEEKDAY_REGEX",
     "EXCEL_SERIAL_REGEX",
-    # Schema linking
     "FEW_SHOT_SQL_EXAMPLES",
     "ISO_DATETIME_REGEX",
-    # Raw profiler
     "ISO_DATE_REGEX",
     "KEY_TOKENS",
     "MAXIMAL_DOMINANT_RATIO",

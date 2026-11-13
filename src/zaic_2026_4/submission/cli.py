@@ -11,6 +11,7 @@ from zaic_2026_4 import constants
 from zaic_2026_4.constants import (
     DEFAULT_CANDIDATE_SEEDS,
     DEFAULT_LOGS_DIR,
+    DEFAULT_RULEBOOK_MODE,
     DEFAULT_SQL_MAX_RETRIES,
     DEFAULT_SUBMISSION_PATH,
 )
@@ -35,8 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--rulebook-mode",
         type=str,
         choices=["hybrid", "full", "retrieval"],
-        default="hybrid",
-        help="Rulebook context injection mode (default: hybrid).",
+        default=DEFAULT_RULEBOOK_MODE,
+        help=f"Rulebook context injection mode (default: {DEFAULT_RULEBOOK_MODE}).",
     )
     parser.add_argument(
         "--cases",

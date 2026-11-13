@@ -15,16 +15,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from zaic_2026_4.common.query_intent import QueryIntent, detect_query_intent
 from zaic_2026_4.common.trace_logger import (
     LLMCallRecord,
     append_llm_calls,
     extract_llm_engine_call_traces,
     make_llm_call_record,
 )
+from zaic_2026_4.constants import DEFAULT_SCHEMA_LINK_MAX_TOKENS
 from zaic_2026_4.schema_linking.ast_parser import SQLASTExtractor
 from zaic_2026_4.schema_linking.context_builder import (
     SchemaContextBuilder,
 )
+from zaic_2026_4.schema_linking.coverage import (
+    CoverageReport,
+    validate_schema_coverage,
+)
+from zaic_2026_4.schema_linking.grounding import filter_grounded_literals
 from zaic_2026_4.schema_linking.post_processor import (
     SchemaPostProcessor,
     normalize_identifier,
@@ -65,6 +72,9 @@ class SchemaLinkingResult:
     preserved_keys: set[str] = field(default_factory=set)
     grounded_literals: list[dict[str, Any]] = field(default_factory=list)
     llm_usage_summary: dict[str, Any] = field(default_factory=dict)
+    coverage: CoverageReport = field(default_factory=CoverageReport)
+    intent: QueryIntent | None = None
+    dropped_literals: list[dict[str, str]] = field(default_factory=list)
 
     def format_for_sql_generation(self, processed_metadata: dict[str, Any]) -> str:
         """Format quoted schema into clean XML context for downstream Phase 04 SQL Generation."""
@@ -107,7 +117,11 @@ class SchemaLinkingResult:
             "grounded_literals": self.grounded_literals,
             "total_retries": self.total_retries,
             "variant_traces": variant_items,
+            "coverage": self.coverage.to_dict(),
+            "dropped_literals": self.dropped_literals,
         }
+        if self.intent is not None:
+            data["intent"] = self.intent.to_dict()
         if include_detailed_traces:
             data["all_harvested_fields"] = sorted(self.all_harvested_fields)
             data["llm_usage_summary"] = self.llm_usage_summary
@@ -327,6 +341,7 @@ class TaskAlignedSchemaLinker:
         cache_dir: Path | str | None = None,
         question_id: str | None = None,
         trace_enabled: bool = True,
+        as_of_date: str | None = None,
     ) -> SchemaLinkingResult:
         """Execute Task-Aligned Schema Linking across specified context variants.
 
@@ -341,12 +356,16 @@ class TaskAlignedSchemaLinker:
             cases: Specific context variants to run, e.g. "abcde", "abce", "abe", or None (defaults to all).
             cache_dir: Optional business cache directory to automatically persist schema_linking_result.json.
             question_id: Optional question ID for logging per-question schema linking results.
+            trace_enabled: Whether to capture detailed prompts and LLM metrics in the trace.
+            as_of_date: Anchor date supplied with the question; every variant prompt is bound to it
+                so trial queries cannot silently use a period borrowed from the few-shot format.
 
         Returns:
             SchemaLinkingResult with final linked schema, execution traces, and diagnostics.
         """
         retries_limit = max_retries if max_retries is not None else self.max_retries
         all_columns = self.context_builder.get_all_tables_and_columns(processed_metadata)
+        intent = detect_query_intent(question, as_of_date)
 
         # Step 1: Construct context variants (Cases a to e as specified)
         variants = self.context_builder.build_5_variants(
@@ -355,6 +374,8 @@ class TaskAlignedSchemaLinker:
             lsh_indexer=lsh_indexer,
             vector_indexer=vector_indexer,
             cases=cases,
+            as_of_date=as_of_date,
+            intent=intent,
         )
 
         # Step 2: Generate initial trial SQL queries
@@ -364,7 +385,7 @@ class TaskAlignedSchemaLinker:
             try:
                 initial_sqls = self.llm_engine.generate(
                     prompts,
-                    max_tokens=256,
+                    max_tokens=DEFAULT_SCHEMA_LINK_MAX_TOKENS,
                     stop=["</output>", "\n\n\n", "<|im_end|>", "<|endoftext|>"],
                 )
                 if isinstance(initial_sqls, str):
@@ -380,7 +401,7 @@ class TaskAlignedSchemaLinker:
                 init_engine_traces = []
                 for p in prompts:
                     out = self.llm_engine.generate(
-                        p, max_tokens=256, stop=["</output>", "\n\n\n", "<|im_end|>"]
+                        p, max_tokens=DEFAULT_SCHEMA_LINK_MAX_TOKENS, stop=["</output>", "\n\n\n", "<|im_end|>"]
                     )
                     initial_sqls.append(out[0] if isinstance(out, list) else out)
                     seq_traces = extract_llm_engine_call_traces(self.llm_engine)
@@ -389,7 +410,7 @@ class TaskAlignedSchemaLinker:
             initial_sqls = []
             for p in prompts:
                 out = self.llm_engine.generate(
-                    p, max_tokens=256, stop=["</output>", "\n\n\n", "<|im_end|>"]
+                    p, max_tokens=DEFAULT_SCHEMA_LINK_MAX_TOKENS, stop=["</output>", "\n\n\n", "<|im_end|>"]
                 )
                 initial_sqls.append(out[0] if isinstance(out, list) else out)
                 seq_traces = extract_llm_engine_call_traces(self.llm_engine)
@@ -481,11 +502,13 @@ class TaskAlignedSchemaLinker:
                         sme_context=variant.sme_context,
                         rulebook_context=variant.rulebook_context,
                         reprompt_warning=reprompt_guidance,
+                        as_of_date=as_of_date,
+                        intent=intent,
                     )
 
                     revised_res = self.llm_engine.generate(
                         revised_prompt,
-                        max_tokens=256,
+                        max_tokens=DEFAULT_SCHEMA_LINK_MAX_TOKENS,
                         stop=["</output>", "\n\n\n", "<|im_end|>", "<|endoftext|>"],
                     )
                     if isinstance(revised_res, list):
@@ -590,6 +613,21 @@ class TaskAlignedSchemaLinker:
 
         preserved = canonical_schema - linked_fields
 
+        # Step 5b: Coverage repair - restore question-implied tables/columns that no trial
+        # query happened to reference (date columns, measures, join keys).
+        canonical_schema, coverage = validate_schema_coverage(
+            schema_cols=canonical_schema,
+            processed_metadata=processed_metadata,
+            intent=intent,
+            raw_profile=raw_profile,
+        )
+        quoted_schema, canonical_schema = SchemaPostProcessor.post_process_linked_schema(
+            raw_fields=canonical_schema,
+            processed_metadata=processed_metadata,
+            table_aliases=discovered_aliases,
+            always_quote=True,
+        )
+
         # Step 6: Proactive Literal Grounding from question & trial queries
         if lsh_indexer is not None:
             q_grounded = self.extract_grounded_literals_from_question(
@@ -600,7 +638,13 @@ class TaskAlignedSchemaLinker:
             )
             grounded_candidates.extend(q_grounded)
 
-        final_grounded = self.deduplicate_grounded_literals(grounded_candidates)
+        # Step 6b: Grounding hygiene - only question-derived entities that still exist in the
+        # final schema survive; speculative literals from trial SQL are dropped and traced.
+        final_grounded, dropped_literals = filter_grounded_literals(
+            candidates=self.deduplicate_grounded_literals(grounded_candidates),
+            final_schema=canonical_schema,
+            question=question,
+        )
 
         usage_summary = {
             "llm_calls": len(llm_call_records),
@@ -623,6 +667,9 @@ class TaskAlignedSchemaLinker:
             preserved_keys=preserved,
             grounded_literals=final_grounded,
             llm_usage_summary=usage_summary,
+            coverage=coverage,
+            intent=intent,
+            dropped_literals=dropped_literals,
         )
 
         # Automatically persist schema_linking_result.json to cache_dir if provided
@@ -635,14 +682,15 @@ class TaskAlignedSchemaLinker:
                     question_id=question_id,
                     include_detailed_traces=trace_enabled,
                 )
-                res_file = c_dir / "schema_linking_result.json"
+                # A per-question file already carries this payload; writing the generic
+                # alias as well used to duplicate every schema-linking trace on disk.
+                res_file = (
+                    c_dir / f"schema_linking_result_{question_id}.json"
+                    if question_id
+                    else c_dir / "schema_linking_result.json"
+                )
                 with open(res_file, "w", encoding="utf-8") as f:
                     json.dump(out_dict, f, ensure_ascii=False, indent=2)
-
-                if question_id:
-                    q_file = c_dir / f"schema_linking_result_{question_id}.json"
-                    with open(q_file, "w", encoding="utf-8") as f:
-                        json.dump(out_dict, f, ensure_ascii=False, indent=2)
             except (OSError, TypeError, ValueError) as exc:
                 logger.warning("Failed to save schema_linking_result.json in %s: %s", c_dir, exc)
 
@@ -663,6 +711,7 @@ def task_aligned_schema_linking(
     cases: str | list[str] | set[str] | None = None,
     cache_dir: Path | str | None = None,
     question_id: str | None = None,
+    as_of_date: str | None = None,
 ) -> set[str]:
     """Functional interface for Task-Aligned Schema Linking matching the original paper's pseudo-code.
 
@@ -677,6 +726,7 @@ def task_aligned_schema_linking(
         - cases: Specific context variants to run, e.g. "abcde", "abce", or None.
         - cache_dir: Optional directory to persist schema_linking_result.json.
         - question_id: Optional question ID for per-question result files.
+        - as_of_date: Optional anchor date binding every variant prompt to the question period.
 
     Output:
         - final_linked_schema: Set of selected columns formatted as 'TableName.ColumnName'.
@@ -698,5 +748,6 @@ def task_aligned_schema_linking(
         cases=cases,
         cache_dir=cache_dir,
         question_id=question_id,
+        as_of_date=as_of_date,
     )
     return result.final_linked_schema

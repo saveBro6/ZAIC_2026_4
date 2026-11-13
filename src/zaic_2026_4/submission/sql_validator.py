@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import re
 import unicodedata
+from datetime import timedelta
 from typing import Any
 
 import sqlglot
@@ -13,6 +15,8 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 from sqlglot.optimizer.scope import traverse_scope
 
+from zaic_2026_4.common.query_intent import QueryIntent
+from zaic_2026_4.common.temporal_resolver import parse_iso_date
 from zaic_2026_4.common.trace_logger import extract_thinking_trace
 from zaic_2026_4.submission.models import VALID_DATAMATE_TYPES, ValidationResult
 from zaic_2026_4.submission.rules import ValidationIssue
@@ -33,15 +37,8 @@ def clean_sql_string(raw_sql: str) -> str:
     return sql
 
 
-def parse_structured_sql_output_with_reasoning(
-    raw_output: str,
-    default_type: str = "number",
-) -> tuple[str, str, str, str, list[ValidationIssue]]:
-    """Parse JSON Structured Output into (sql, target_type, reasoning, thinking, issues).
-
-    Emits ValidationIssue with canonical codes OUTPUT_EMPTY, OUTPUT_UNPARSEABLE, or TYPE_INVALID.
-    """
-    thinking = extract_thinking_trace(raw_output)
+def _strip_code_fences(raw_output: str) -> str:
+    """Remove leading/trailing markdown code fences from a model response."""
     text = raw_output.strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -50,6 +47,52 @@ def parse_structured_sql_output_with_reasoning(
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines).strip()
+    return text
+
+
+def is_truncated_json_output(raw_output: str) -> bool:
+    """Detect a response cut mid-JSON (unbalanced braces or unterminated string).
+
+    A truncated generation must not be treated as an unparseable one: the repair turn has
+    to shorten the reasoning and re-emit a complete object instead of guessing the SQL.
+    """
+    text = _strip_code_fences(raw_output)
+    if not text:
+        return False
+    if not text.lstrip().startswith("{"):
+        return False
+    if text.count("{") > text.count("}"):
+        return True
+
+    # Odd number of unescaped double quotes means the last string literal was cut open.
+    quote_count = 0
+    escaped = False
+    for ch in text:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            quote_count += 1
+    return quote_count % 2 == 1
+
+
+def parse_structured_sql_output_with_reasoning(
+    raw_output: str,
+    default_type: str = "number",
+) -> tuple[str, str, str, str, list[ValidationIssue]]:
+    """Parse JSON Structured Output into (sql, target_type, reasoning, thinking, issues).
+
+    Emits ValidationIssue with canonical codes OUTPUT_EMPTY, OUTPUT_TRUNCATED,
+    OUTPUT_UNPARSEABLE, or TYPE_INVALID. A response that clearly attempted JSON but could
+    not be parsed returns an empty SQL string: echoing the raw blob as SQL used to make a
+    malformed generation look like a syntactically valid query.
+    """
+    thinking = extract_thinking_trace(raw_output)
+    text = _strip_code_fences(raw_output)
+    looks_like_json = text.lstrip().startswith("{")
 
     parsed_dict: dict[str, Any] | None = None
     issues: list[ValidationIssue] = []
@@ -60,19 +103,28 @@ def parse_structured_sql_output_with_reasoning(
         except (json.JSONDecodeError, ValueError):
             parsed_dict = None
 
-    if parsed_dict is None:
+    if parsed_dict is None and looks_like_json:
         json_match = re.search(r"\{[\s\S]*\}", text)
         if json_match:
             try:
                 parsed_dict = json.loads(json_match.group(0))
             except (json.JSONDecodeError, ValueError):
-                issues.append(
-                    ValidationIssue(
-                        code="OUTPUT_UNPARSEABLE",
-                        message="Không thể phân tích cú pháp JSON từ đầu ra của mô hình.",
-                        severity="blocking",
-                    )
-                )
+                parsed_dict = None
+
+    if parsed_dict is None and looks_like_json:
+        truncated = is_truncated_json_output(text)
+        issues.append(
+            ValidationIssue(
+                code="OUTPUT_TRUNCATED" if truncated else "OUTPUT_UNPARSEABLE",
+                message=(
+                    "Đầu ra JSON bị cắt giữa chừng do hết ngân sách token."
+                    if truncated
+                    else "Không thể phân tích cú pháp JSON từ đầu ra của mô hình."
+                ),
+                severity="blocking",
+            )
+        )
+        return "", default_type, "", thinking, issues
 
     if parsed_dict is not None and isinstance(parsed_dict, dict):
         raw_sql = str(parsed_dict.get("sql", ""))
@@ -258,6 +310,61 @@ def _get_column_samples(col_meta: dict[str, Any]) -> set[str]:
     return samples
 
 
+_CURRENCY_NOISE_REGEX = re.compile(r"[^\d.,-]")
+_THOUSAND_DOT_REGEX = re.compile(r"^-?\d{1,3}(?:\.\d{3})+$")
+_THOUSAND_COMMA_REGEX = re.compile(r"^-?\d{1,3}(?:,\d{3})+$")
+_DECIMAL_TAIL_REGEX = re.compile(r"[.,]\d{1,2}$")
+
+
+def infer_currency_separators(samples: set[str]) -> tuple[str | None, str | None]:
+    """Infer the thousands and decimal separators used by a currency column.
+
+    Returns:
+        Tuple of (thousands_separator, decimal_separator); either element may be None when
+        the sample values do not expose it.
+    """
+    thousand_votes: dict[str, int] = {}
+    decimal_votes: dict[str, int] = {}
+    for sample in samples:
+        clean = _CURRENCY_NOISE_REGEX.sub("", str(sample)).strip()
+        if not clean:
+            continue
+        if _THOUSAND_DOT_REGEX.match(clean):
+            thousand_votes["."] = thousand_votes.get(".", 0) + 1
+        elif _THOUSAND_COMMA_REGEX.match(clean):
+            thousand_votes[","] = thousand_votes.get(",", 0) + 1
+        elif _DECIMAL_TAIL_REGEX.search(clean) and not _THOUSAND_DOT_REGEX.match(clean) and not _THOUSAND_COMMA_REGEX.match(clean):
+            tail = clean[-3:]
+            if "." in tail:
+                decimal_votes["."] = decimal_votes.get(".", 0) + 1
+            elif "," in tail:
+                decimal_votes[","] = decimal_votes.get(",", 0) + 1
+
+    thousand = max(thousand_votes, key=lambda k: thousand_votes[k]) if thousand_votes else None
+    decimal = max(decimal_votes, key=lambda k: decimal_votes[k]) if decimal_votes else None
+    return thousand, decimal
+
+
+def _collect_replaced_chars(col_node: exp.Expression) -> set[str] | None:
+    """Collect literal characters REPLACEd around a column, or None when REPLACE is absent."""
+    replaced: set[str] = set()
+    found = False
+    parent = col_node.parent
+    while parent is not None and not isinstance(parent, exp.Select):
+        if isinstance(parent, exp.Replace):
+            found = True
+            source_arg = parent.args.get("expression")
+            if isinstance(source_arg, exp.Literal):
+                replaced.add(source_arg.name)
+        elif isinstance(parent, exp.Anonymous) and parent.name.lower() == "replace":
+            found = True
+            literal_args = [a for a in parent.expressions if isinstance(a, exp.Literal)]
+            if len(literal_args) >= 2:
+                replaced.add(literal_args[1].name)
+        parent = parent.parent
+    return replaced if found else None
+
+
 class SQLValidator:
     """Static SQL analyzer enforcing SQLite syntax validity and schema-grounded domain rules."""
 
@@ -288,8 +395,18 @@ class SQLValidator:
         raw_sql: str,
         target_type: str | None = None,
         metadata: dict[str, Any] | None = None,
+        as_of_date: str | None = None,
+        intent: QueryIntent | None = None,
     ) -> ValidationResult:
-        """Validate candidate SQL string against SQLite dialect, AST scope, and schema metadata."""
+        """Validate candidate SQL string against SQLite dialect, AST scope, and schema metadata.
+
+        Args:
+            raw_sql: Candidate SQL statement.
+            target_type: Declared DataMate answer type.
+            metadata: Processed metadata mapping 'table.column' to column profiles.
+            as_of_date: Anchor date of the question, used for date-window validation.
+            intent: Optional QueryIntent carrying the deterministically resolved periods.
+        """
         sql = clean_sql_string(raw_sql)
         if not sql:
             return ValidationResult(
@@ -857,14 +974,290 @@ class SQLValidator:
                         )
                     )
 
+        # 9. Temporal window checks against the deterministic period of the question.
+        issues.extend(
+            cls._check_temporal_window(
+                parsed=parsed,
+                as_of_date=as_of_date,
+                intent=intent,
+            )
+        )
+
+        # 10. Currency separator checks and categorical exact-match hints.
+        if col_info:
+            issues.extend(cls._check_currency_usage(parsed=parsed, col_info=col_info))
+            issues.extend(
+                cls._check_categorical_exact_match(
+                    parsed=parsed,
+                    col_info=col_info,
+                    strict=bool(getattr(intent, "wants_exact_match", False)),
+                )
+            )
+
         # Final verdict: is_valid is True iff no blocking issues exist
         is_valid = not any(getattr(i, "severity", "blocking") == "blocking" for i in issues)
         return ValidationResult(is_valid=is_valid, issues=issues)
+
+    @staticmethod
+    def _natural_upper_bounds(period_label: str, period_end: Any) -> set[Any]:
+        """Return the calendar boundaries a query may legitimately use around a period end.
+
+        A correct query often bounds the resolved period by its natural calendar unit
+        (whole month, whole quarter, whole year) or by the exclusive first day of the next
+        unit, e.g. ``>= '2026-09-01' AND < '2026-10-01'`` for a September period. Those
+        literals are legal even though they sit after ``as_of_date``.
+        """
+        bounds = {period_end}
+        month_end = period_end.replace(
+            day=calendar.monthrange(period_end.year, period_end.month)[1]
+        )
+        bounds.add(month_end)
+        bounds.add(month_end + timedelta(days=1))
+
+        label = (period_label or "").lower()
+        if label.startswith("quarter"):
+            quarter_end_month = (period_end.month - 1) // 3 * 3 + 3
+            quarter_end = period_end.replace(
+                month=quarter_end_month,
+                day=calendar.monthrange(period_end.year, quarter_end_month)[1],
+            )
+            bounds.add(quarter_end)
+            bounds.add(quarter_end + timedelta(days=1))
+        if label.startswith("year"):
+            year_end = period_end.replace(month=12, day=31)
+            bounds.add(year_end)
+            bounds.add(year_end + timedelta(days=1))
+        return bounds
+
+    @classmethod
+    def _check_temporal_window(
+        cls,
+        parsed: exp.Expression,
+        as_of_date: str | None,
+        intent: QueryIntent | None,
+    ) -> list[ValidationIssue]:
+        """Flag date windows that cannot belong to the question's resolved period.
+
+        The check only runs when the question carries a deterministically resolved period.
+        Comparisons are restricted to literals sharing the anchor year, and literals on a
+        natural calendar boundary of the period are accepted, so a legitimate historical
+        filter or a whole-month bound is never reported as an out-of-period query.
+        """
+        issues: list[ValidationIssue] = []
+
+        anchor = parse_iso_date(as_of_date)
+        if anchor is None:
+            return issues
+
+        periods = list(getattr(intent, "periods", ()) or ())
+        if not periods:
+            return issues
+
+        period_start = parse_iso_date(periods[0].start)
+        period_end = parse_iso_date(periods[-1].end)
+        if period_start is None or period_end is None:
+            return issues
+
+        candidate_dates: list[Any] = []
+        for lit in parsed.find_all(exp.Literal):
+            raw_val = str(lit.this)
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", raw_val):
+                continue
+            parsed_date = parse_iso_date(raw_val)
+            if parsed_date is not None:
+                candidate_dates.append(parsed_date)
+
+        if not candidate_dates:
+            return issues
+
+        upper_bounds = cls._natural_upper_bounds(periods[-1].label, period_end)
+        latest_legal = max(upper_bounds)
+        beyond_bounds = sorted({d for d in candidate_dates if d > latest_legal})
+        if beyond_bounds:
+            issues.append(
+                ValidationIssue(
+                    code="DATE_RANGE_OUT_OF_PERIOD",
+                    message=(
+                        f"Câu SQL lọc tới ngày {beyond_bounds[-1].isoformat()}, vượt quá "
+                        f"biên hợp lệ {latest_legal.isoformat()} của kỳ "
+                        f"{period_start.isoformat()}..{period_end.isoformat()}."
+                    ),
+                    severity="blocking",
+                    hint=(
+                        f"Dùng đúng kỳ {period_start.isoformat()} đến {period_end.isoformat()} "
+                        "theo <temporal_anchor>."
+                    ),
+                )
+            )
+            return issues
+
+        same_year = [d for d in candidate_dates if d.year == anchor.year]
+        if not same_year:
+            return issues
+
+        window_start, window_end = min(same_year), max(same_year)
+        intersects = window_start <= period_end and window_end >= period_start
+        if not intersects:
+            issues.append(
+                ValidationIssue(
+                    code="DATE_RANGE_OUT_OF_PERIOD",
+                    message=(
+                        f"Khoảng ngày {window_start.isoformat()}..{window_end.isoformat()} "
+                        f"không giao với kỳ đã xác định {period_start.isoformat()}..{period_end.isoformat()}."
+                    ),
+                    severity="blocking",
+                    hint=(
+                        f"Dùng đúng kỳ {period_start.isoformat()} đến {period_end.isoformat()} "
+                        "theo <temporal_anchor>."
+                    ),
+                )
+            )
+        return issues
+
+    @classmethod
+    def _check_currency_usage(
+        cls,
+        parsed: exp.Expression,
+        col_info: dict[str, dict[str, Any]],
+    ) -> list[ValidationIssue]:
+        """Detect currency cleaning expressions that keep the real thousands separator."""
+        issues: list[ValidationIssue] = []
+        for col_node in parsed.find_all(exp.Column):
+            col_name = col_node.name
+            if not col_name or col_name == "*":
+                continue
+            matched_meta = cls._match_column_meta(col_node, col_info)
+            if not matched_meta:
+                continue
+            if str(matched_meta.get("data_format", "")).upper() != "CURRENCY":
+                continue
+
+            samples = _get_column_samples(matched_meta)
+            thousand, decimal = infer_currency_separators(samples)
+            replaced = _collect_replaced_chars(col_node)
+
+            if replaced is None:
+                if thousand is not None:
+                    issues.append(
+                        ValidationIssue(
+                            code="CURRENCY_SEPARATOR_MISMATCH",
+                            message=(
+                                f"Cột tiền tệ '{col_name}' là chuỗi có dấu phân cách nghìn "
+                                f"'{thousand}' nhưng không được làm sạch trước khi tính toán."
+                            ),
+                            severity="warning",
+                            column=col_name,
+                            hint=(
+                                f"Bọc giá trị trong CAST(REPLACE(REPLACE(\"{col_name}\", '{thousand}', ''), "
+                                "'đ', '') AS INTEGER)."
+                            ),
+                        )
+                    )
+                continue
+
+            if thousand is not None and thousand not in replaced:
+                issues.append(
+                    ValidationIssue(
+                        code="CURRENCY_SEPARATOR_MISMATCH",
+                        message=(
+                            f"Cột tiền tệ '{col_name}' dùng '{thousand}' làm dấu phân cách nghìn "
+                            f"nhưng SQL không REPLACE ký tự này, nên giá trị sau CAST bị sai quy mô."
+                        ),
+                        severity="blocking",
+                        column=col_name,
+                        hint=f"Thêm REPLACE(\"{col_name}\", '{thousand}', '') trước khi CAST.",
+                    )
+                )
+            if decimal is not None and decimal in replaced and thousand is not None:
+                issues.append(
+                    ValidationIssue(
+                        code="MONEY_SCALE_RISK",
+                        message=(
+                            f"Cột tiền tệ '{col_name}' có phần thập phân với dấu '{decimal}' "
+                            "nhưng SQL xóa cả phần thập phân lẫn phần nghìn."
+                        ),
+                        severity="warning",
+                        column=col_name,
+                        hint="Chỉ làm sạch dấu phân cách nghìn, xử lý phần thập phân riêng.",
+                    )
+                )
+        return issues
+
+    @classmethod
+    def _check_categorical_exact_match(
+        cls,
+        parsed: exp.Expression,
+        col_info: dict[str, dict[str, Any]],
+        strict: bool = False,
+    ) -> list[ValidationIssue]:
+        """Require equality instead of LIKE when the searched value exists verbatim.
+
+        Args:
+            parsed: Parsed SQL expression.
+            col_info: Column metadata lookup.
+            strict: When the question asks for an exact value the finding is blocking, so
+                the repair loop must rewrite the LIKE into an equality comparison.
+        """
+        issues: list[ValidationIssue] = []
+        for node in parsed.find_all(exp.Like):
+            col_node = node.this if isinstance(node.this, exp.Column) else None
+            pattern_node = node.expression
+            if col_node is None or not isinstance(pattern_node, exp.Literal):
+                continue
+            pattern = str(pattern_node.this or "")
+            stripped = pattern.strip("%").strip()
+            if not stripped or "%" in stripped:
+                continue
+
+            matched_meta = cls._match_column_meta(col_node, col_info)
+            if not matched_meta:
+                continue
+            if str(matched_meta.get("data_format", "")).upper() != "STRING":
+                continue
+
+            samples = {_normalize_text(s) for s in _get_column_samples(matched_meta)}
+            if _normalize_text(stripped) in samples:
+                issues.append(
+                    ValidationIssue(
+                        code="LITERAL_PARTIAL_MATCH",
+                        message=(
+                            f"Giá trị '{stripped}' tồn tại nguyên vẹn trong cột '{col_node.name}' "
+                            "nhưng đang được so sánh bằng LIKE."
+                        ),
+                        severity="blocking" if strict else "warning",
+                        column=col_node.name,
+                        hint=(
+                            f"Dùng LOWER(\"{col_node.name}\") = LOWER('{stripped}') "
+                            "để tránh khớp một phần ngoài ý muốn."
+                        ),
+                    )
+                )
+        return issues
+
+    @staticmethod
+    def _match_column_meta(
+        col_node: exp.Column,
+        col_info: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Resolve the metadata entry of a column node, preferring its table qualifier."""
+        qualifier = col_node.table
+        col_name = col_node.name
+        if qualifier:
+            direct = col_info.get(f"{qualifier.lower()}.{col_name.lower()}")
+            if direct is not None:
+                return direct
+        candidates = [
+            v for k, v in col_info.items()
+            if k.endswith(f".{col_name.lower()}") or k == col_name.lower()
+        ]
+        return candidates[0] if len(candidates) == 1 else None
 
 
 __all__ = [
     "SQLValidator",
     "clean_sql_string",
+    "infer_currency_separators",
+    "is_truncated_json_output",
     "parse_structured_sql_output",
     "parse_structured_sql_output_with_reasoning",
 ]

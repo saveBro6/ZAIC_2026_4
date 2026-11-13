@@ -8,7 +8,9 @@ in /tmp to ensure rapid downstream query processing within competition time budg
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,8 @@ from zaic_2026_4.profiling.vector_indexer import (
     MockEmbedder,
     SemanticVectorIndexer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ProfilingOrchestrator:
@@ -90,6 +94,8 @@ class ProfilingOrchestrator:
         self.trace_enabled = trace_enabled
         self.db_path: Path | None = None
         self._pipeline_result: dict[str, Any] | None = None
+        # Per-stage wall-clock breakdown of run_pipeline, exposed for pipeline tracing.
+        self.last_stage_timings: dict[str, float] = {}
 
     def _read_file(self, path: str | Path) -> str:
         """Safely read a text file with UTF-8 encoding and fallback handling.
@@ -113,18 +119,49 @@ class ProfilingOrchestrator:
         except OSError:
             return ""
 
-    def _get_db_path(self) -> str:
+    def _input_fingerprint(self) -> str:
+        """Fingerprint the business input files so stale cached artifacts can be detected."""
+        hasher = hashlib.sha1()
+        try:
+            files = sorted(p for p in self.business_dir.rglob("*") if p.is_file())
+        except OSError:
+            files = []
+        for path in files:
+            try:
+                stat = path.stat()
+                relative = path.relative_to(self.business_dir).as_posix()
+            except (OSError, ValueError):
+                continue
+            hasher.update(f"{relative}:{stat.st_size}:{int(stat.st_mtime)}".encode())
+        if self.calendar_path is not None and self.calendar_path.is_file():
+            try:
+                cal_stat = self.calendar_path.stat()
+                hasher.update(f"calendar:{cal_stat.st_size}:{int(cal_stat.st_mtime)}".encode())
+            except OSError:
+                pass
+        return hasher.hexdigest()
+
+    def _get_db_path(self, force_rebuild: bool = False) -> str:
         """Locate existing SQLite database or automatically ingest tabular data into SQLite.
+
+        Args:
+            force_rebuild: When True (or when the business inputs changed) the cached
+                database is discarded so the changed data is actually re-ingested instead
+                of being silently served from a stale file.
 
         Returns:
             Absolute path string to SQLite database file.
         """
-        if self.db_path is not None and self.db_path.exists():
-            return str(self.db_path)
-
         biz_name = self.business_dir.name
         cached_db_path = self.cache_dir / f"{biz_name}.db"
-        if cached_db_path.is_file():
+
+        if force_rebuild:
+            self.db_path = None
+            if cached_db_path.is_file():
+                cached_db_path.unlink()
+        elif self.db_path is not None and self.db_path.exists():
+            return str(self.db_path)
+        elif cached_db_path.is_file():
             self.db_path = cached_db_path
             return str(cached_db_path)
 
@@ -153,14 +190,25 @@ class ProfilingOrchestrator:
         profile_json_path = self.cache_dir / "metadata_profile.json"
         lsh_cache_path = self.cache_dir / "lsh_index.pkl"
         faiss_cache_dir = self.cache_dir / "faiss_index"
+        fingerprint_path = self.cache_dir / "cache_fingerprint.txt"
+        timings: dict[str, float] = {}
 
-        # Step 1 & 2: Metadata Profiling (Disk cache reload when available)
-        if (
-            not force_rebuild
-            and profile_json_path.is_file()
-            and lsh_cache_path.is_file()
-            and faiss_cache_dir.is_dir()
-        ):
+        fingerprint = self._input_fingerprint()
+        if not force_rebuild and fingerprint_path.is_file():
+            try:
+                cached_fingerprint = fingerprint_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                cached_fingerprint = ""
+            if cached_fingerprint and cached_fingerprint != fingerprint:
+                logger.info(
+                    "Business inputs changed for %s; rebuilding cached profiling artifacts.",
+                    self.business_dir.name,
+                )
+                force_rebuild = True
+
+        # Step 1 & 2: Metadata Profiling (Disk cache reload when available). Artifacts are
+        # reused independently: a missing index must not force a full LLM re-profiling run.
+        if not force_rebuild and profile_json_path.is_file():
             with open(profile_json_path, "r", encoding="utf-8") as f:
                 processed_metadata = json.load(f)
 
@@ -174,15 +222,47 @@ class ProfilingOrchestrator:
                     raw_profile = None
             self.raw_profile = raw_profile
 
-            lsh_indexer = VietnameseLSHIndexer.load(lsh_cache_path)
-            vector_indexer = SemanticVectorIndexer.load(
-                faiss_cache_dir,
-                model_path=self.vector_model_path,
-                embedder=self.embedder,
-            )
+            t_art0 = time.perf_counter()
+            lsh_indexer = None
+            if lsh_cache_path.is_file():
+                try:
+                    lsh_indexer = VietnameseLSHIndexer.load(lsh_cache_path)
+                except Exception as exc:  # noqa: BLE001 - any corrupt/stale artifact is rebuilt
+                    logger.warning("Rebuilding incompatible LSH index %s: %s", lsh_cache_path, exc)
+            if lsh_indexer is None:
+                lsh_indexer = VietnameseLSHIndexer()
+                lsh_indexer.build_index(processed_metadata)
+                lsh_indexer.save(lsh_cache_path)
+            timings["lsh_index"] = time.perf_counter() - t_art0
+
+            t_vec0 = time.perf_counter()
+            if faiss_cache_dir.is_dir():
+                vector_indexer = SemanticVectorIndexer.load(
+                    faiss_cache_dir,
+                    model_path=self.vector_model_path,
+                    embedder=self.embedder,
+                )
+            else:
+                readme_text_cached = self._read_file(self.business_dir / "README.md")
+                vector_indexer = SemanticVectorIndexer(
+                    model_path=self.vector_model_path,
+                    embedder=self.embedder,
+                )
+                vector_indexer.build_index(
+                    processed_metadata=processed_metadata,
+                    rulebook_text=self._read_file(self.rulebook_path),
+                    readme_text=readme_text_cached,
+                )
+                vector_indexer.save(faiss_cache_dir)
+            timings["faiss_index"] = time.perf_counter() - t_vec0
             if self.embedder is None and vector_indexer is not None:
                 self.embedder = vector_indexer.embedder
 
+            # Resolve the database through ingestion so dry-run verification stays enabled
+            # even when the cached artifacts predate the database file.
+            self._get_db_path()
+
+            self.last_stage_timings = {"cache_reuse": 1.0, **timings}
             result = {
                 "metadata": processed_metadata,
                 "raw_profile": raw_profile,
@@ -192,12 +272,16 @@ class ProfilingOrchestrator:
             self._pipeline_result = result
             return result
 
-        db_path = self._get_db_path()
+        t_db0 = time.perf_counter()
+        db_path = self._get_db_path(force_rebuild=force_rebuild)
+        timings["db_ingest"] = time.perf_counter() - t_db0
 
         # Step 1: Raw Profiling on business tables and calendar
+        t_raw0 = time.perf_counter()
         raw_profiler = RawDatabaseProfiler(db_path, calendar_path=self.calendar_path)
         raw_profile = raw_profiler.profile_database()
         self.raw_profile = raw_profile
+        timings["raw_profile"] = time.perf_counter() - t_raw0
 
         # Save raw profile to cache for diagnostics
         raw_profile_path = self.cache_dir / "raw_profile.json"
@@ -205,9 +289,11 @@ class ProfilingOrchestrator:
             json.dump(raw_profile, f, ensure_ascii=False, indent=2)
 
         # Step 2: LLM Summarization across all tables (including calendar)
+        t_llm0 = time.perf_counter()
         readme_text = self._read_file(self.business_dir / "README.md")
         summarizer = ProfileLLMSummarizer(self.llm_engine)
         processed_metadata = summarizer.generate_profiles(raw_profile, readme_text)
+        timings["llm_profiling"] = time.perf_counter() - t_llm0
 
         # Persist updated metadata JSON
         with open(profile_json_path, "w", encoding="utf-8") as f:
@@ -236,11 +322,14 @@ class ProfilingOrchestrator:
             append_llm_calls(self.cache_dir, summarizer.last_llm_call_records)
 
         # Step 3: Vietnamese LSH Indexing
+        t_lsh0 = time.perf_counter()
         lsh_indexer = VietnameseLSHIndexer()
         lsh_indexer.build_index(processed_metadata)
         lsh_indexer.save(lsh_cache_path)
+        timings["lsh_index"] = time.perf_counter() - t_lsh0
 
         # Step 4: FAISS Semantic Vector Indexing
+        t_vec0 = time.perf_counter()
         rulebook_text = self._read_file(self.rulebook_path)
         vector_indexer = SemanticVectorIndexer(
             model_path=self.vector_model_path,
@@ -252,10 +341,17 @@ class ProfilingOrchestrator:
             readme_text=readme_text,
         )
         vector_indexer.save(faiss_cache_dir)
+        timings["faiss_index"] = time.perf_counter() - t_vec0
 
         if self.embedder is None and vector_indexer is not None:
             self.embedder = vector_indexer.embedder
 
+        try:
+            fingerprint_path.write_text(fingerprint, encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Failed to persist cache fingerprint in %s: %s", self.cache_dir, exc)
+
+        self.last_stage_timings = {"cache_reuse": 0.0, **timings}
         result = {
             "metadata": processed_metadata,
             "raw_profile": raw_profile,

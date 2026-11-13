@@ -23,6 +23,9 @@ from zaic_2026_4.constants import (
     DEFAULT_LOCAL_MODEL,
     DEFAULT_PROD_GPU_UTIL,
     DEFAULT_PROD_MODEL,
+    DEFAULT_PROFILE_BATCH_SIZE,
+    DEFAULT_PROFILE_MAX_TOKENS,
+    DEFAULT_PROFILE_RETRY_ATTEMPTS,
     DEFAULT_QUANTIZATION,
     DEFAULT_REASONING_END_STR,
     DEFAULT_REASONING_START_STR,
@@ -393,7 +396,7 @@ class ProfileLLMSummarizer:
     def __init__(
         self,
         llm_engine: LLMEngineProtocol | Any,
-        batch_size: int = 64,
+        batch_size: int = DEFAULT_PROFILE_BATCH_SIZE,
     ) -> None:
         """Initialize ProfileLLMSummarizer with an LLM engine."""
         self.llm = llm_engine
@@ -470,16 +473,23 @@ class ProfileLLMSummarizer:
             self.last_llm_call_records = []
             return {}
 
-        # Phase 2: Batch inference for minimal prompts
+        # Phase 2: Batch inference for minimal prompts.
+        # The "\n\n" stop sequence used to abort every one-sentence answer at its first
+        # blank line, and 160 tokens left no headroom, which is why a share of the profiles
+        # came back empty. Both are corrected here, with one retry and a deterministic
+        # fallback for anything the model still leaves blank.
         all_min_prompts = [item["min_prompt"] for item in work_items]
         min_summaries: list[str] = []
         chunk_engine_traces: list[dict[str, Any]] = []
+        profile_sources: list[str] = ["llm"] * len(all_min_prompts)
+        stop_sequences = ["</output>", "<|im_end|>", "<|endoftext|>"]
+
         for i in range(0, len(all_min_prompts), self.batch_size):
             chunk = all_min_prompts[i : i + self.batch_size]
             chunk_outs = self.llm.generate(
                 chunk,
-                max_tokens=160,
-                stop=["\n\n", "</output>", "<|im_end|>", "<|endoftext|>"],
+                max_tokens=DEFAULT_PROFILE_MAX_TOKENS,
+                stop=stop_sequences,
             )
             if isinstance(chunk_outs, str):
                 chunk_outs = [chunk_outs]
@@ -487,6 +497,41 @@ class ProfileLLMSummarizer:
             traces = extract_llm_engine_call_traces(self.llm)
             for j in range(len(chunk)):
                 chunk_engine_traces.append(traces[j] if j < len(traces) else {})
+
+        for attempt in range(DEFAULT_PROFILE_RETRY_ATTEMPTS):
+            empty_indices = [i for i, text in enumerate(min_summaries) if not str(text).strip()]
+            if not empty_indices:
+                break
+            retry_prompts = [all_min_prompts[i] for i in empty_indices]
+            retry_outs = self.llm.generate(
+                retry_prompts,
+                max_tokens=DEFAULT_PROFILE_MAX_TOKENS,
+                stop=stop_sequences,
+            )
+            if isinstance(retry_outs, str):
+                retry_outs = [retry_outs]
+            retry_traces = extract_llm_engine_call_traces(self.llm)
+            for slot, work_idx in enumerate(empty_indices):
+                if slot >= len(retry_outs):
+                    continue
+                retry_text = str(retry_outs[slot]).strip()
+                if not retry_text:
+                    continue
+                min_summaries[work_idx] = retry_text
+                profile_sources[work_idx] = f"llm_retry_{attempt + 1}"
+                if slot < len(retry_traces):
+                    chunk_engine_traces[work_idx] = retry_traces[slot]
+
+        for idx, text in enumerate(min_summaries):
+            if str(text).strip():
+                continue
+            item = work_items[idx]
+            data_format = str(item["col_stats"].get("data_format", "STRING") or "STRING")
+            min_summaries[idx] = (
+                f'Cột "{item["col_name"]}" thuộc bảng "{item["table_name"]}" '
+                f"lưu trữ dữ liệu kiểu {data_format}."
+            )
+            profile_sources[idx] = "fallback"
 
         # Phase 3: Deterministic Maximal Profile Composition & Structural Indexing
         table_ctx_map = build_table_context(db_profile)
@@ -509,6 +554,7 @@ class ProfileLLMSummarizer:
                 "prompt": item["min_prompt"],
                 "raw_output": raw_out,
                 "minimal_profile": short_summary,
+                "profile_source": profile_sources[idx] if idx < len(profile_sources) else "llm",
                 "prompt_tokens": eng_trace.get("prompt_tokens"),
                 "completion_tokens": eng_trace.get("completion_tokens"),
                 "finish_reason": eng_trace.get("finish_reason"),

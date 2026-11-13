@@ -196,6 +196,8 @@ class QuestionSubmission:
     formatting_trace: dict[str, Any] = field(default_factory=dict)
     schema_linking_trace: dict[str, Any] = field(default_factory=dict)
     stage_timings_sec: dict[str, float] = field(default_factory=dict)
+    business_load_detail: dict[str, float] = field(default_factory=dict)
+    run_id: str | None = None
     llm_usage_summary: dict[str, Any] = field(default_factory=dict)
     candidate_signatures: list[dict[str, Any]] = field(default_factory=list)
 
@@ -256,7 +258,9 @@ class QuestionSubmission:
             "final_predicted_type": self.type,
             "final_predicted_answer": self.answer,
             "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "run_id": self.run_id,
             "stage_timings_sec": self.stage_timings_sec,
+            "business_load_detail": self.business_load_detail,
             "llm_usage_summary": self.llm_usage_summary,
             "selection_reason": self.selection_reason,
             "voting_status": self.voting_status,

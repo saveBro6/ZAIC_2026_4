@@ -12,6 +12,10 @@ from zaic_2026_4.submission.rules import (
 EXPECTED_CODES = {
     "OUTPUT_EMPTY",
     "OUTPUT_UNPARSEABLE",
+    "OUTPUT_TRUNCATED",
+    "DATE_RANGE_OUT_OF_PERIOD",
+    "CURRENCY_SEPARATOR_MISMATCH",
+    "LITERAL_PARTIAL_MATCH",
     "TYPE_INVALID",
     "SQL_SYNTAX",
     "SQL_NOT_READ_ONLY",
@@ -37,9 +41,9 @@ EXPECTED_CODES = {
 }
 
 
-def test_rule_registry_contains_all_24_canonical_codes() -> None:
-    """Ensure all 24 canonical error codes are documented in RULE_REGISTRY."""
-    assert len(RULE_REGISTRY) == 24
+def test_rule_registry_contains_all_canonical_codes() -> None:
+    """Ensure every canonical error code is documented in RULE_REGISTRY."""
+    assert len(RULE_REGISTRY) == len(EXPECTED_CODES)
     assert set(RULE_REGISTRY.keys()) == EXPECTED_CODES
     for code, hint in RULE_REGISTRY.items():
         assert len(hint.strip()) > 10, f"Hint for {code} is suspiciously short"

@@ -8,45 +8,43 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from zaic_2026_4.common.query_intent import detect_query_intent, format_intent_hint_xml
+from zaic_2026_4.common.temporal_resolver import format_temporal_anchor_xml
 from zaic_2026_4.common.xml_sanitizer import (
     DATA_INSTRUCTION_SEPARATION_DIRECTIVE,
     format_schema_table_elements,
     sanitize_cdata,
     sanitize_text,
 )
+from zaic_2026_4.constants import DEFAULT_RULEBOOK_MODE, DEFAULT_RULEBOOK_TOP_K
 from zaic_2026_4.submission.rules import ValidationIssue, render_diagnostics
 
-# Few-shot SQL examples in Vietnamese for SQLite generation
+# Few-shot SQL examples in Vietnamese for SQLite generation.
+# Identifiers are deliberately synthetic placeholders: no real table, column or date may
+# leak from these examples into a generated query.
 FEW_SHOT_SQL_EXAMPLES_VI: str = (
     "<few_shot_examples>\n"
-    '  <example id="1">\n'
-    '    <user_question>Tổng doanh thu bán hàng thực tế trong tháng này (tính đến hôm nay) là bao nhiêu?</user_question>\n'
-    '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
+    "<!-- Hai vi du duoi day CHI minh hoa dinh dang JSON va cach lap luan theo buoc. Ten bang/cot deu la gia dinh (BangGiaoDich, CotNgay, ...); TUYET DOI khong dung lai cac ten nay. Chi duoc dung bang/cot co trong <selected_schema> va chi duoc dung khoang thoi gian trong <temporal_anchor>. -->\n"
+    "  <example id=\"1\">\n"
+    "    <user_question>Tổng giá trị giao dịch trong kỳ là bao nhiêu?</user_question>\n"
+    "    <temporal_anchor>as_of_date: YYYY-MM-DD | period: YYYY-MM-DD -> YYYY-MM-DD</temporal_anchor>\n"
     "    <selected_schema>\n"
-    '      <table name="don_hang">\n'
-    '        <column name="Mã đơn" type="STRING">Mã định danh duy nhất của hóa đơn. | Samples: [\'DH001\', \'DH002\']</column>\n'
-    '        <column name="Ngày đặt" type="SLASH_DATE">Ngày ghi nhận đơn hàng định dạng DD/MM/YYYY. | Samples: [\'02/05/2026\', \'15/05/2026\'] | Hint: Vietnamese date (DD/MM/YYYY).</column>\n'
-    '        <column name="Tổng tiền" type="CURRENCY">Tổng giá trị thanh toán thực tế của đơn hàng. | Samples: [\'1.200.000\', \'3.500.000 đ\'] | Hint: Formatted VND currency string.</column>\n'
-    '        <column name="Trạng thái" type="STRING">Trạng thái xử lý đơn hàng. | Samples: [\'Hoàn thành\', \'Đã hủy\', \'Trả hàng\']</column>\n'
+    "      <table name=\"BangGiaoDich\">\n"
+    "        <column name=\"CotMa\" type=\"STRING\">Mã định danh duy nhất của giao dịch. | Samples: ['GD001', 'GD002']</column>\n"
+    "        <column name=\"CotNgay\" type=\"SLASH_DATE\">Ngày phát sinh giao dịch, dạng DD/MM/YYYY. | Samples: ['DD/MM/YYYY']</column>\n"
+    "        <column name=\"CotTien\" type=\"CURRENCY\">Giá trị tiền của giao dịch, chuỗi VNĐ có dấu phân cách nghìn. | Samples: ['1.200.000', '3.500.000 đ']</column>\n"
+    "        <column name=\"CotTrangThai\" type=\"STRING\">Trạng thái xử lý của giao dịch. | Samples: ['Hoàn thành', 'Đã hủy']</column>\n"
     "      </table>\n"
     "    </selected_schema>\n"
     "    <output>\n"
-    '{"reasoning": "<think>1. Thời gian: \'tháng này\' tính từ ngày đầu tháng đến as_of_date: \'2026-05-01\' đến \'2026-05-25\'. Cột \'Ngày đặt\' lưu dạng DD/MM/YYYY nên chuyển về ISO bằng (SUBSTR(T1.\\"Ngày đặt\\", 7, 4) || \'-\' || SUBSTR(T1.\\"Ngày đặt\\", 4, 2) || \'-\' || SUBSTR(T1.\\"Ngày đặt\\", 1, 2)). 2. Tiền tệ: Cột \'Tổng tiền\' dạng chuỗi chứa dấu chấm và ký hiệu đ, cần làm sạch và ép kiểu INTEGER: CAST(REPLACE(REPLACE(REPLACE(T1.\\"Tổng tiền\\", \'đ\', \'\'), \'.\', \'\'), \',\', \'\') AS INTEGER). 3. Bộ lọc: Loại trừ đơn hủy và trả hàng: T1.\\"Trạng thái\\" NOT IN (\'Đã hủy\', \'Trả hàng\').</think>", "sql": "SELECT SUM(CAST(REPLACE(REPLACE(REPLACE(T1.\\"Tổng tiền\\", \'đ\', \'\'), \'.\', \'\'), \',\', \'\') AS INTEGER)) AS \\"Tổng doanh thu\\" FROM \\"don_hang\\" AS T1 WHERE (T1.\\"Trạng thái\\" NOT IN (\'Đã hủy\', \'Trả hàng\') OR T1.\\"Trạng thái\\" IS NULL) AND (SUBSTR(T1.\\"Ngày đặt\\", 7, 4) || \'-\' || SUBSTR(T1.\\"Ngày đặt\\", 4, 2) || \'-\' || SUBSTR(T1.\\"Ngày đặt\\", 1, 2)) BETWEEN \'2026-05-01\' AND \'2026-05-25\';", "type": "number"}\n'
+    "{\"reasoning\": \"<think>1. Thời gian: dùng đúng khoảng period trong <temporal_anchor>, không tự suy diễn mốc khác. 2. Chuẩn hóa ngày: SUBSTR đưa CotNgay từ DD/MM/YYYY về YYYY-MM-DD rồi mới so sánh BETWEEN. 3. Tiền tệ: REPLACE dấu phân cách nghìn rồi CAST sang INTEGER. 4. Bộ lọc: loại trừ trạng thái huỷ theo rulebook và thêm IS NOT NULL khi cần. 5. Chỉ SELECT 1 cột số duy nhất đúng với type number.</think>\", \"sql\": \"SELECT SUM(CAST(REPLACE(REPLACE(T1.\\\"CotTien\\\", '.', ''), ',', '') AS INTEGER)) AS \\\"TongGiaTri\\\" FROM \\\"BangGiaoDich\\\" AS T1 WHERE (SUBSTR(T1.\\\"CotNgay\\\", 7, 4) || '-' || SUBSTR(T1.\\\"CotNgay\\\", 4, 2) || '-' || SUBSTR(T1.\\\"CotNgay\\\", 1, 2)) BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD' AND T1.\\\"CotTrangThai\\\" IS NOT NULL;\", \"type\": \"number\"}\n"
     "    </output>\n"
-    "  </example>\n\n"
-    '  <example id="2">\n'
-    '    <user_question>Mặt hàng nào có số lượng bán ra nhiều nhất trong kỳ?</user_question>\n'
-    '    <temporal_anchor>as_of_date: 2026-05-25</temporal_anchor>\n'
-    "    <selected_schema>\n"
-    '      <table name="chi_tiet_ban_hang">\n'
-    '        <column name="Mã hàng" type="STRING">Mã sản phẩm duy nhất. | Samples: [\'MH01\', \'MH02\']</column>\n'
-    '        <column name="Tên hàng" type="STRING">Tên mặt hàng bán lẻ. | Samples: [\'Gạo thơm ST25\', \'Nước mắm Phú Quốc\']</column>\n'
-    '        <column name="Số lượng" type="NUMERIC">Số lượng sản phẩm bán ra. | Samples: [5, 12]</column>\n'
-    '        <column name="Trạng thái đơn" type="STRING">Trạng thái xử lý. | Samples: [\'Đã giao\', \'Hủy\']</column>\n'
-    "      </table>\n"
-    "    </selected_schema>\n"
+    "  </example>\n"
+    "  <example id=\"2\">\n"
+    "    <user_question>Đối tượng nào có tổng giá trị lớn nhất trong kỳ?</user_question>\n"
+    "    <temporal_anchor>as_of_date: YYYY-MM-DD | period: YYYY-MM-DD -> YYYY-MM-DD</temporal_anchor>\n"
     "    <output>\n"
-    '{"reasoning": "<think>1. Nghiệp vụ: Tìm mặt hàng bán chạy nhất theo tổng số lượng bán ra, loại trừ đơn hủy. 2. Nhóm và tính toán: GROUP BY T1.\\"Mã hàng\\", T1.\\"Tên hàng\\" và SUM(T1.\\"Số lượng\\"). 3. Sắp xếp & Tie-breaking: Xếp giảm dần theo tổng số lượng và bắt buộc thêm mã định danh T1.\\"Mã hàng\\" ASC để phá vỡ đồng hạng. LIMIT 1 trả về tên hàng.</think>", "sql": "SELECT T1.\\"Tên hàng\\" FROM \\"chi_tiet_ban_hang\\" AS T1 WHERE (T1.\\"Trạng thái đơn\\" != \'Hủy\' OR T1.\\"Trạng thái đơn\\" IS NULL) AND T1.\\"Số lượng\\" IS NOT NULL GROUP BY T1.\\"Mã hàng\\", T1.\\"Tên hàng\\" ORDER BY SUM(T1.\\"Số lượng\\") DESC, T1.\\"Mã hàng\\" ASC LIMIT 1;", "type": "string"}\n'
+    "{\"reasoning\": \"<think>1. Xác định bảng chi tiết và bảng danh mục, nối bằng khóa chung CotMa. 2. Tổng hợp theo đối tượng rồi xếp hạng giảm dần. 3. Tie-break bắt buộc bằng khóa định danh CotMa ASC để kết quả xác định. 4. Kiểu trả về là string nên chỉ SELECT 1 cột tên.</think>\", \"sql\": \"SELECT T2.\\\"CotTen\\\" FROM \\\"BangChiTiet\\\" AS T1 JOIN \\\"BangDanhMuc\\\" AS T2 ON T1.\\\"CotMa\\\" = T2.\\\"CotMa\\\" WHERE T2.\\\"CotTen\\\" IS NOT NULL GROUP BY T2.\\\"CotMa\\\", T2.\\\"CotTen\\\" ORDER BY SUM(T1.\\\"CotGiaTri\\\") DESC, T2.\\\"CotMa\\\" ASC LIMIT 1;\", \"type\": \"string\"}\n"
     "    </output>\n"
     "  </example>\n"
     "</few_shot_examples>"
@@ -126,8 +124,8 @@ def format_rulebook_context(
     rulebook_text: str,
     vector_indexer: Any | None,
     question: str,
-    mode: str = "hybrid",
-    top_k: int = 3,
+    mode: str = DEFAULT_RULEBOOK_MODE,
+    top_k: int = DEFAULT_RULEBOOK_TOP_K,
 ) -> str:
     """Dynamically format split rulebook context under full, retrieval, or hybrid mode."""
     clean_rulebook = sanitize_text(rulebook_text.strip()) if rulebook_text else ""
@@ -156,7 +154,7 @@ def format_rulebook_context(
             return f"<split_rulebook>\n{clean_rulebook}\n</split_rulebook>" if clean_rulebook else ""
         return f"<relevant_business_rules>\n{retrieved_text}\n</relevant_business_rules>"
 
-    # Hybrid mode (Default): Full rulebook + highlighted focal sections
+    # Hybrid mode (opt-in): full rulebook + highlighted focal sections
     sections = []
     if clean_rulebook:
         sections.append(f"<split_rulebook>\n{clean_rulebook}\n</split_rulebook>")
@@ -180,20 +178,22 @@ def format_grounded_entities_xml(
 
     lines = [
         "<grounded_entities>",
-        "Các thực thể sau trong câu hỏi đã được đối soát chính xác với giá trị thực tế trong cơ sở dữ liệu:",
+        "Các thực thể sau đã được đối soát với giá trị thực tế trong cơ sở dữ liệu; nguồn của từng dòng được ghi rõ:",
     ]
     for item in grounded_entities:
         mention = sanitize_text(item.get("mention", "").strip())
-        col = item.get("column", "").strip()
+        col = str(item.get("column", "")).strip()
         can_val = sanitize_text(item.get("canonical_value", "").strip())
+        source = str(item.get("source") or "question").strip().lower()
         if mention and can_val:
             if "." in col:
                 tbl, cname = col.split(".", 1)
                 col_fmt = f'{tbl}."{cname}"'
             else:
                 col_fmt = f'"{col}"'
+            label = "Từ trong câu hỏi" if source == "question" else "Ngữ cảnh bổ sung"
             lines.append(
-                f'- Từ trong câu hỏi: "{mention}" -> Cột: {col_fmt} | Giá trị chuẩn trong DB: "{can_val}"'
+                f'- {label}: "{mention}" -> Cột: {col_fmt} | Giá trị chuẩn trong DB: "{can_val}"'
             )
 
     lines.extend([
@@ -208,9 +208,12 @@ REPAIR_CONTRACT_TEXT: str = (
     "Chỉ sửa tối thiểu để giải quyết đúng các mục trong <repair_diagnostics>.\n"
     "Giữ nguyên logic thời gian, bộ lọc, JOIN và thứ tự sắp xếp đang đúng trong <accepted_sql>.\n"
     "Chỉ dùng bảng/cột có trong <selected_schema>; không thêm cột không tồn tại.\n"
+    "CẤM đổi trường type sang unanswerable/abstain hoặc bỏ trống trường sql để né lỗi cú pháp, lỗi cột, "
+    "lỗi kiểu dữ liệu hay lỗi định dạng ngày/tiền tệ: các lỗi đó BẮT BUỘC sửa trực tiếp trong câu SQL.\n"
+    "Chỉ được trả unanswerable khi <selected_schema> hoặc dữ liệu thực sự không chứa thông tin cần hỏi; "
+    "khi đó phải nêu rõ trong trường reasoning thông tin nào còn thiếu.\n"
     'Trả lại đúng định dạng JSON {"reasoning": "…", "sql": "…", "type": "…"} như lượt sinh SQL.\n'
-    "Nếu <accepted_sql> đã đúng, trả lại nguyên văn câu lệnh đó.\n"
-    'Nếu dữ liệu phát hành không đủ để trả lời, trả {"sql": "", "type": "unanswerable"}.'
+    "Nếu <accepted_sql> đã đúng, trả lại nguyên văn câu lệnh đó."
 )
 
 
@@ -298,11 +301,15 @@ def _build_prompt_prefix(
         prompt_parts.append(grounded_xml)
         prompt_parts.append("")
 
-    prompt_parts.extend([
-        f"<temporal_anchor>\nas_of_date: {safe_as_of_date}\n</temporal_anchor>",
-        "",
-        schema_xml,
-    ])
+    anchor_xml = format_temporal_anchor_xml(question, as_of_date)
+    if not anchor_xml:
+        anchor_xml = f"<temporal_anchor>\nas_of_date: {safe_as_of_date}\n</temporal_anchor>"
+    intent_xml = format_intent_hint_xml(detect_query_intent(question, as_of_date))
+
+    prompt_parts.extend([anchor_xml, ""])
+    if intent_xml:
+        prompt_parts.extend([intent_xml, ""])
+    prompt_parts.append(schema_xml)
 
     if include_few_shot:
         prompt_parts.extend([
@@ -379,7 +386,7 @@ def build_sql_generation_prompt(
     processed_metadata: dict[str, Any],
     rulebook_text: str = "",
     vector_indexer: Any | None = None,
-    rulebook_mode: str = "hybrid",
+    rulebook_mode: str = DEFAULT_RULEBOOK_MODE,
     include_few_shot: bool = True,
     grounded_entities: list[dict[str, Any]] | None = None,
     repair: RepairContext | None = None,

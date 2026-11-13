@@ -61,6 +61,16 @@ def summarize_result_set(res_set: set[tuple[Any, ...]] | frozenset[tuple[Any, ..
     return f"{{{items[0]}, {items[1]}, ... ({len(items)} items)}}"
 
 
+def is_unanswerable_claim(cand: CandidateQuery) -> bool:
+    """True when a candidate explicitly claims the question cannot be answered from the data."""
+    return not cand.final_sql.strip() and cand.predicted_type == "unanswerable"
+
+
+def is_abstain_claim(cand: CandidateQuery) -> bool:
+    """True when a candidate declines to answer without asserting unanswerability."""
+    return not cand.final_sql.strip() and cand.predicted_type == "abstain"
+
+
 def has_evidence(res_set: set[tuple[Any, ...]] | frozenset[tuple[Any, ...]] | None) -> bool:
     """Check whether result set contains at least one non-None cell in at least one row."""
     if res_set is None or len(res_set) == 0:
@@ -226,24 +236,51 @@ class VotingExecutor:
     def vote(
         self,
         candidates: list[CandidateQuery],
+        unanswerable_proof: bool = True,
     ) -> tuple[CandidateQuery | None, str, str]:
-        """Perform majority voting among executed candidates with canonical answer signatures and agreement gate."""
-        # 1. Check deliberate unanswerable consensus
-        unans_cands = [
-            c for c in candidates
-            if c.deliberate_abstain or (
-                c.predicted_type in ("unanswerable", "abstain") and not c.final_sql.strip()
-            )
-        ]
+        """Perform majority voting among executed candidates with canonical answer signatures and agreement gate.
+
+        A single candidate claiming "unanswerable" is not evidence: two candidates may have
+        failed mechanically while one gave up. The verdict is only issued on a strict
+        majority of the candidates, with no competing evidence and no coverage gap that
+        could have removed a required table from the linked schema.
+
+        Args:
+            candidates: Candidate queries with execution results attached.
+            unanswerable_proof: False when schema coverage reported unresolved gaps, which
+                makes an unanswerable verdict untrustworthy.
+        """
+        total_candidates = len(candidates)
+        unans_cands = [c for c in candidates if is_unanswerable_claim(c)]
+        abstain_cands = [c for c in candidates if is_abstain_claim(c)]
         evidence_cands = [
             c for c in candidates
             if c.execution_success and has_evidence(c.result_set)
         ]
 
         if unans_cands and not evidence_cands:
-            winner = unans_cands[0]
-            reason = "unanswerable: Candidate consensus or deliberate abstain on unanswerable query."
-            return winner, "unanswerable_consensus", reason
+            has_majority = len(unans_cands) * 2 > total_candidates
+            if has_majority and unanswerable_proof and not abstain_cands:
+                winner = unans_cands[0]
+                reason = (
+                    f"unanswerable: {len(unans_cands)}/{total_candidates} candidates agree that the "
+                    "released data cannot answer this question."
+                )
+                return winner, "unanswerable_consensus", reason
+
+            blocking = []
+            if not has_majority:
+                blocking.append(f"only {len(unans_cands)}/{total_candidates} candidates claimed unanswerable")
+            if not unanswerable_proof:
+                blocking.append("linked schema has unresolved coverage gaps")
+            if abstain_cands:
+                blocking.append(f"{len(abstain_cands)} candidate(s) could not commit to an answer")
+            reason = (
+                "abstain_unverified_unanswerable: Refusing to submit unanswerable because "
+                + "; ".join(blocking)
+                + "."
+            )
+            return None, "abstain_unverified_unanswerable", reason
 
         # 2. Check insufficient evidence or complete failure
         if not evidence_cands:
@@ -303,6 +340,8 @@ __all__ = [
     "answer_signature",
     "canonical_cell",
     "has_evidence",
+    "is_abstain_claim",
+    "is_unanswerable_claim",
     "normalize_cell",
     "summarize_result_set",
 ]

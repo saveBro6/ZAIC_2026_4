@@ -282,7 +282,9 @@ def test_submission_pipeline_auto_saves_schema_linking_result(mock_dataset_env: 
     assert sub.id == "q_test_101"
 
     biz_cache = cache_dir / "cache_biz_test"
-    schema_link_file = biz_cache / "schema_linking_result.json"
+    # The generic alias is no longer duplicated; the per-question trace is authoritative.
+    assert not (biz_cache / "schema_linking_result.json").is_file()
+    schema_link_file = biz_cache / "schema_linking_result_q_test_101.json"
     assert schema_link_file.is_file()
 
     content = json.loads(schema_link_file.read_text(encoding="utf-8"))

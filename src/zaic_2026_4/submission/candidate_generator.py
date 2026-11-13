@@ -11,6 +11,7 @@ from typing import Any
 
 import sqlglot
 
+from zaic_2026_4.common.query_intent import detect_query_intent
 from zaic_2026_4.common.trace_logger import (
     LLMCallRecord,
     append_llm_calls,
@@ -20,6 +21,9 @@ from zaic_2026_4.common.trace_logger import (
 from zaic_2026_4.constants import (
     DEFAULT_CANDIDATE_SEEDS,
     DEFAULT_EXECUTION_MAX_RETRIES,
+    DEFAULT_RULEBOOK_MODE,
+    DEFAULT_SQL_FINALIZE_MAX_TOKENS,
+    DEFAULT_SQL_FINALIZE_THINKING_BUDGET,
     DEFAULT_SQL_MAX_RETRIES,
     DEFAULT_SQL_MAX_TOKENS,
     DEFAULT_SQL_TIMEOUT_SECONDS,
@@ -46,6 +50,13 @@ from zaic_2026_4.submission.sql_validator import (
 from zaic_2026_4.submission.voting_executor import normalize_cell
 
 logger = logging.getLogger(__name__)
+
+# Blocking issue codes that describe a malformed model response rather than a bad query.
+OUTPUT_REPAIR_CODES: frozenset[str] = frozenset({
+    "OUTPUT_TRUNCATED",
+    "OUTPUT_EMPTY",
+    "OUTPUT_UNPARSEABLE",
+})
 
 
 @dataclass(frozen=True)
@@ -173,7 +184,7 @@ class CandidateGenerator:
         sql_max_retries: int = DEFAULT_SQL_MAX_RETRIES,
         execution_max_retries: int = DEFAULT_EXECUTION_MAX_RETRIES,
         max_retries: int | None = None,
-        rulebook_mode: str = "hybrid",
+        rulebook_mode: str = DEFAULT_RULEBOOK_MODE,
         db_path: Path | str | None = None,
         timeout_seconds: float = DEFAULT_SQL_TIMEOUT_SECONDS,
     ) -> None:
@@ -186,6 +197,8 @@ class CandidateGenerator:
         self.rulebook_mode = rulebook_mode
         self.db_path = Path(db_path).resolve() if db_path else None
         self.timeout_seconds = timeout_seconds
+        # Initial outputs generated in a single batched call, keyed by candidate id.
+        self._prefetched_initial: dict[int, tuple[str, dict[str, Any]]] = {}
 
         try:
             from vllm.sampling_params import StructuredOutputsParams
@@ -195,6 +208,126 @@ class CandidateGenerator:
             )
         except Exception:  # noqa: BLE001
             self.structured_outputs = None
+
+    def _generation_kwargs(
+        self,
+        seed: int,
+        temperature: float = 0.7,
+        max_tokens: int = DEFAULT_SQL_MAX_TOKENS,
+        thinking_token_budget: int = DEFAULT_THINKING_TOKEN_BUDGET,
+    ) -> dict[str, Any]:
+        """Build the sampling parameters shared by single and batched generation."""
+        kwargs: dict[str, Any] = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "thinking_token_budget": thinking_token_budget,
+            "seed": seed,
+        }
+        if self.structured_outputs is not None:
+            kwargs["structured_outputs"] = self.structured_outputs
+        return kwargs
+
+    def _build_prompt_context(
+        self,
+        seed: int,
+        question: str,
+        as_of_date: str,
+        reduced_schema: set[str],
+        processed_metadata: dict[str, Any],
+        rulebook_text: str = "",
+        vector_indexer: Any | None = None,
+        grounded_literals: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Build every prompt artefact for one candidate deterministically.
+
+        The same helper feeds both the batched prefetch and the per-candidate generation
+        path, so a prefetched initial output always matches its own prompt byte for byte.
+        """
+        permuted_keys = permute_schema(reduced_schema, seed=seed)
+        schema_xml = format_permuted_schema_xml(permuted_keys, processed_metadata)
+        rulebook_xml = format_rulebook_context(
+            rulebook_text=rulebook_text,
+            vector_indexer=vector_indexer,
+            question=question,
+            mode=self.rulebook_mode,
+        )
+        prompt_kwargs: dict[str, Any] = {
+            "question": question,
+            "as_of_date": as_of_date,
+            "schema_keys": permuted_keys,
+            "processed_metadata": processed_metadata,
+            "rulebook_text": rulebook_text,
+            "vector_indexer": vector_indexer,
+            "rulebook_mode": self.rulebook_mode,
+            "include_few_shot": True,
+            "grounded_entities": grounded_literals,
+            "schema_xml_override": schema_xml,
+            "rulebook_xml_override": rulebook_xml,
+        }
+        prompt_prefix = _build_prompt_prefix(
+            question=question,
+            as_of_date=as_of_date,
+            schema_xml=schema_xml,
+            rulebook_xml=rulebook_xml,
+            grounded_entities=grounded_literals,
+            include_few_shot=True,
+        )
+        return {
+            "permuted_keys": permuted_keys,
+            "schema_xml": schema_xml,
+            "rulebook_xml": rulebook_xml,
+            "prompt_kwargs": prompt_kwargs,
+            "prompt_prefix": prompt_prefix,
+            "prompt": f"{prompt_prefix}\n\n<output>",
+        }
+
+    def _prefetch_initial_outputs(
+        self,
+        question: str,
+        as_of_date: str,
+        reduced_schema: set[str],
+        processed_metadata: dict[str, Any],
+        rulebook_text: str = "",
+        vector_indexer: Any | None = None,
+        grounded_literals: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Generate every candidate's initial SQL in one batched engine call.
+
+        Schema permutation already provides candidate diversity, so a single batched call
+        replaces N sequential calls without reducing variety. Any output the engine does
+        not return is generated sequentially later, so a partial batch is never fatal.
+        """
+        if len(self.seeds) < 2:
+            return
+
+        prompts: list[str] = []
+        for seed in self.seeds:
+            ctx = self._build_prompt_context(
+                seed=seed,
+                question=question,
+                as_of_date=as_of_date,
+                reduced_schema=reduced_schema,
+                processed_metadata=processed_metadata,
+                rulebook_text=rulebook_text,
+                vector_indexer=vector_indexer,
+                grounded_literals=grounded_literals,
+            )
+            prompts.append(str(ctx["prompt"]))
+
+        try:
+            outputs = self.llm_engine.generate(
+                prompts, **self._generation_kwargs(self.seeds[0])
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Batched candidate generation failed (%s); falling back to sequential.", exc)
+            return
+
+        if isinstance(outputs, str):
+            outputs = [outputs]
+        traces = extract_llm_engine_call_traces(self.llm_engine)
+        for idx in range(min(len(outputs), len(self.seeds))):
+            trace = traces[idx] if idx < len(traces) else {}
+            self._prefetched_initial[idx] = (outputs[idx], dict(trace))
 
     def _dry_run_query(
         self,
@@ -274,57 +407,32 @@ class CandidateGenerator:
     ) -> CandidateQuery:
         """Generate a single candidate query using the unified self-correction state machine."""
         target_db = Path(db_path).resolve() if db_path else self.db_path
+        intent = detect_query_intent(question, as_of_date)
 
-        # 1. Deterministic schema permutation
-        permuted_keys = permute_schema(reduced_schema, seed=seed)
-        schema_xml = format_permuted_schema_xml(permuted_keys, processed_metadata)
-
-        # 2. Dynamic rulebook context
-        rulebook_xml = format_rulebook_context(
-            rulebook_text=rulebook_text,
-            vector_indexer=vector_indexer,
-            question=question,
-            mode=self.rulebook_mode,
-        )
-
-        prompt_kwargs: dict[str, Any] = {
-            "question": question,
-            "as_of_date": as_of_date,
-            "schema_keys": permuted_keys,
-            "processed_metadata": processed_metadata,
-            "rulebook_text": rulebook_text,
-            "vector_indexer": vector_indexer,
-            "rulebook_mode": self.rulebook_mode,
-            "include_few_shot": True,
-            "grounded_entities": grounded_literals,
-            "schema_xml_override": schema_xml,
-            "rulebook_xml_override": rulebook_xml,
-        }
-
-        # 3. Initial generation prompt
-        prompt_prefix = _build_prompt_prefix(
+        prompt_ctx = self._build_prompt_context(
+            seed=seed,
             question=question,
             as_of_date=as_of_date,
-            schema_xml=schema_xml,
-            rulebook_xml=rulebook_xml,
-            grounded_entities=grounded_literals,
-            include_few_shot=True,
+            reduced_schema=reduced_schema,
+            processed_metadata=processed_metadata,
+            rulebook_text=rulebook_text,
+            vector_indexer=vector_indexer,
+            grounded_literals=grounded_literals,
         )
-        prompt = f"{prompt_prefix}\n\n<output>"
+        permuted_keys = list(prompt_ctx["permuted_keys"])
+        rulebook_xml = str(prompt_ctx["rulebook_xml"])
+        prompt_kwargs = dict(prompt_ctx["prompt_kwargs"])
+        prompt_prefix = str(prompt_ctx["prompt_prefix"])
+        prompt = str(prompt_ctx["prompt"])
 
-        gen_kwargs: dict[str, Any] = {
-            "temperature": 0.7,
-            "max_tokens": DEFAULT_SQL_MAX_TOKENS,
-            "thinking_token_budget": DEFAULT_THINKING_TOKEN_BUDGET,
-            "seed": seed,
-        }
-        if self.structured_outputs is not None:
-            gen_kwargs["structured_outputs"] = self.structured_outputs
-
-        raw_output = self.llm_engine.generate(prompt, **gen_kwargs)
-        raw_str = raw_output if isinstance(raw_output, str) else raw_output[0]
-        init_eng_traces = extract_llm_engine_call_traces(self.llm_engine)
-        curr_eng_trace: dict[str, Any] = init_eng_traces[0] if init_eng_traces else {}
+        prefetched = self._prefetched_initial.pop(candidate_id, None)
+        if prefetched is not None:
+            raw_str, curr_eng_trace = prefetched
+        else:
+            raw_output = self.llm_engine.generate(prompt, **self._generation_kwargs(seed))
+            raw_str = raw_output if isinstance(raw_output, str) else raw_output[0]
+            init_eng_traces = extract_llm_engine_call_traces(self.llm_engine)
+            curr_eng_trace = init_eng_traces[0] if init_eng_traces else {}
 
         llm_call_records: list[LLMCallRecord] = []
         if trace_enabled:
@@ -356,6 +464,7 @@ class CandidateGenerator:
         turn_idx = 0
         turn_phase = "initial"
         initial_sql = ""
+        initial_captured = False
         current_phase = "sql"
 
         while True:
@@ -364,8 +473,9 @@ class CandidateGenerator:
                     curr_raw_str, default_type="number"
                 )
             )
-            if not initial_sql:
+            if not initial_captured:
                 initial_sql = curr_sql
+                initial_captured = True
 
             # Check deliberate abstain
             if curr_type in ("unanswerable", "abstain") and not curr_sql.strip():
@@ -395,9 +505,31 @@ class CandidateGenerator:
                 best_attempt_idx = len(history) - 1
                 break
 
-            # Validate static AST and schema rules
-            v_res = self.validator.validate(curr_sql, target_type=curr_type, metadata=processed_metadata)
+            # Validate static AST and schema rules against the question's temporal context
+            v_res = self.validator.validate(
+                curr_sql,
+                target_type=curr_type,
+                metadata=processed_metadata,
+                as_of_date=as_of_date,
+                intent=intent,
+            )
             all_issues: list[ValidationIssue | str] = list(parse_issues) + list(v_res.issues)
+
+            # A generation cut by the token budget is never a valid answer: make the
+            # truncation explicit so it triggers a short, SQL-only repair turn.
+            if curr_eng_trace.get("finish_reason") == "length" and not any(
+                getattr(i, "code", "") == "OUTPUT_TRUNCATED" for i in all_issues
+            ):
+                all_issues.append(
+                    ValidationIssue(
+                        code="OUTPUT_TRUNCATED",
+                        message=(
+                            "Đầu ra bị cắt do hết ngân sách token trước khi hoàn tất JSON/SQL."
+                        ),
+                        severity="blocking",
+                        hint="Viết reasoning ngắn hơn nhiều và xuất ngay một câu SQL hoàn chỉnh.",
+                    )
+                )
             has_blocking = any(getattr(i, "severity", "blocking") == "blocking" for i in all_issues)
 
             executed = False
@@ -594,14 +726,21 @@ class CandidateGenerator:
                 last_raw_output=curr_raw_str,
                 previous_attempts=previous_attempts_context,
             )
-            corr_kwargs: dict[str, Any] = {
-                "temperature": 0.2,
-                "max_tokens": DEFAULT_SQL_MAX_TOKENS,
-                "thinking_token_budget": DEFAULT_THINKING_TOKEN_BUDGET,
-                "seed": seed + sql_retries + execution_retries,
-            }
-            if self.structured_outputs is not None:
-                corr_kwargs["structured_outputs"] = self.structured_outputs
+            output_only_repair = bool(curr_blocking) and all(
+                getattr(i, "code", "") in OUTPUT_REPAIR_CODES for i in curr_blocking
+            )
+            corr_kwargs = self._generation_kwargs(
+                seed=seed + sql_retries + execution_retries,
+                temperature=0.2,
+                max_tokens=(
+                    DEFAULT_SQL_FINALIZE_MAX_TOKENS if output_only_repair else DEFAULT_SQL_MAX_TOKENS
+                ),
+                thinking_token_budget=(
+                    DEFAULT_SQL_FINALIZE_THINKING_BUDGET
+                    if output_only_repair
+                    else DEFAULT_THINKING_TOKEN_BUDGET
+                ),
+            )
 
             corr_output = self.llm_engine.generate(corr_prompt, **corr_kwargs)
             if current_phase == "execution":
@@ -703,25 +842,42 @@ class CandidateGenerator:
         question_id: str | None = None,
         trace_enabled: bool = True,
     ) -> list[CandidateQuery]:
-        """Generate all candidate queries across configured seeds."""
+        """Generate all candidate queries across configured seeds.
+
+        Initial SQL for every candidate is produced by one batched engine call; repair
+        turns stay per-candidate because they diverge after the first validation round.
+        """
         candidates: list[CandidateQuery] = []
-        for i, seed in enumerate(self.seeds):
-            cand = self.generate_candidate(
-                candidate_id=i,
-                seed=seed,
+        self._prefetched_initial = {}
+        try:
+            self._prefetch_initial_outputs(
                 question=question,
                 as_of_date=as_of_date,
                 reduced_schema=reduced_schema,
                 processed_metadata=processed_metadata,
                 rulebook_text=rulebook_text,
                 vector_indexer=vector_indexer,
-                db_path=db_path,
                 grounded_literals=grounded_literals,
-                cache_dir=cache_dir,
-                question_id=question_id,
-                trace_enabled=trace_enabled,
             )
-            candidates.append(cand)
+            for i, seed in enumerate(self.seeds):
+                cand = self.generate_candidate(
+                    candidate_id=i,
+                    seed=seed,
+                    question=question,
+                    as_of_date=as_of_date,
+                    reduced_schema=reduced_schema,
+                    processed_metadata=processed_metadata,
+                    rulebook_text=rulebook_text,
+                    vector_indexer=vector_indexer,
+                    db_path=db_path,
+                    grounded_literals=grounded_literals,
+                    cache_dir=cache_dir,
+                    question_id=question_id,
+                    trace_enabled=trace_enabled,
+                )
+                candidates.append(cand)
+        finally:
+            self._prefetched_initial = {}
         return candidates
 
 

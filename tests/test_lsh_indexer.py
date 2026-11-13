@@ -1,7 +1,7 @@
 """Unit tests for Module 3: VietnameseLSHIndexer, character shingling, and literal matching."""
 
-from pathlib import Path
 import unicodedata
+from pathlib import Path
 
 import pytest
 
@@ -17,19 +17,19 @@ from zaic_2026_4.profiling.lsh_indexer import (
 
 def test_default_constants() -> None:
     """Verify default LSH and MinHash configuration parameters."""
-    assert DEFAULT_NUM_PERM == 128
+    assert DEFAULT_NUM_PERM == 64
     assert DEFAULT_THRESHOLD == 0.4
     assert DEFAULT_SHINGLE_K == 3
-    assert DEFAULT_MAX_SAMPLE_VALUES == 10000
+    assert DEFAULT_MAX_SAMPLE_VALUES == 100
 
 
 def test_indexer_initialization() -> None:
     """Verify VietnameseLSHIndexer initialization and attributes."""
     indexer = VietnameseLSHIndexer()
     assert indexer.threshold == 0.4
-    assert indexer.num_perm == 128
+    assert indexer.num_perm == 64
     assert indexer.shingle_k == 3
-    assert indexer.max_sample_values == 10000
+    assert indexer.max_sample_values == 100
     assert len(indexer.value_to_col_map) == 0
     assert len(indexer.minhashes) == 0
 

@@ -14,6 +14,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from zaic_2026_4.common.query_intent import (
+    QueryIntent,
+    detect_query_intent,
+    format_intent_hint_xml,
+)
+from zaic_2026_4.common.temporal_resolver import format_temporal_anchor_xml
 from zaic_2026_4.common.xml_sanitizer import format_schema_table_elements
 from zaic_2026_4.constants import FEW_SHOT_SQL_EXAMPLES
 
@@ -223,9 +229,19 @@ class SchemaContextBuilder:
         sme_context: str = "",
         rulebook_context: str = "",
         reprompt_warning: str = "",
+        as_of_date: str | None = None,
+        intent: QueryIntent | None = None,
     ) -> str:
-        """Build the complete generation prompt for a single context variant."""
+        """Build the complete generation prompt for a single context variant.
+
+        The prompt is always anchored to the question's ``as_of_date`` and carries the
+        deterministically resolved temporal period, so a trial query can never fall back to
+        a period copied from the few-shot format examples.
+        """
         schema_xml = self.format_prompt_schema(schema_cols, profile_type, processed_metadata)
+        resolved_intent = intent if intent is not None else detect_query_intent(question, as_of_date)
+        temporal_xml = format_temporal_anchor_xml(question, as_of_date)
+        intent_xml = format_intent_hint_xml(resolved_intent)
 
         sections = [
             "<system>",
@@ -243,6 +259,12 @@ class SchemaContextBuilder:
             question.strip(),
             "</user_question>",
         ]
+
+        if temporal_xml:
+            sections.extend(["", temporal_xml])
+
+        if intent_xml:
+            sections.extend(["", intent_xml])
 
         if sme_context.strip():
             sections.extend([
@@ -287,6 +309,8 @@ class SchemaContextBuilder:
         focused_schema: set[str],
         processed_metadata: dict[str, Any],
         vector_indexer: Any,
+        as_of_date: str | None = None,
+        intent: QueryIntent | None = None,
     ) -> tuple[str, str, str]:
         """Construct Case e with Prompt-Level SME and Rulebook context.
 
@@ -320,6 +344,8 @@ class SchemaContextBuilder:
             processed_metadata=processed_metadata,
             sme_context=sme_text,
             rulebook_context=rule_text,
+            as_of_date=as_of_date,
+            intent=intent,
         )
 
         return prompt, sme_text, rule_text
@@ -331,6 +357,8 @@ class SchemaContextBuilder:
         lsh_indexer: Any,
         vector_indexer: Any,
         cases: str | list[str] | set[str] | None = None,
+        as_of_date: str | None = None,
+        intent: QueryIntent | None = None,
     ) -> list[SchemaVariant]:
         """Generate context variants for Task-Aligned Schema Linking.
 
@@ -352,6 +380,7 @@ class SchemaContextBuilder:
             List of SchemaVariant instances matching the requested cases.
         """
         case_keys = parse_case_spec(cases)
+        resolved_intent = intent if intent is not None else detect_query_intent(question, as_of_date)
 
         # Step 1: Compute focused schema if needed by cases a, b, or e
         need_focused = any(k in case_keys for k in ("a", "b", "e"))
@@ -381,6 +410,8 @@ class SchemaContextBuilder:
                     schema_cols=focused_schema,
                     profile_type="minimal_profile",
                     processed_metadata=processed_metadata,
+                    as_of_date=as_of_date,
+                    intent=resolved_intent,
                 )
                 variants.append(
                     SchemaVariant(
@@ -396,6 +427,8 @@ class SchemaContextBuilder:
                     schema_cols=focused_schema,
                     profile_type="maximal_profile",
                     processed_metadata=processed_metadata,
+                    as_of_date=as_of_date,
+                    intent=resolved_intent,
                 )
                 variants.append(
                     SchemaVariant(
@@ -411,6 +444,8 @@ class SchemaContextBuilder:
                     schema_cols=full_schema,
                     profile_type="minimal_profile",
                     processed_metadata=processed_metadata,
+                    as_of_date=as_of_date,
+                    intent=resolved_intent,
                 )
                 variants.append(
                     SchemaVariant(
@@ -426,6 +461,8 @@ class SchemaContextBuilder:
                     schema_cols=full_schema,
                     profile_type="maximal_profile",
                     processed_metadata=processed_metadata,
+                    as_of_date=as_of_date,
+                    intent=resolved_intent,
                 )
                 variants.append(
                     SchemaVariant(
@@ -441,6 +478,8 @@ class SchemaContextBuilder:
                     focused_schema=focused_schema,
                     processed_metadata=processed_metadata,
                     vector_indexer=vector_indexer,
+                    as_of_date=as_of_date,
+                    intent=resolved_intent,
                 )
                 variants.append(
                     SchemaVariant(

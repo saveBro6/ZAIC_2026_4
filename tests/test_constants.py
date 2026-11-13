@@ -28,6 +28,10 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_BASE_OUTPUT_DIR",
         # LSH Indexer
         "DEFAULT_NUM_PERM",
+        "DEFAULT_LSH_MAX_DISTINCT_VALUES",
+        "DEFAULT_LSH_MAX_VALUE_CHARS",
+        "DEFAULT_LSH_CARDINALITY_SKIP_RATIO",
+        "DEFAULT_LSH_INDEX_VERSION",
         "DEFAULT_THRESHOLD",
         "DEFAULT_SHINGLE_K",
         "DEFAULT_MAX_SAMPLE_VALUES",
@@ -37,6 +41,10 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_PROD_GPU_UTIL",
         "DEFAULT_LOCAL_GPU_UTIL",
         "DEFAULT_LLM_MAX_LENGTH",
+        "DEFAULT_PROFILE_BATCH_SIZE",
+        "DEFAULT_PROFILE_MAX_TOKENS",
+        "DEFAULT_PROFILE_RETRY_ATTEMPTS",
+        "DEFAULT_BUSINESS_CACHE_MAX_ENTRIES",
         "DEFAULT_QUANTIZATION",
         "MINIMAL_PROFILE_PROMPT",
         "MAXIMAL_ENUM_MAX_DISTINCT",
@@ -91,6 +99,13 @@ def test_constants_count_and_all() -> None:
         "DEFAULT_REASONING_START_STR",
         "DEFAULT_SQL_MAX_RETRIES",
         "DEFAULT_SQL_MAX_TOKENS",
+        "DEFAULT_SQL_FINALIZE_MAX_TOKENS",
+        "DEFAULT_SQL_FINALIZE_THINKING_BUDGET",
+        "DEFAULT_RULEBOOK_MODE",
+        "DEFAULT_RULEBOOK_TOP_K",
+        "DEFAULT_SCHEMA_LINK_MAX_TOKENS",
+        "DEFAULT_GROUNDED_LITERAL_LIMIT",
+        "DEFAULT_GROUNDED_LITERAL_MIN_SCORE",
         "DEFAULT_SQL_TIMEOUT_SECONDS",
         "DEFAULT_SUBMISSION_PATH",
         "DEFAULT_THINKING_TOKEN_BUDGET",
@@ -107,27 +122,27 @@ def test_constant_types_and_values() -> None:
     assert isinstance(constants.DEFAULT_BASE_OUTPUT_DIR, Path)
 
     assert isinstance(constants.DEFAULT_NUM_PERM, int)
-    assert constants.DEFAULT_NUM_PERM == 128
+    assert constants.DEFAULT_NUM_PERM == 64
     assert isinstance(constants.DEFAULT_THRESHOLD, float)
     assert constants.DEFAULT_THRESHOLD == 0.4
     assert isinstance(constants.DEFAULT_SHINGLE_K, int)
     assert constants.DEFAULT_SHINGLE_K == 3
     assert isinstance(constants.DEFAULT_MAX_SAMPLE_VALUES, int)
-    assert constants.DEFAULT_MAX_SAMPLE_VALUES == 10000
+    assert constants.DEFAULT_MAX_SAMPLE_VALUES == 100
 
     assert isinstance(constants.DEFAULT_PROD_MODEL, str)
     assert isinstance(constants.DEFAULT_LOCAL_MODEL, str)
     assert isinstance(constants.DEFAULT_PROD_GPU_UTIL, float)
     assert isinstance(constants.DEFAULT_LOCAL_GPU_UTIL, float)
-    assert constants.DEFAULT_LLM_MAX_LENGTH == 16384
+    assert constants.DEFAULT_LLM_MAX_LENGTH == 24576
     assert "<system>" in constants.MINIMAL_PROFILE_PROMPT
     assert constants.MAXIMAL_ENUM_MAX_DISTINCT == 10
     assert "NUMERIC" in constants.RANGE_ELIGIBLE_FORMATS
     assert "ISO_DATE" in constants.DATE_FORMATS
 
     # Submission & SQL Generation
-    assert constants.DEFAULT_SQL_MAX_TOKENS == 2048
-    assert constants.DEFAULT_THINKING_TOKEN_BUDGET == 1536
+    assert constants.DEFAULT_SQL_MAX_TOKENS == 1536
+    assert constants.DEFAULT_THINKING_TOKEN_BUDGET == 384
     assert constants.DEFAULT_REASONING_START_STR == '{"reasoning": "<think>'
     assert constants.DEFAULT_REASONING_END_STR == '</think>", "sql": "'
 
@@ -153,6 +168,9 @@ def test_constant_types_and_values() -> None:
 
     # Schema Linking
     assert "<few_shot_examples>" in constants.FEW_SHOT_SQL_EXAMPLES
+    # The schema-linking few-shot block must stay schema- and date-agnostic.
+    for leaked in ("ban_hang", "hoa_don_chi_tiet", "khach_hang", "2026"):
+        assert leaked not in constants.FEW_SHOT_SQL_EXAMPLES
 
     # Submission
     assert constants.DEFAULT_CANDIDATE_SEEDS == (42, 100, 2026)

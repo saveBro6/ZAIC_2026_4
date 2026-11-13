@@ -1,6 +1,7 @@
 """Vietnamese-aware Locality Sensitive Hashing (LSH) value indexer for fast literal matching."""
 
 import pickle
+import re
 import unicodedata
 from collections.abc import Iterable
 from pathlib import Path
@@ -10,10 +11,20 @@ from datasketch import MinHash, MinHashLSH
 from unidecode import unidecode
 
 from zaic_2026_4.constants import (
+    DEFAULT_LSH_CARDINALITY_SKIP_RATIO,
+    DEFAULT_LSH_INDEX_VERSION,
+    DEFAULT_LSH_MAX_DISTINCT_VALUES,
+    DEFAULT_LSH_MAX_VALUE_CHARS,
     DEFAULT_MAX_SAMPLE_VALUES,
     DEFAULT_NUM_PERM,
     DEFAULT_SHINGLE_K,
     DEFAULT_THRESHOLD,
+)
+
+# Values that only encode a calendar date carry no entity signal: concrete periods come
+# from the deterministic temporal resolver, so indexing them only adds size and noise.
+_DATE_ONLY_VALUE_REGEX = re.compile(
+    r"^(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}|\d{1,2}/\d{4})$"
 )
 
 
@@ -58,6 +69,16 @@ class VietnameseLSHIndexer:
         self.value_to_col_map: dict[str, tuple[str, str]] = {}
         self.minhashes: dict[str, MinHash] = {}
 
+    @staticmethod
+    def _looks_like_identifier(col_key: str) -> bool:
+        """Heuristic: identifier-like columns are high-cardinality keys, not categorical names."""
+        folded = col_key.lower().replace("_", " ").replace(".", " ").replace("-", " ")
+        tokens = set(folded.split())
+        markers = {"id", "code", "ma", "sku", "serial", "uuid", "ref", "so", "key", "no"}
+        return any(token in markers for token in tokens) or any(
+            token.endswith(("id", "code", "no", "ma")) for token in tokens if len(token) > 2
+        )
+
     def _get_shingles(self, text: str, k: int | None = None) -> set[str]:
         """Generate character k-shingles with dual accented and unaccented representations.
 
@@ -91,8 +112,10 @@ class VietnameseLSHIndexer:
     def build_index(self, processed_metadata: dict[str, Any]) -> int:
         """Build LSH index over column sample values extracted from database metadata.
 
-        Supports metadata formats from raw_profiler and profile_summarizer. Caches up to
-        max_sample_values unique strings of length >= 2 per column.
+        Supports metadata formats from raw_profiler and profile_summarizer. Each column
+        contributes at most ``max_sample_values`` unique strings of length >= 2, skipping
+        date-only values and oversized payloads so the pickled index stays small enough to
+        load quickly for every business.
 
         Args:
             processed_metadata: Column dictionary or profile container mapping column keys
@@ -125,14 +148,32 @@ class VietnameseLSHIndexer:
                 continue
 
             sample_values = meta.get("sample_values") or meta.get("raw_samples") or []
-            candidates = sample_values[: self.max_sample_values]
+            per_column_cap = min(self.max_sample_values, DEFAULT_LSH_MAX_DISTINCT_VALUES)
+            candidates = sample_values[:per_column_cap]
+
+            # A near-unique sample on an identifier-like column is index volume that never
+            # matches usefully, so only a small representative slice is kept. Categorical
+            # name columns keep the full sample because literal grounding depends on it.
+            distinct_values = {str(v).strip() for v in candidates if str(v).strip()}
+            if (
+                candidates
+                and self._looks_like_identifier(col_key)
+                and len(distinct_values) >= 10
+                and len(distinct_values) / len(candidates) >= DEFAULT_LSH_CARDINALITY_SKIP_RATIO
+            ):
+                unique_share = 1.0 - DEFAULT_LSH_CARDINALITY_SKIP_RATIO
+                candidates = candidates[: max(1, int(len(candidates) * unique_share) + 5)]
 
             seen_in_col: set[str] = set()
             for val in candidates:
                 if val is None:
                     continue
                 val_str = str(val).strip()
-                if len(val_str) < 2 or val_str in seen_in_col:
+                if len(val_str) < 2 or len(val_str) > DEFAULT_LSH_MAX_VALUE_CHARS:
+                    continue
+                if _DATE_ONLY_VALUE_REGEX.match(val_str):
+                    continue
+                if val_str in seen_in_col:
                     continue
 
                 seen_in_col.add(val_str)
@@ -274,6 +315,7 @@ class VietnameseLSHIndexer:
         save_path = Path(path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "version": DEFAULT_LSH_INDEX_VERSION,
             "threshold": self.threshold,
             "num_perm": self.num_perm,
             "shingle_k": self.shingle_k,
@@ -294,6 +336,12 @@ class VietnameseLSHIndexer:
 
         with open(load_path, "rb") as f:
             payload = pickle.load(f)
+
+        if payload.get("version") != DEFAULT_LSH_INDEX_VERSION:
+            raise ValueError(
+                f"Unsupported LSH index version {payload.get('version')!r} in {load_path}; "
+                f"rebuild required for version {DEFAULT_LSH_INDEX_VERSION}."
+            )
 
         indexer = cls(
             threshold=payload["threshold"],

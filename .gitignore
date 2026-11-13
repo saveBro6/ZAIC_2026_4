@@ -19,3 +19,5 @@ explain.md
 temp/
 result*/
 *review.md
+# Local pipeline run artifacts (large trace dumps)
+trace_logs_*/

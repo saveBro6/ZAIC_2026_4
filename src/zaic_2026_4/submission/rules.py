@@ -16,6 +16,22 @@ RULE_REGISTRY: dict[str, str] = {
     "OUTPUT_UNPARSEABLE": (
         "Không thể phân tích cú pháp JSON từ đầu ra. Kiểm tra đóng mở ngoặc nhọn và escape chuỗi."
     ),
+    "OUTPUT_TRUNCATED": (
+        "Đầu ra bị cắt do hết ngân sách token trước khi đóng JSON. "
+        "Viết lại reasoning ngắn hơn và xuất ngay một câu SQL hoàn chỉnh."
+    ),
+    "DATE_RANGE_OUT_OF_PERIOD": (
+        "Khoảng ngày trong câu SQL nằm ngoài kỳ thời gian đã xác định từ câu hỏi. "
+        "Dùng đúng start/end trong <temporal_anchor>. Không tự chọn tháng/kỳ khác."
+    ),
+    "CURRENCY_SEPARATOR_MISMATCH": (
+        "Chuỗi tiền tệ dùng dấu phân cách nghìn khác với dấu đang được REPLACE, "
+        "nên giá trị sau CAST bị sai quy mô. Làm sạch đúng dấu phân cách nghìn của cột."
+    ),
+    "LITERAL_PARTIAL_MATCH": (
+        "Cột phân loại được so sánh bằng LIKE với một giá trị đã có chính xác trong dữ liệu. "
+        "Dùng so sánh bằng (LOWER(col) = LOWER('giá trị')) để tránh khớp một phần."
+    ),
     "TYPE_INVALID": (
         "Trường 'type' không hợp lệ theo quy chế DataMate. "
         "Chỉ dùng 1 trong: number, percent, string, date, boolean, list, table, unanswerable, abstain."

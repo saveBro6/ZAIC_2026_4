@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -156,19 +157,33 @@ def test_candidate_generator_all_candidates() -> None:
 
 
 def test_few_shot_sql_examples_structure() -> None:
-    """Verify that FEW_SHOT_SQL_EXAMPLES_VI contains 2 complete examples with proper formatting."""
+    """Verify the few-shot block teaches format only, never a concrete schema or date."""
     assert '<example id="1">' in FEW_SHOT_SQL_EXAMPLES_VI
     assert '<example id="2">' in FEW_SHOT_SQL_EXAMPLES_VI
     assert '<example id="3">' not in FEW_SHOT_SQL_EXAMPLES_VI
     assert "reasoning" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "<think>" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "</think>" in FEW_SHOT_SQL_EXAMPLES_VI
-    assert "don_hang" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "IS NOT NULL" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "BETWEEN" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "SUBSTR" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "REPLACE" in FEW_SHOT_SQL_EXAMPLES_VI
     assert "INTEGER" in FEW_SHOT_SQL_EXAMPLES_VI
+
+    # No real table, column or calendar year may leak from the format examples.
+    for leaked in ("don_hang", "chi_tiet_ban_hang", "Ngày đặt", "Mã đơn", "2026", "2025"):
+        assert leaked not in FEW_SHOT_SQL_EXAMPLES_VI
+
+    # Every example JSON line must parse under the runtime output contract.
+    json_lines = [
+        line.strip()
+        for line in FEW_SHOT_SQL_EXAMPLES_VI.splitlines()
+        if line.strip().startswith("{")
+    ]
+    assert len(json_lines) == 2
+    for line in json_lines:
+        parsed = json.loads(line)
+        assert set(parsed) == {"reasoning", "sql", "type"}
 
 
 def test_format_permuted_schema_xml_with_hint() -> None:
@@ -219,7 +234,8 @@ def test_build_sql_generation_prompt_vietnamese() -> None:
     # Check XML sections
     assert "<system>" in prompt
     assert "<split_rulebook>" in prompt
-    assert "<temporal_anchor>\nas_of_date: 2026-05-25\n</temporal_anchor>" in prompt
+    assert "<temporal_anchor>" in prompt
+    assert "as_of_date: 2026-05-25" in prompt
     assert "<selected_schema>" in prompt
     assert "<few_shot_examples>" in prompt
     assert "<user_question>\nDoanh thu hôm nay là bao nhiêu?\n</user_question>" in prompt
